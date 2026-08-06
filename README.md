@@ -16,7 +16,7 @@ scratch. The model is OpenMW and devilutionX.
 | `tools/tex2png.py` | Converts `.tex` textures to PNG. **761/761.** |
 | `tools/mod2obj.py` | Reads `.mod` models. **2207/2207, 857321 triangles.** Exports OBJ, renders textured previews and turntables. |
 | `tools/mod2html.py` | Packs a model into a single self-contained WebGL viewer — geometry and textures inlined, no libraries, no server. |
-| `tools/bsp.py` | Reads and validates the `.bsp` collision trees. |
+| `tools/bsp.py` | Reads and validates the `.bsp` collision trees; point-in-solid and drop queries. **692/692 validate.** |
 | `tools/refdec.py` | Reference decoder: runs the original's block codec under emulation. A research oracle, not engine code. |
 | `tools/exe_recon.py` | PE reconnaissance: toolchain, imports, RTTI, source paths. |
 | `tools/inventory.py` | Catalogues an installation: sizes, SHA-1, entropy. |
@@ -44,7 +44,7 @@ Hence the name: the engine is called Omen, so ours is a good one.
 | `data/*.zip` | ZIP, compression method **10 (PKWARE DCL Implode)**. Neither `zipfile`, `unzip`, `7z` nor `bsdtar` can read it — the decompressor here is our own. |
 | `.tex` | A mip chain at exactly **4 bits per pixel** down to 8×8, then the 4×4/2×2/1×1 levels as raw BGRA (the 84-byte tail). The 4 bpp coding is a **multi-mode block codec**: 8×4-pixel blocks in 16 bytes, with the top three bits of the block's fourth dword selecting one of four decoders. |
 | `.mod` | Node hierarchy with per-node bounding boxes, **triangle strips over consecutive vertices — there is no index list**, 32-byte vertices (position + UV), animation as (time, key) pairs at 18 fps, and a 21-byte resource table naming the model's texture and sounds. |
-| `.bsp` | Not geometry: a flat array of 24-byte BSP nodes (unit plane + two child indices), no header at all. Collision and visibility. **692/692 trees validate.** |
+| `.bsp` | Not geometry: a flat array of 24-byte BSP nodes (unit plane + two child indices), no header at all. A point is solid when the descent reaches a leaf through the *front* child — **with the point negated**, since the tree is authored in a mirrored frame. **692/692 trees validate.** |
 | `.lua` | Plain text. |
 
 Details, and the hypotheses that turned out to be wrong, live in

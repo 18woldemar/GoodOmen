@@ -16,8 +16,21 @@ debug paths `E:\\mdk2\\Omen\\omPolyhedron.c` and `omCollision.c`.
         u32   back;        // child index, 0xFFFFFFFF for a leaf
     };
 
-Node 0 is the root. Verified across the whole corpus, to the project's 100%
-rule:
+Node 0 is the root, and a point is **inside** when it lies in front of every
+plane down a chain -- that is, when the descent reaches a leaf through the
+*front* child. `l6r8_Stack5.bsp` shows this with nothing to interpret: seven
+planes forming one oriented 4.5-cube, every `back` a leaf, `front` running
+0 -> 1 -> ... -> 6. It is a crate from a stack, and it is a crate.
+
+**The query point must be negated.** The same file settles it: its box is
+centred on (0.73, 219.73, -2.25) while `l6r8_Stack5.mod` is centred on
+(-0.73, -219.73, 2.25) -- the exact opposite. So the tree is authored in a
+mirrored frame, and `contains()` negates before descending. Testing points
+either side of a face then separates them 48/48 on that crate and 799/800 on
+`l3_maze`; without the negation it is 0/800, every point landing on the same
+side.
+
+Verified across the whole corpus, to the project's 100% rule:
 
   * all 692 files are an exact multiple of 24 bytes;
   * all 64387 normals are unit vectors to within 1e-3 — which is what
@@ -79,6 +92,35 @@ def validate(nodes: list) -> None:
         raise BspError(f"expected exactly node 0 unreferenced, got {roots}")
 
 
+def contains(nodes: list, point) -> bool:
+    """Is the point inside solid geometry? Point is in *model* coordinates."""
+    x, y, z = -point[0], -point[1], -point[2]
+    i = 0
+    while True:
+        (nx, ny, nz), dist, front, back = nodes[i]
+        side = nx * x + ny * y + nz * z - dist
+        child = front if side >= 0 else back
+        if child == LEAF:
+            return side >= 0
+        i = child
+
+
+def drop(nodes: list, point, floor: float, step: float = 0.25):
+    """Lower the point along -Z until it enters solid. -> z of contact, or None.
+
+    A crude but honest demonstration that the tree can be collided against:
+    no sweeping, no radius, just a downward march.
+    """
+    x, y, z = point
+    if contains(nodes, (x, y, z)):
+        return None                      # started inside
+    while z > floor:
+        z -= step
+        if contains(nodes, (x, y, z)):
+            return z + step
+    return None
+
+
 def depth(nodes: list) -> int:
     """Deepest path from the root, iteratively — these trees get deep."""
     best, stack = 0, [(0, 1)]
@@ -97,11 +139,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("src", type=Path, help="a .bsp file or a directory")
     ap.add_argument("--validate", action="store_true",
                     help="check every file and report totals")
+    ap.add_argument("--point", nargs=3, type=float, metavar=("X", "Y", "Z"),
+                    help="report whether this point is inside solid geometry")
     args = ap.parse_args(argv)
 
     files = sorted(args.src.glob("*.bsp")) if args.src.is_dir() else [args.src]
     if not files:
         ap.error(f"no .bsp files in {args.src}")
+
+    if args.point:
+        nodes = parse(files[0].read_bytes())
+        validate(nodes)
+        print(f"{files[0].name}: {tuple(args.point)} inside = "
+              f"{contains(nodes, args.point)}")
+        return 0
 
     total = leaves = 0
     bad = []
