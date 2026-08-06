@@ -19,7 +19,7 @@ E:\\mdk2\\Omen\\omTexture.c):
     0x18  u32  0
     0x1c  u32  0
     0x20  u32  0 | 1           has alpha (exactly when channels == 4)
-    0x24  u32  32 | 0          32 -> compressed TEXC chunk; 0 -> raw RGBA
+    0x24  u32  32 | 0          32 -> compressed TEXC chunk; 0 -> raw BGRA
     0x28  f32                  ? compression quality (Textures.txt, shipped
                                alongside, reports RMS/PSNR per texture)
     0x2c  u32  'TEXC'          chunk tag, stored LE so the bytes read "CXET"
@@ -35,17 +35,23 @@ E:\\mdk2\\Omen\\omTexture.c):
 
 Levels run from the full size down to 1x1. Levels of 8x8 and above are coded
 at exactly 4 bits per pixel; the 4x4, 2x2 and 1x1 levels are stored as raw
-RGBA, which is why the file ends with 16+4+1 = 21 pixels = 84 bytes.
+BGRA, which is why the file ends with 16+4+1 = 21 pixels = 84 bytes.
+
+The 4 bpp coding is a multi-mode block codec: 8x4-pixel blocks, 16 bytes each,
+with the top three bits of the block's fourth dword selecting one of four
+decoders (fcn.0045d660 / 0045d8c0 / 0045da90 / 0045dc70 in mdk2Main.exe).
+Those four modes are not decoded yet -- see docs/journal.md.
 
 That gives an exact size identity, asserted below, which holds for all 761
 textures in the corpus:
 
     filesize == 104 + sum(w_i*h_i/2 for levels >= 8x8) + 84
 
-Two facts confirmed against the data, both worth keeping:
+Two facts worth keeping:
 
-  * channel order is RGBA, not BGRA -- the 1x1 level of hw_sky4.tex is
-    (7, 12, 79), a dark blue night sky, and reversed it would be dark red;
+  * channel order is **BGRA**. The engine byte-swaps before handing the buffer
+    to glTexImage2D as GL_RGBA: for 4-channel textures it exchanges bytes 0
+    and 2 in place, for 3-channel ones it writes (src[2], src[1], src[0]).
   * the levels are plain box-filtered mips, not a residual pyramid: for
     398/398 compressed textures, 2x2 == box(4x4) and 1x1 == box(2x2) exactly.
     So each level is a standalone image and can be decoded on its own.
