@@ -1,0 +1,50 @@
+# Ассеты и бинарники игры не попадают в репозиторий НИКОГДА
+*.exe
+*.dll
+*.mdl
+*.pak
+*.lvl
+*.wav
+*.mp3
+*.dds
+*.tga
+*.bik
+*.smk
+game/
+gamedata/
+extracted/
+prefixes/
+testdata/*
+!testdata/*.json
+!testdata/README.md
+
+# Локальные пути к префиксам
+.env.local
+
+# Трейсы и дампы
+*.log
+*.trace
+*.bin
+dumps/
+
+# Ghidra
+*.gpr
+*.rep/
+ghidra_projects/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# распакованные ассеты
+extracted/
+*.tex
+*.mod
+*.bsp
+*.omn
+*.sta
+*.str
+*.ifr
+*.mus
+*.acm
