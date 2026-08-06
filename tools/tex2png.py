@@ -152,6 +152,13 @@ def to_png(data: bytes, decoder=None) -> bytes:
         width, height, pixels = info["width"], info["height"], info["pixels"]
     img = Image.frombytes("RGBA", (width, height), pixels, "raw", "BGRA")
     img = img.convert("RGBA" if info["channels"] == 4 else "RGB")
+    # Rows are stored bottom-up: the engine hands the buffer straight to
+    # glTexImage2D, and OpenGL's texture origin is the bottom-left corner.
+    # PNG's is the top-left, so flip. Verified on ScottR.tex, whose caption
+    # "Inebriated Assistant" only reads the right way up after flipping, and
+    # on font.tex, whose accented glyphs likewise. Applies to both the
+    # compressed and the raw path. Model UVs will need the same convention.
+    img = img.transpose(Image.FLIP_TOP_BOTTOM)
     buf = io.BytesIO()
     img.save(buf, "PNG")
     return buf.getvalue()
