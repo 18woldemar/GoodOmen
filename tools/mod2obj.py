@@ -19,6 +19,12 @@ Sections that matter for geometry:
     8   resource references, 21 bytes: char name[16] + char ext[5]
         (".tex" for the skin, ".wav" for sounds the model triggers)
 
+The texture of a node is named by the single byte at +0x87, which indexes the
+whole reference table -- sounds included, not just the textures. `kurt.mod`
+stores 10 and its refs[10] is "kurt.tex"; `max.mod` stores 12 for refs[12]
+"Max2.tex"; `ml7z_castle.mod` uses all of 0..13 across its 370 nodes. 0xFF
+means the node draws nothing.
+
 **There is no index list.** Each group in section 6 names a run of consecutive
 vertices in section 7, and that run is a triangle strip. Sections 4 and 5 are
 animation — (time, key) pairs and unit quaternions — not geometry.
@@ -29,6 +35,7 @@ Node record fields used here:
     +0x1c float[3]  bbox min      +0x70 u16,u16  first, count -> section 6
     +0x28 float[3]  bbox max      +0x78 u16,u16  count -> section 7
     +0x34 float[3]  translation from the parent
+    +0x87 u8        index into the section 8 reference table; 0xFF = none
 
 Vertices are in **node-local** space. Without walking the hierarchy every part
 collapses onto the origin and the model renders as a blob. Accumulating +0x34
@@ -103,6 +110,7 @@ class Model:
             "group_first": gfirst,
             "group_count": gcount,
             "translation": struct.unpack_from("<3f", d, o + 0x34),
+            "ref": d[o + 0x87],
         }
 
     def _groups(self) -> list[tuple[int, int]]:
@@ -156,19 +164,31 @@ class Model:
             walk(i)
         return out
 
+    def node_texture(self, node: dict) -> str | None:
+        i = node["ref"]
+        if i == 0xFF or i >= len(self.refs):
+            return None
+        name = self.refs[i]
+        return name if name.lower().endswith(".tex") else None
+
     def posed(self) -> tuple[list, list]:
-        """-> (vertices in model space, triangles). Bind pose, no rotations."""
+        """-> (vertices in model space, triangles). Bind pose, no rotations.
+
+        Each vertex is (position, uv, texture name or None).
+        """
         world = self.world_offsets()
         verts, tris = [], []
         for ni, n in enumerate(self.nodes):
             w = world[ni]
+            tex = self.node_texture(n)
             for g in range(n["group_first"],
                            n["group_first"] + n["group_count"]):
                 first, count = self.groups[g]
                 base = len(verts)
                 for k in range(count):
                     pos, uv = self.vertices[first + k]
-                    verts.append((tuple(pos[c] + w[c] for c in range(3)), uv))
+                    verts.append((tuple(pos[c] + w[c] for c in range(3)),
+                                  uv, tex))
                 for k in range(count - 2):
                     a, b, c = base + k, base + k + 1, base + k + 2
                     if k & 1:
@@ -197,9 +217,9 @@ def write_obj(m: Model, path: Path) -> None:
              f"{len(m.nodes)} nodes"]
     for tex in m.textures():
         lines.append(f"# texture {tex}")
-    for pos, _ in verts:
+    for pos, _, _ in verts:
         lines.append("v %.6f %.6f %.6f" % pos)
-    for _, uv in verts:
+    for _, uv, _ in verts:
         lines.append("vt %.6f %.6f" % uv)
     for a, b, c in tris:
         lines.append(f"f {a+1}/{a+1} {b+1}/{b+1} {c+1}/{c+1}")
@@ -221,7 +241,7 @@ def preview(m: Model, path, size: int = 512, yaw: float = 0.6,
     from PIL import Image, ImageDraw
 
     posed, tris = m.posed()
-    verts = [p for p, _ in posed]
+    verts = [p for p, _, _ in posed]
     if not verts:
         raise ModError("model has no vertices")
     xs = [v[0] for v in verts]
@@ -263,13 +283,31 @@ def _preview_textured(m: Model, path, texture: Path,
     import math
     from PIL import Image
 
-    tex = Image.open(texture).convert("RGB")
-    tw, th = tex.size
-    tpix = tex.load()
+    # a single PNG, or a directory of them named after the .tex references
+    cache: dict[str, tuple] = {}
+
+    def sampler(name):
+        if texture.is_dir():
+            if name is None:
+                return None
+            key = Path(name).stem
+            if key not in cache:
+                f = texture / (key + ".png")
+                if not f.is_file():
+                    cache[key] = None
+                else:
+                    im = Image.open(f).convert("RGB")
+                    cache[key] = (im.load(), *im.size)
+            return cache[key]
+        if "" not in cache:
+            im = Image.open(texture).convert("RGB")
+            cache[""] = (im.load(), *im.size)
+        return cache[""]
 
     posed, tris = m.posed()
-    verts = [p for p, _ in posed]
-    uvs = [uv for _, uv in posed]
+    verts = [p for p, _, _ in posed]
+    uvs = [uv for _, uv, _ in posed]
+    vtex = [tn for _, _, tn in posed]
     xs = [v[0] for v in verts]
     ys = [v[1] for v in verts]
     zs = [v[2] for v in verts]
@@ -298,6 +336,10 @@ def _preview_textured(m: Model, path, texture: Path,
         x1 = min(size - 1, int(max(pa[0], pb[0], pc[0])) + 1)
         y0 = max(0, int(min(pa[1], pb[1], pc[1])))
         y1 = min(size - 1, int(max(pa[1], pb[1], pc[1])) + 1)
+        sam = sampler(vtex[a])
+        if sam is None:
+            continue
+        tpix, tw, th = sam
         ua, ub, uc = uvs[a], uvs[b], uvs[c]
         for py in range(y0, y1 + 1):
             for px in range(x0, x1 + 1):
@@ -344,7 +386,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("src", type=Path)
     ap.add_argument("-o", "--out", type=Path, help="write an OBJ here")
     ap.add_argument("--preview", type=Path, help="write a preview PNG here")
-    ap.add_argument("--texture", type=Path, help="PNG to map onto the preview")
+    ap.add_argument("--texture", type=Path,
+                    help="a PNG, or a directory of PNGs named after the "
+                         ".tex references, to map onto the preview")
     ap.add_argument("--turntable", type=Path,
                     help="write an animated GIF spinning around Z")
     ap.add_argument("--frames", type=int, default=24)
