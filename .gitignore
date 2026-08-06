@@ -48,3 +48,6 @@ extracted/
 *.ifr
 *.mus
 *.acm
+
+# derived assets
+png/
