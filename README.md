@@ -13,7 +13,8 @@ scratch. The model is OpenMW and devilutionX.
 | | |
 |---|---|
 | `tools/unpack.py` | Unpacks the `data/*.zip` containers. **4751/4751 files, every CRC32 matches.** |
-| `tools/tex2png.py` | Parses the `.tex` container, 761/761. Converts the uncompressed textures; **the 4 bpp level codec is not decoded yet.** |
+| `tools/tex2png.py` | Converts `.tex` textures to PNG. **761/761.** |
+| `tools/refdec.py` | Reference decoder: runs the original's block codec under emulation. A research oracle, not engine code. |
 | `tools/exe_recon.py` | PE reconnaissance: toolchain, imports, RTTI, source paths. |
 | `tools/inventory.py` | Catalogues an installation: sizes, SHA-1, entropy. |
 | `tools/diffsets.py` | Diffs two editions — a free map of the localisable data. |
@@ -38,7 +39,7 @@ Hence the name: the engine is called Omen, so ours is a good one.
 | | |
 |---|---|
 | `data/*.zip` | ZIP, compression method **10 (PKWARE DCL Implode)**. Neither `zipfile`, `unzip`, `7z` nor `bsdtar` can read it — the decompressor here is our own. |
-| `.tex` | Container solved: a mip chain at exactly **4 bits per pixel** down to 8×8, then the 4×4/2×2/1×1 levels as raw RGBA (the 84-byte tail). Channel order is RGBA and the levels are plain box-filtered mips. The 4 bpp codec itself is **unsolved** — DXT1 and two other models are refuted in the journal. Fonts are uncompressed and convert fine. |
+| `.tex` | A mip chain at exactly **4 bits per pixel** down to 8×8, then the 4×4/2×2/1×1 levels as raw BGRA (the 84-byte tail). The 4 bpp coding is a **multi-mode block codec**: 8×4-pixel blocks in 16 bytes, with the top three bits of the block's fourth dword selecting one of four decoders. |
 | `.mod` | Models (2207 files), type tag 2002. Not yet decoded. |
 | `.bsp` | Level geometry (692 files), no signature. Not yet decoded. |
 | `.lua` | Plain text. |
@@ -52,7 +53,7 @@ traces, apitrace on the GL stream — is in
 
 - [x] **M0** All file types, imports, toolchain and RTTI status known
 - [x] **M1** Unpacker extracts every resource from the containers
-- [ ] **M2** Every texture converts to PNG without artefacts — *container done, codec open*
+- [x] **M2** Every texture converts to PNG without artefacts
 - [ ] **M3** Kurt's model spins in a viewer, textured
 - [ ] **M4** Level geometry loads, free camera flies through it
 - [ ] **M5** Skeletal animation plays back

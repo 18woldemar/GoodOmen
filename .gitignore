@@ -51,3 +51,6 @@ extracted/
 
 # derived assets
 png/
+
+# reference decoder needs unicorn
+.venv/

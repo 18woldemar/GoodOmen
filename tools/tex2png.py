@@ -2,10 +2,10 @@
 """
 tex2png.py -- parse .tex textures; convert to PNG what can be decoded.
 
-**The 4-bit-per-pixel codec is NOT decoded yet.** The container around it is,
-and this tool validates that container across the whole corpus. Only the
-uncompressed textures (the two font atlases) and the raw tail levels convert
-to PNG today. See docs/journal.md for the codec hypotheses already ruled out.
+The container is parsed here. The 4 bpp block codec is not reimplemented yet,
+so compressed levels are decoded by `tools/refdec.py`, which emulates the
+original routine and needs `mdk2Main.exe` (path from --exe or $MDK2_GOG).
+That is a research oracle, not engine code -- see rule 2 in CLAUDE.md.
 
 The .tex format (Omen renderer; the binary's debug paths name
 E:\\mdk2\\Omen\\omTexture.c):
@@ -65,9 +65,12 @@ from __future__ import annotations
 
 import argparse
 import io
+import os
 import struct
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 TYPE_TEX = 2001
 TAG_TEXC = 0x54455843  # 'TEXC'
@@ -134,14 +137,20 @@ def parse(data: bytes) -> dict:
             "thumb": data[-TAIL_BYTES:-20]}
 
 
-def to_png(data: bytes) -> bytes:
+def to_png(data: bytes, decoder=None) -> bytes:
     from PIL import Image
     info = parse(data)
     if info["compressed"]:
-        raise CodecNotDecoded(
-            "4 bpp level codec not decoded yet (see docs/journal.md)")
-    img = Image.frombytes("RGBA", (info["width"], info["height"]),
-                          info["pixels"])
+        if decoder is None:
+            raise CodecNotDecoded("compressed level needs the reference "
+                                  "decoder; pass --exe or set MDK2_GOG")
+        import refdec
+        off, size, width, height = refdec.levels(data)[0]
+        pixels = bytes(decoder.decode_level(width, height,
+                                            data[off:off + size]))
+    else:
+        width, height, pixels = info["width"], info["height"], info["pixels"]
+    img = Image.frombytes("RGBA", (width, height), pixels, "raw", "BGRA")
     img = img.convert("RGBA" if info["channels"] == 4 else "RGB")
     buf = io.BytesIO()
     img.save(buf, "PNG")
@@ -154,6 +163,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("-o", "--out", type=Path)
     ap.add_argument("--validate", action="store_true",
                     help="only check that the container parses; write nothing")
+    ap.add_argument("--exe", type=Path,
+                    default=Path(os.environ.get("MDK2_GOG", ".")) /
+                    "mdk2Main.exe",
+                    help="mdk2Main.exe, for decoding compressed levels")
     args = ap.parse_args(argv)
 
     files = sorted(args.src.glob("*.tex")) if args.src.is_dir() else [args.src]
@@ -164,6 +177,11 @@ def main(argv: list[str] | None = None) -> int:
             ap.error("need -o OUT or --validate")
         args.out.mkdir(parents=True, exist_ok=True)
 
+    decoder = None
+    if not args.validate and args.exe.is_file():
+        import refdec
+        decoder = refdec.RefDecoder(args.exe)
+
     written = skipped = 0
     bad = []
     for f in files:
@@ -172,7 +190,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.validate:
                 parse(data)
             else:
-                (args.out / (f.stem + ".png")).write_bytes(to_png(data))
+                (args.out / (f.stem + ".png")).write_bytes(
+                    to_png(data, decoder))
             written += 1
         except CodecNotDecoded:
             skipped += 1
