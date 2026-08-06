@@ -59,7 +59,7 @@ traces, apitrace on the GL stream — is in
 - [x] **M2** Every texture converts to PNG without artefacts
 - [x] **M3** Kurt's model spins in a viewer, textured
 - [x] **M4** Level geometry loads, free camera flies through it
-- [ ] **M5** Skeletal animation plays back
+- [x] **M5** Skeletal animation plays back
 - [ ] **M6** The character runs around a level, collision works
 - [ ] **M7** Scripts, triggers, enemies
 - [ ] **M8** The first level can be played end to end

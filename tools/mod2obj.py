@@ -25,6 +25,18 @@ stores 10 and its refs[10] is "kurt.tex"; `max.mod` stores 12 for refs[12]
 "Max2.tex"; `ml7z_castle.mod` uses all of 0..13 across its 370 nodes. 0xFF
 means the node draws nothing.
 
+Animation, all of it validated across the corpus:
+
+    1   animation table, 32 bytes: {u32 id; u32 -1; f32 length; f32 4.0;
+        u32 0; u32 0; u32 first_channel; u32 channel_count}
+    2   channels, 8 bytes: {u16 target; u16 0; u16 first_key; u16 key_count}
+    3   targets, 4 bytes: {u8 kind; u8 ?; u8 ?; u8 node}
+    4   keys, 8 bytes: {f32 time in [0,1]; u32 value}
+    5   value pool, 16 bytes, meaning set by the channel's kind:
+        kind 2 -> rotation, a unit quaternion (100.000% of 328782 keys)
+        kind 1 -> translation, three floats (99.999% of 98456)
+        kinds 32..36 -> scalars: sound volume, min and max distance
+
 **There is no index list.** Each group in section 6 names a run of consecutive
 vertices in section 7, and that run is a triangle strip. Sections 4 and 5 are
 animation — (time, key) pairs and unit quaternions — not geometry.
@@ -196,6 +208,112 @@ class Model:
                     tris.append((a, b, c))
         return verts, tris
 
+    def animations(self) -> list[dict]:
+        o = self._sec(1)
+        if o is None:
+            return []
+        oc, ot, ok = self._sec(2), self._sec(3), self._sec(4)
+        out = []
+        for i in range(self.counts[0]):
+            rec = struct.unpack_from("<8I", self.data, o + i * 32)
+            length = struct.unpack_from("<f", self.data, o + i * 32 + 8)[0]
+            channels = []
+            for j in range(rec[7]):
+                target, _z, first, count = struct.unpack_from(
+                    "<4H", self.data, oc + (rec[6] + j) * 8)
+                if target >= self.counts[2]:
+                    continue
+                kind = self.data[ot + target * 4]
+                node = self.data[ot + target * 4 + 3]
+                keys = [struct.unpack_from("<fI", self.data, ok + (first + k) * 8)
+                        for k in range(count) if first + k < self.counts[3]]
+                channels.append({"kind": kind, "node": node, "keys": keys})
+            out.append({"id": rec[0], "length": length, "channels": channels})
+        return out
+
+    def _value(self, index: int) -> tuple[float, float, float, float]:
+        return struct.unpack_from("<4f", self.data, self._sec(5) + index * 16)
+
+    def sample(self, channel: dict, t: float):
+        """Nearest-key sample. Interpolation would need the value semantics
+        per kind; stepping is enough to see a pose and to check the chain."""
+        keys = channel["keys"]
+        if not keys:
+            return None
+        best = keys[0]
+        for time, value in keys:
+            if time != time:          # NaN, a one-key channel with no time
+                continue
+            if time <= t:
+                best = (time, value)
+        return self._value(best[1])
+
+    def animate(self, anim: dict, t: float) -> tuple[list, list]:
+        """-> (vertices, triangles) with the animation applied at t in [0,1]."""
+        n = len(self.nodes)
+        trans = [list(node["translation"]) for node in self.nodes]
+        quat = [(1.0, 0.0, 0.0, 0.0)] * n   # (w, x, y, z)
+        for ch in anim["channels"]:
+            if ch["node"] >= n:
+                continue
+            v = self.sample(ch, t)
+            if v is None:
+                continue
+            if ch["kind"] == 1:
+                trans[ch["node"]] = list(v[:3])
+            elif ch["kind"] == 2:
+                quat[ch["node"]] = v
+
+        def rot(q, p):
+            # component order is (w, x, y, z): the rest pose stores
+            # (1, -0, -0, -0) for an unrotated bone, and (0.7071, -0.7071, 0, 0)
+            # for a quarter turn about X. Reading it as (x, y, z, w) gives no
+            # identity quaternion anywhere in the file.
+            w, x, y, z = q
+            return (
+                p[0]*(1-2*(y*y+z*z)) + p[1]*2*(x*y-z*w) + p[2]*2*(x*z+y*w),
+                p[0]*2*(x*y+z*w) + p[1]*(1-2*(x*x+z*z)) + p[2]*2*(y*z-x*w),
+                p[0]*2*(x*z-y*w) + p[1]*2*(y*z+x*w) + p[2]*(1-2*(x*x+y*y)))
+
+        world: list = [None] * n
+
+        def walk(i):
+            if world[i] is None:
+                p = self.nodes[i]["parent"]
+                if p is None:
+                    world[i] = (quat[i], tuple(trans[i]))
+                else:
+                    pq, pt = walk(p)
+                    r = rot(pq, trans[i])
+                    qw, qx, qy, qz = pq
+                    w, x, y, z = quat[i]
+                    world[i] = ((qw*w - qx*x - qy*y - qz*z,
+                                 qw*x + qx*w + qy*z - qz*y,
+                                 qw*y - qx*z + qy*w + qz*x,
+                                 qw*z + qx*y - qy*x + qz*w),
+                                tuple(pt[c] + r[c] for c in range(3)))
+            return world[i]
+
+        verts, tris = [], []
+        for ni, node in enumerate(self.nodes):
+            q, off = walk(ni)
+            tex = self.node_texture(node)
+            for g in range(node["group_first"],
+                           node["group_first"] + node["group_count"]):
+                first, count = self.groups[g]
+                base = len(verts)
+                for k in range(count):
+                    pos, uv = self.vertices[first + k][:2]
+                    r = rot(q, pos)
+                    verts.append((tuple(r[c] + off[c] for c in range(3)),
+                                  uv, tex))
+                for k in range(count - 2):
+                    a, b, c = base + k, base + k + 1, base + k + 2
+                    if k & 1:
+                        b, c = c, b
+                    tris.append((a, b, c))
+        return verts, tris
+
     def triangles(self) -> list[tuple[int, int, int]]:
         """Each group is a triangle strip over consecutive vertices."""
         tris = []
@@ -227,7 +345,7 @@ def write_obj(m: Model, path: Path) -> None:
 
 
 def preview(m: Model, path, size: int = 512, yaw: float = 0.6,
-            texture: Path | None = None) -> None:
+            texture: Path | None = None, frame=None) -> None:
     """Software render, purely to eyeball that the geometry works.
 
     With a texture it rasterises with a z-buffer and affine UV interpolation;
@@ -236,11 +354,11 @@ def preview(m: Model, path, size: int = 512, yaw: float = 0.6,
     flipped on sampling -- the same convention noted in tools/tex2png.py.
     """
     if texture is not None:
-        return _preview_textured(m, path, texture, size, yaw)
+        return _preview_textured(m, path, texture, size, yaw, frame)
     import math
     from PIL import Image, ImageDraw
 
-    posed, tris = m.posed()
+    posed, tris = (m.animate(*frame) if frame else m.posed())
     verts = [p for p, _, _ in posed]
     if not verts:
         raise ModError("model has no vertices")
@@ -279,7 +397,7 @@ def preview(m: Model, path, size: int = 512, yaw: float = 0.6,
 
 
 def _preview_textured(m: Model, path, texture: Path,
-                      size: int, yaw: float) -> None:
+                      size: int, yaw: float, frame=None) -> None:
     import math
     from PIL import Image
 
@@ -304,7 +422,7 @@ def _preview_textured(m: Model, path, texture: Path,
             cache[""] = (im.load(), *im.size)
         return cache[""]
 
-    posed, tris = m.posed()
+    posed, tris = (m.animate(*frame) if frame else m.posed())
     verts = [p for p, _, _ in posed]
     uvs = [uv for _, uv, _ in posed]
     vtex = [tn for _, _, tn in posed]
@@ -364,17 +482,19 @@ def _preview_textured(m: Model, path, texture: Path,
 
 
 def turntable(m: Model, path: Path, texture: Path | None = None,
-              frames: int = 24, size: int = 320) -> None:
-    """Spin the model around Z and write an animated GIF."""
+              frames: int = 24, size: int = 320, anim: int | None = None) -> None:
+    """Write an animated GIF: a turntable, or an animation played in place."""
     import io
     import math
     from PIL import Image
 
     shots = []
+    clip = m.animations()[anim] if anim is not None else None
     for i in range(frames):
         buf = io.BytesIO()
-        preview(m, buf, size=size, yaw=2 * math.pi * i / frames,
-                texture=texture)
+        yaw = 0.7 if clip else 2 * math.pi * i / frames
+        preview(m, buf, size=size, yaw=yaw, texture=texture,
+                frame=(clip, i / frames) if clip else None)
         buf.seek(0)
         shots.append(Image.open(buf).convert("P", palette=Image.ADAPTIVE))
     shots[0].save(path, save_all=True, append_images=shots[1:],
@@ -392,6 +512,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--turntable", type=Path,
                     help="write an animated GIF spinning around Z")
     ap.add_argument("--frames", type=int, default=24)
+    ap.add_argument("--anim", type=int,
+                    help="animation index; with --turntable, plays it in "
+                         "place instead of spinning the model")
     ap.add_argument("--stats", action="store_true",
                     help="parse a whole directory and report")
     args = ap.parse_args(argv)
@@ -416,15 +539,16 @@ def main(argv: list[str] | None = None) -> int:
     m = Model(args.src.read_bytes())
     print(f"{args.src.name}: {len(m.nodes)} nodes, {len(m.vertices)} vertices, "
           f"{len(m.groups)} strips, {len(m.triangles())} triangles, "
-          f"textures {m.textures()}", file=sys.stderr)
+          f"{len(m.animations())} animations, textures {m.textures()}",
+          file=sys.stderr)
     if args.out:
         write_obj(m, args.out)
     if args.preview:
         preview(m, args.preview, texture=args.texture)
     if args.turntable:
         turntable(m, args.turntable, texture=args.texture,
-                  frames=args.frames)
-    if not args.out and not args.preview:
+                  frames=args.frames, anim=args.anim)
+    if not args.out and not args.preview and not args.turntable:
         for n in m.nodes[:40]:
             print(f"  {n['name']:<20} parent={n['parent']} "
                   f"groups {n['group_first']}+{n['group_count']}")
