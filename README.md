@@ -15,6 +15,7 @@ scratch. The model is OpenMW and devilutionX.
 | `tools/unpack.py` | Unpacks the `data/*.zip` containers. **4751/4751 files, every CRC32 matches.** |
 | `tools/tex2png.py` | Converts `.tex` textures to PNG. **761/761.** |
 | `tools/mod2obj.py` | Reads `.mod` models. **2207/2207, 857321 triangles.** Exports OBJ, renders textured previews and turntables. |
+| `tools/mod2html.py` | Packs a model into a single self-contained WebGL viewer — geometry and textures inlined, no libraries, no server. |
 | `tools/bsp.py` | Reads and validates the `.bsp` collision trees. |
 | `tools/refdec.py` | Reference decoder: runs the original's block codec under emulation. A research oracle, not engine code. |
 | `tools/exe_recon.py` | PE reconnaissance: toolchain, imports, RTTI, source paths. |
@@ -57,7 +58,7 @@ traces, apitrace on the GL stream — is in
 - [x] **M1** Unpacker extracts every resource from the containers
 - [x] **M2** Every texture converts to PNG without artefacts
 - [x] **M3** Kurt's model spins in a viewer, textured
-- [ ] **M4** Level geometry loads, free camera flies through it
+- [x] **M4** Level geometry loads, free camera flies through it
 - [ ] **M5** Skeletal animation plays back
 - [ ] **M6** The character runs around a level, collision works
 - [ ] **M7** Scripts, triggers, enemies

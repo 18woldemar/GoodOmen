@@ -54,3 +54,6 @@ png/
 
 # reference decoder needs unicorn
 .venv/
+
+# generated viewers embed assets
+view/
