@@ -187,8 +187,17 @@ class Model:
         """-> (vertices in model space, triangles). Bind pose, no rotations.
 
         Each vertex is (position, uv, texture name or None).
+
+        Only *animated* models store their vertices in node-local space and
+        need the node translations summed down the parent chain. A static
+        model -- one with no animation table, which is 1061 of the 2207 -- has
+        its vertices in world space already, and adding the translation
+        double-counts: `l3_maze.mod` comes out at 1.94x its true size, and its
+        coordinates then no longer match the plane distances in `l3_maze.bsp`.
         """
-        world = self.world_offsets()
+        animated = self._sec(1) is not None
+        world = (self.world_offsets() if animated
+                 else [(0.0, 0.0, 0.0)] * len(self.nodes))
         verts, tris = [], []
         for ni, n in enumerate(self.nodes):
             w = world[ni]
