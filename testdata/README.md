@@ -1,2 +1,2 @@
-Здесь лежат ТОЛЬКО метаданные: хеши, офсеты, JSON-инвентаризации.
-Никаких файлов игры. См. .gitignore.
+Metadata ONLY: hashes, offsets, JSON inventories.
+No game files. See .gitignore.

@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-exe_recon.py -- разведка PE-бинарника.
+exe_recon.py -- reconnaissance of a PE binary.
 
-Отвечает на вопросы первой сессии:
-  1. Какой графический API? (DDRAW/D3DIM700 vs OPENGL32 vs GLIDE)
-  2. Каким компилятором собрано? (Rich header -- точнее любых догадок)
-  3. Есть ли MSVC RTTI? Если да -- из бинаря вываливаются НАСТОЯЩИЕ имена
-     классов движка. Для проекта без SDK это самый ценный артефакт.
-  4. Остались ли пути к исходникам в ассертах? (структура дерева BioWare)
-  5. Какие расширения файлов упоминает движок? (список форматов, которые
-     предстоит разобрать)
+It answers the first-session questions:
+  1. Which graphics API? (DDRAW/D3DIM700 vs OPENGL32 vs GLIDE)
+  2. Which compiler built it? (the Rich header beats any guessing)
+  3. Is MSVC RTTI present? If so, the REAL engine class names fall out of the
+     binary. With no SDK to work from, that is the single most valuable find.
+  4. Did source paths survive in the asserts? (the shape of BioWare's tree)
+  5. Which file extensions does the engine mention? (the list of formats
+     still to be decoded)
 
 Usage:
     python3 exe_recon.py MDK2.exe
@@ -29,9 +29,9 @@ from pathlib import Path
 try:
     import pefile
 except ImportError:
-    sys.exit("нужен pefile:  pip install pefile  (или pacman -S python-pefile)")
+    sys.exit("pefile required:  pip install pefile  (or pacman -S python-pefile)")
 
-# Импорты, по которым сразу видно графический/звуковой стек.
+# Imports that give away the graphics and sound stack at a glance.
 API_HINTS = {
     "ddraw": "DirectDraw (2D surfaces / legacy)",
     "d3dim": "Direct3D Immediate Mode (retained D3D <= 7)",
@@ -42,21 +42,21 @@ API_HINTS = {
     "glide": "3dfx Glide",
     "dsound": "DirectSound",
     "dinput": "DirectInput",
-    "dplayx": "DirectPlay (сетевой код)",
-    "winmm": "MCI / MIDI / таймеры",
-    "msvcrt": "рантайм MSVC",
-    "msvcp": "STL MSVC",
+    "dplayx": "DirectPlay (networking)",
+    "winmm": "MCI / MIDI / timers",
+    "msvcrt": "MSVC runtime",
+    "msvcp": "MSVC STL",
     "binkw32": "Bink Video",
     "smackw32": "Smacker Video",
     "mss32": "Miles Sound System",
 }
 
-# Ориентиры по build id из Rich header. Список неполный -- уточняем по
-# внешним таблицам, но порядок величин определяет эпоху компилятора.
+# Landmarks for the build ids in the Rich header. The list is incomplete --
+# check external tables for detail -- but the magnitude pins the compiler era.
 BUILD_HINTS = {
     8168: "MSVC 6.0 (12.00.8168, SP5)",
     8804: "MSVC 6.0 (12.00.8804, SP6)",
-    8078: "MSVC 6.0 (ранний SP)",
+    8078: "MSVC 6.0 (early SP)",
     9782: "MSVC 7.0 / .NET 2002",
     3077: "MSVC 5.0",
 }
@@ -79,7 +79,7 @@ def ascii_strings(data: bytes, minlen: int) -> list[bytes]:
 
 
 def demangle_rtti(sym: bytes) -> str:
-    """'.?AVCFoo@Bar@@' -> 'Bar::CFoo' (грубо, но читаемо)."""
+    """'.?AVCFoo@Bar@@' -> 'Bar::CFoo' (crude, but readable)."""
     s = sym.decode("ascii", "replace")
     kind = {"V": "class", "U": "struct", "W": "enum"}.get(s[3], "?")
     body = s[4:]
@@ -98,7 +98,7 @@ def report_rich(pe) -> dict:
         return out
     out["present"] = True
     values = rich.get("values", [])
-    # values -- плоский список: [comp_id, count, comp_id, count, ...]
+    # values is a flat list: [comp_id, count, comp_id, count, ...]
     for i in range(0, len(values) - 1, 2):
         comp_id, count = values[i], values[i + 1]
         prod_id, build = comp_id >> 16, comp_id & 0xFFFF
@@ -115,7 +115,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("exe", type=Path)
-    ap.add_argument("--json", type=Path, help="сохранить полный результат")
+    ap.add_argument("--json", type=Path, help="save the full result")
     ap.add_argument("--min-str", type=int, default=5)
     ap.add_argument("--max-show", type=int, default=40)
     args = ap.parse_args()
@@ -126,10 +126,10 @@ def main() -> int:
 
     oh, fh = pe.OPTIONAL_HEADER, pe.FILE_HEADER
     print(f"=== {args.exe.name}  ({len(raw) / 2**20:.2f} MiB) ===\n")
-    print(f"машина           0x{fh.Machine:04x} "
-          f"({'x86-32' if fh.Machine == 0x14c else 'иная'})")
-    print(f"линкер           {oh.MajorLinkerVersion}.{oh.MinorLinkerVersion:02d}"
-          f"   {'-> эпоха MSVC 6' if oh.MajorLinkerVersion == 6 else ''}")
+    print(f"machine          0x{fh.Machine:04x} "
+          f"({'x86-32' if fh.Machine == 0x14c else 'other'})")
+    print(f"linker           {oh.MajorLinkerVersion}.{oh.MinorLinkerVersion:02d}"
+          f"   {'-> MSVC 6 era' if oh.MajorLinkerVersion == 6 else ''}")
     print(f"image base       0x{oh.ImageBase:08x}")
     print(f"entry point      0x{oh.AddressOfEntryPoint:08x}")
     print(f"timestamp        0x{fh.TimeDateStamp:08x}")
@@ -141,15 +141,15 @@ def main() -> int:
         "timestamp": fh.TimeDateStamp,
     }
 
-    # --- секции -------------------------------------------------------
-    print("\n--- секции ---")
-    print(f"{'имя':<10} {'vaddr':>10} {'vsize':>10} {'rawsize':>10}  ent")
+    # --- sections -----------------------------------------------------
+    print("\n--- sections ---")
+    print(f"{'name':<10} {'vaddr':>10} {'vsize':>10} {'rawsize':>10}  ent")
     sections = []
     for s in pe.sections:
         name = s.Name.rstrip(b"\x00").decode("ascii", "replace")
         data = s.get_data()
         e = entropy(data[: 64 * 1024])
-        flag = "  <-- УПАКОВАНО?" if e > 7.5 and s.SizeOfRawData > 4096 else ""
+        flag = "  <-- PACKED?" if e > 7.5 and s.SizeOfRawData > 4096 else ""
         print(f"{name:<10} 0x{s.VirtualAddress:08x} {s.Misc_VirtualSize:>10} "
               f"{s.SizeOfRawData:>10}  {e:.2f}{flag}")
         sections.append({"name": name, "vaddr": s.VirtualAddress,
@@ -160,19 +160,19 @@ def main() -> int:
     # --- Rich header --------------------------------------------------
     rich = report_rich(pe)
     result["rich"] = rich
-    print("\n--- Rich header (тулчейн) ---")
+    print("\n--- Rich header (toolchain) ---")
     if rich["present"]:
         for e in sorted(rich["entries"], key=lambda x: -x["count"]):
             hint = f"  {e['hint']}" if e["hint"] else ""
             print(f"  prodID {e['prod_id']:>4}  build {e['build']:>6}  "
-                  f"объектников {e['count']:>5}{hint}")
-        print("\n  Это точная подпись компилятора. Для декомпиляции критично,")
-        print("  для переимплементации -- полезный контекст (ABI, выравнивание).")
+                  f"objects {e['count']:>5}{hint}")
+        print("\n  This is an exact compiler signature. Critical for decompilation,")
+        print("  and useful context for a reimplementation (ABI, alignment).")
     else:
-        print("  отсутствует (не MSVC, либо вырезан упаковщиком)")
+        print("  absent (not MSVC, or stripped by a packer)")
 
-    # --- импорты ------------------------------------------------------
-    print("\n--- импорты ---")
+    # --- imports ------------------------------------------------------
+    print("\n--- imports ---")
     imports = {}
     if hasattr(pe, "DIRECTORY_ENTRY_IMPORT"):
         for entry in pe.DIRECTORY_ENTRY_IMPORT:
@@ -183,29 +183,29 @@ def main() -> int:
             low = dll.lower()
             hint = next((v for k, v in API_HINTS.items() if k in low), "")
             mark = f"   <== {hint}" if hint else ""
-            print(f"  {dll:<20} {len(names):>4} симв.{mark}")
+            print(f"  {dll:<20} {len(names):>4} sym.{mark}")
     result["imports"] = imports
 
-    # --- строки: RTTI, пути, расширения --------------------------------
+    # --- strings: RTTI, paths, extensions ------------------------------
     rtti = sorted({demangle_rtti(m) for m in RE_RTTI.findall(raw)})
     result["rtti"] = rtti
-    print(f"\n--- MSVC RTTI: найдено {len(rtti)} имён типов ---")
+    print(f"\n--- MSVC RTTI: {len(rtti)} type names found ---")
     if rtti:
-        print("  ЭТО ДЖЕКПОТ: настоящие имена классов движка.")
+        print("  THIS IS THE JACKPOT: the real engine class names.")
         for name in rtti[: args.max_show]:
             print(f"    {name}")
         if len(rtti) > args.max_show:
-            print(f"    ... ещё {len(rtti) - args.max_show}, полный список в --json")
+            print(f"    ... {len(rtti) - args.max_show} more; full list via --json")
     else:
-        print("  нет (RTTI выключен при сборке) -- имена восстанавливаем по поведению")
+        print("  none (RTTI disabled at build time) -- recover names from behaviour")
 
     srcpaths = sorted({m.decode("ascii", "replace") for m in RE_SRCPATH.findall(raw)})
     result["source_paths"] = srcpaths
-    print(f"\n--- пути к исходникам: {len(srcpaths)} ---")
+    print(f"\n--- source paths: {len(srcpaths)} ---")
     for p in srcpaths[: args.max_show]:
         print(f"    {p}")
     if len(srcpaths) > args.max_show:
-        print(f"    ... ещё {len(srcpaths) - args.max_show}")
+        print(f"    ... {len(srcpaths) - args.max_show} more")
 
     strings = ascii_strings(raw, args.min_str)
     ext_counter = Counter()
@@ -213,21 +213,21 @@ def main() -> int:
         for m in RE_EXTREF.finditer(s):
             ext_counter[m.group(1).decode()] += 1
     result["referenced_extensions"] = ext_counter.most_common(60)
-    print("\n--- расширения, упомянутые в строках (кандидаты в форматы) ---")
+    print("\n--- extensions mentioned in strings (candidate formats) ---")
     noise = {"dll", "exe", "com", "sys", "ini", "txt", "tmp", "log",
              "text", "data", "rdata", "rsrc", "reloc", "bss", "idata"}
     for ext, cnt in ext_counter.most_common(40):
-        tag = "" if ext in noise else "   <-- разбирать"
+        tag = "" if ext in noise else "   <-- decode this"
         print(f"    .{ext:<6} {cnt:>5}{tag}")
 
     if args.json:
         result["strings_sample"] = [s.decode("ascii", "replace")
                                     for s in strings[:5000]]
         args.json.write_text(json.dumps(result, indent=2, ensure_ascii=False))
-        print(f"\nполный результат -> {args.json}")
+        print(f"\nfull result -> {args.json}")
 
-    print("\nследующий шаг: сверить список расширений выше с inventory.py --summary;")
-    print("расширения, которые есть в строках, но не на диске -- внутри контейнеров.")
+    print("\nnext step: check the extension list above against inventory.py --summary;")
+    print("extensions present in the strings but not on disk live inside containers.")
     return 0
 
 

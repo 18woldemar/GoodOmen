@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-diffsets.py -- сравнение двух установок игры (например GOG vs 1С).
+diffsets.py -- compare two installations of the game (e.g. GOG vs 1C).
 
-Смысл: файлы, идентичные в английском и русском изданиях, содержат только
-геометрию/логику. Отличающиеся файлы содержат ЛОКАЛИЗУЕМЫЕ ДАННЫЕ -- строки,
-шрифты, озвучку. Это бесплатная карта того, где внутри форматов сидят строковые
-таблицы, без всякого дизассемблера.
+The idea: files that are identical in the English and Russian editions hold
+nothing but geometry and logic. Files that differ hold LOCALISABLE DATA --
+strings, fonts, voice lines. That is a free map of where the string tables sit
+inside the formats, obtained without touching a disassembler.
 
-Дополнительно: для отличающихся файлов одинакового размера считает карту
-различающихся байтовых диапазонов -- если различия локализованы в одном
-блоке, это почти наверняка строковая секция с фиксированным офсетом.
+On top of that, for differing files of equal size it computes a map of the
+differing byte ranges: if the differences are confined to one block, that block
+is almost certainly a string section at a fixed offset.
 
 Usage:
     python3 diffsets.py gog.json ru1c.json --report diff.md
@@ -31,7 +31,7 @@ def load(p: Path) -> tuple[str, dict[str, dict]]:
 
 
 def diff_ranges(a: Path, b: Path, granularity: int = 4096) -> list[tuple[int, int]]:
-    """Блоки, в которых файлы различаются. Только для файлов равного размера."""
+    """Blocks in which the files differ. Only meaningful for equal sizes."""
     ranges: list[tuple[int, int]] = []
     with a.open("rb") as fa, b.open("rb") as fb:
         offset = 0
@@ -57,11 +57,11 @@ def diff_ranges(a: Path, b: Path, granularity: int = 4096) -> list[tuple[int, in
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("inv_a", type=Path, help="inventory JSON издания A")
-    ap.add_argument("inv_b", type=Path, help="inventory JSON издания B")
-    ap.add_argument("--report", type=Path, help="записать markdown-отчёт")
+    ap.add_argument("inv_a", type=Path, help="inventory JSON of edition A")
+    ap.add_argument("inv_b", type=Path, help="inventory JSON of edition B")
+    ap.add_argument("--report", type=Path, help="write a markdown report")
     ap.add_argument("--byteranges", action="store_true",
-                    help="считать карту различий (нужны --root-a/--root-b)")
+                    help="compute the difference map (needs --root-a/--root-b)")
     ap.add_argument("--root-a", type=Path)
     ap.add_argument("--root-b", type=Path)
     ap.add_argument("--granularity", type=int, default=4096)
@@ -82,41 +82,41 @@ def main() -> int:
 
     lines: list[str] = []
     w = lines.append
-    w("# Дифф изданий\n")
-    w(f"- A: `{root_a}` ({len(a)} файлов)")
-    w(f"- B: `{root_b}` ({len(b)} файлов)\n")
-    w(f"| категория | n |")
+    w("# Edition diff\n")
+    w(f"- A: `{root_a}` ({len(a)} files)")
+    w(f"- B: `{root_b}` ({len(b)} files)\n")
+    w(f"| category | n |")
     w(f"|---|---|")
-    w(f"| идентичны | {len(identical)} |")
-    w(f"| отличаются | {len(differing)} |")
-    w(f"| из них тот же размер | {len(same_size)} |")
-    w(f"| только в A | {len(only_a)} |")
-    w(f"| только в B | {len(only_b)} |")
+    w(f"| identical | {len(identical)} |")
+    w(f"| differing | {len(differing)} |")
+    w(f"| of those, same size | {len(same_size)} |")
+    w(f"| only in A | {len(only_a)} |")
+    w(f"| only in B | {len(only_b)} |")
 
-    w("\n## Отличаются при одинаковом размере\n")
-    w("Первоочередные кандидаты: локализуемые данные лежат по фиксированным "
-      "офсетам, значит формат имеет жёсткую раскладку.\n")
+    w("\n## Differing, same size\n")
+    w("The first candidates to look at: the localisable data sits at fixed "
+      "offsets, so the format has a rigid layout.\n")
     for k in same_size[:200]:
         w(f"- `{a[k]['path']}` ({a[k]['size']} b, ent {a[k]['entropy']})")
 
-    w("\n## Отличаются размером\n")
+    w("\n## Differing in size\n")
     for k in [x for x in differing if x not in set(same_size)][:200]:
         w(f"- `{a[k]['path']}` A={a[k]['size']} B={b[k]['size']}")
 
-    w("\n## Только в A\n")
+    w("\n## Only in A\n")
     for k in only_a[:200]:
         w(f"- `{a[k]['path']}`")
-    w("\n## Только в B\n")
+    w("\n## Only in B\n")
     for k in only_b[:200]:
         w(f"- `{b[k]['path']}`")
 
     if args.byteranges:
         if not (args.root_a and args.root_b):
-            print("--byteranges требует --root-a и --root-b")
+            print("--byteranges requires --root-a and --root-b")
             return 1
-        w("\n## Карта различающихся блоков\n")
-        w(f"Гранулярность {args.granularity} b. Компактный набор диапазонов = "
-          "строковая секция с фиксированным офсетом.\n")
+        w("\n## Map of differing blocks\n")
+        w(f"Granularity {args.granularity} b. A compact set of ranges means a "
+          "string section at a fixed offset.\n")
         for k in same_size[:60]:
             pa = args.root_a / a[k]["path"]
             pb = args.root_b / b[k]["path"]
@@ -127,17 +127,17 @@ def main() -> int:
             pct = 100.0 * total / max(1, a[k]["size"])
             head = ", ".join(f"0x{s:x}-0x{e:x}" for s, e in rs[:8])
             more = f" (+{len(rs) - 8})" if len(rs) > 8 else ""
-            w(f"- `{a[k]['path']}` -- {len(rs)} блок(ов), {pct:.1f}% файла: {head}{more}")
+            w(f"- `{a[k]['path']}` -- {len(rs)} block(s), {pct:.1f}% of file: {head}{more}")
 
     report = "\n".join(lines)
     if args.report:
         args.report.write_text(report)
-        print(f"отчёт -> {args.report}")
+        print(f"report -> {args.report}")
     else:
         print(report)
 
-    print(f"\nидентичны={len(identical)} отличаются={len(differing)} "
-          f"(тот же размер={len(same_size)}) только_A={len(only_a)} только_B={len(only_b)}")
+    print(f"\nidentical={len(identical)} differing={len(differing)} "
+          f"(same size={len(same_size)}) only_A={len(only_a)} only_B={len(only_b)}")
     return 0
 
 

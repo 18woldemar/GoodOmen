@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-inventory.py -- каталогизация файлов установленной игры.
+inventory.py -- catalogue the files of an installed game.
 
-Для каждого файла собирает: относительный путь, размер, sha1, первые 16 байт
-(hex + ascii), энтропию Шеннона по первым 64 КБ и по всему файлу (для мелких).
+For each file it records: relative path, size, SHA-1, the first 16 bytes
+(hex + ascii), and the Shannon entropy of the first 64 KB.
 
-Энтропия делит файлы на классы:
-    < 4.0   текст, таблицы, индексы, разреженные структуры -> НАЧИНАТЬ ОТСЮДА
-    4.0-7.0 смешанный бинарь: геометрия, контейнеры, палитры
-    > 7.5   сжатое/зашифрованное -- без распаковки не анализируется
+Entropy sorts the files into classes:
+    < 4.0   text, tables, indices, sparse structures -> START HERE
+    4.0-7.0 mixed binary: geometry, containers, palettes
+    > 7.5   compressed or encrypted -- not analysable until unpacked
 
 Usage:
     python3 inventory.py "/home/user/.wine/drive_c/Program Files/MDK2" -o gog.json
@@ -31,7 +31,7 @@ MAGIC_BYTES = 16
 
 
 def shannon_entropy(data: bytes) -> float:
-    """Энтропия в битах на байт, 0.0 .. 8.0."""
+    """Entropy in bits per byte, 0.0 .. 8.0."""
     if not data:
         return 0.0
     counts = Counter(data)
@@ -60,7 +60,7 @@ def scan_file(path: Path, root: Path, full_hash_limit: int) -> dict:
             if read < SAMPLE_BYTES:
                 sample += chunk[: SAMPLE_BYTES - read]
             read += len(chunk)
-            # Хешируем целиком только если файл не гигантский -- иначе префикс.
+            # Hash the whole file unless it is huge; otherwise just a prefix.
             if full_hash_limit == 0 or size <= full_hash_limit:
                 sha1.update(chunk)
             elif read <= full_hash_limit:
@@ -109,9 +109,9 @@ def print_summary(records: list[dict]) -> None:
         by_ext[r["ext"] or "<none>"].append(r)
 
     total = sum(r["size"] for r in records)
-    print(f"\nфайлов: {len(records)}   суммарно: {total / 2**20:.1f} MiB\n")
+    print(f"\nfiles: {len(records)}   total: {total / 2**20:.1f} MiB\n")
 
-    print(f"{'ext':<10} {'n':>5} {'MiB':>9}  {'ent':>5}  типичная сигнатура")
+    print(f"{'ext':<10} {'n':>5} {'MiB':>9}  {'ent':>5}  typical signature")
     print("-" * 78)
     for ext, rs in sorted(by_ext.items(), key=lambda kv: -sum(r["size"] for r in kv[1])):
         mib = sum(r["size"] for r in rs) / 2**20
@@ -122,35 +122,35 @@ def print_summary(records: list[dict]) -> None:
         ascii_hint = printable(bytes.fromhex(top))
         print(f"{ext:<10} {len(rs):>5} {mib:>9.2f}  {avg_e:>5.2f}  {top} '{ascii_hint}' ({share})")
 
-    print("\nкандидаты на первый разбор (низкая энтропия, не текст по расширению):")
+    print("\nbest candidates to decode first (low entropy, not text by extension):")
     cands = [r for r in records if r["entropy"] < 5.0 and r["size"] > 256]
     cands.sort(key=lambda r: r["entropy"])
     for r in cands[:25]:
         print(f"  {r['entropy']:>5.2f} {entropy_class(r['entropy']):<18} "
               f"{r['size']:>10}  {r['magic_ascii']}  {r['path']}")
     if not cands:
-        print("  (нет -- всё либо мелкое, либо плотное)")
+        print("  (none -- everything is either tiny or dense)")
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("root", type=Path, help="корень установленной игры")
-    ap.add_argument("-o", "--out", type=Path, required=True, help="выходной JSON")
-    ap.add_argument("--summary", action="store_true", help="печатать сводку")
+    ap.add_argument("root", type=Path, help="root of the installed game")
+    ap.add_argument("-o", "--out", type=Path, required=True, help="output JSON")
+    ap.add_argument("--summary", action="store_true", help="print a summary")
     ap.add_argument("--full-hash-limit", type=int, default=0,
                     metavar="BYTES",
-                    help="хешировать целиком файлы до N байт (0 = все целиком)")
+                    help="hash files up to N bytes in full (0 = all in full)")
     args = ap.parse_args()
 
     if not args.root.is_dir():
-        print(f"не каталог: {args.root}", file=sys.stderr)
+        print(f"not a directory: {args.root}", file=sys.stderr)
         return 1
 
     records = walk(args.root, args.full_hash_limit)
     payload = {"root": str(args.root), "count": len(records), "files": records}
     args.out.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
-    print(f"записано {len(records)} записей -> {args.out}")
+    print(f"wrote {len(records)} records -> {args.out}")
 
     if args.summary:
         print_summary(records)

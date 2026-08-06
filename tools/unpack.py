@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-unpack.py -- распаковка контейнеров data/*.zip.
+unpack.py -- extract the data/*.zip containers.
 
-Контейнеры MDK2 -- обычные ZIP, но метод сжатия 10 (PKWARE DCL Implode,
-он же "implode"/"ibm-terse"). Его не умеют ни python-zipfile, ни unzip,
-ни 7z, ни libarchive -- поэтому декомпрессор здесь свой.
+MDK2's containers are ordinary ZIP archives, but the compression method is 10
+(PKWARE DCL Implode, also called "implode" / "ibm-terse"). Neither
+python-zipfile, unzip, 7z nor libarchive can read it, so the decompressor
+here is our own.
 
-Алгоритм -- blast (Mark Adler, zlib/contrib/blast). Таблицы Хаффмана
-фиксированные, зашиты в формат, взяты из описания алгоритма.
+The algorithm is blast (Mark Adler, zlib/contrib/blast). The Huffman tables
+are fixed, baked into the format, and taken from its description.
 
-Проверка корректности встроена в формат: CRC32 каждого файла лежит в
-центральном каталоге ZIP, распаковщик его сверяет. Расхождение = ошибка.
+The correctness check is built into the format: the ZIP central directory
+carries a CRC32 for every member, and this unpacker verifies it. A mismatch
+is an error, not a warning.
 
 Usage:
     python3 tools/unpack.py "$MDK2_GOG/data/base.zip" -o extracted/base
-    python3 tools/unpack.py base.zip -o out '*.tex'      # только текстуры
+    python3 tools/unpack.py base.zip -o out '*.tex'      # textures only
     python3 tools/unpack.py base.zip --list
 """
 
@@ -29,8 +31,8 @@ import zipfile
 from pathlib import Path
 
 # --- blast: PKWARE DCL Implode -------------------------------------------
-# Компактное представление длин кодов: (повтор-1) << 4 | длина.
-# Значения из blast.c -- это часть спецификации формата, не магия.
+# Compact run-length encoding of the code lengths: (repeat-1) << 4 | length.
+# The values come from blast.c and are part of the format spec, not magic.
 _LITLEN = bytes((
     11, 124, 8, 7, 28, 7, 188, 13, 76, 4, 10, 8, 12, 10, 12, 10, 8, 23, 8,
     9, 7, 6, 7, 8, 7, 6, 55, 8, 23, 24, 12, 11, 7, 9, 11, 12, 6, 7, 22, 5,
@@ -45,11 +47,11 @@ _BASE = (3, 2, 4, 5, 6, 7, 8, 9, 10, 12, 16, 24, 40, 72, 136, 264)
 _EXTRA = (0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8)
 
 _MAXBITS = 13
-_END_LEN = 519  # длина 519 = маркер конца потока
+_END_LEN = 519  # a decoded length of 519 marks the end of the stream
 
 
 def _construct(rep: bytes) -> tuple[list[int], list[int]]:
-    """Разворачивает компактную таблицу длин в канонический код Хаффмана."""
+    """Expand the compact length table into a canonical Huffman code."""
     lengths: list[int] = []
     for b in rep:
         lengths += [b & 15] * ((b >> 4) + 1)
@@ -73,7 +75,7 @@ _DISTCODE = _construct(_DISTLEN)
 
 
 class _Bits:
-    """Битовый поток, младший бит первым."""
+    """Bit stream, least significant bit first."""
 
     __slots__ = ("d", "i", "buf", "cnt")
 
@@ -93,7 +95,7 @@ class _Bits:
         return val & ((1 << need) - 1)
 
     def decode(self, code_tbl: tuple[list[int], list[int]]) -> int:
-        """Декодирует символ. Коды инвертированы -- особенность DCL."""
+        """Decode one symbol. The codes are inverted -- a DCL quirk."""
         count, symbol = code_tbl
         code = first = index = 0
         buf, cnt, i, d = self.buf, self.cnt, self.i, self.d
@@ -112,18 +114,18 @@ class _Bits:
             index += c
             first = (first + c) << 1
             code <<= 1
-        raise ValueError("blast: недопустимый код Хаффмана")
+        raise ValueError("blast: invalid Huffman code")
 
 
 def blast(data: bytes) -> bytes:
-    """DCL Implode -> сырые байты."""
+    """DCL Implode -> raw bytes."""
     b = _Bits(data)
     coded_literals = b.bits(8)
     if coded_literals > 1:
-        raise ValueError(f"blast: неизвестный флаг литералов {coded_literals}")
+        raise ValueError(f"blast: unknown literal flag {coded_literals}")
     dict_bits = b.bits(8)
     if not 4 <= dict_bits <= 6:
-        raise ValueError(f"blast: недопустимый размер словаря {dict_bits}")
+        raise ValueError(f"blast: invalid dictionary size {dict_bits}")
 
     out = bytearray()
     while True:
@@ -132,15 +134,15 @@ def blast(data: bytes) -> bytes:
             length = _BASE[sym] + b.bits(_EXTRA[sym])
             if length == _END_LEN:
                 return bytes(out)
-            # для длины 2 расстояние всегда короткое: 2 бита вместо словарных
+            # for length 2 the distance is always short: 2 bits, not dict bits
             dbits = 2 if length == 2 else dict_bits
             dist = (b.decode(_DISTCODE) << dbits) + b.bits(dbits) + 1
             if dist > len(out):
-                raise ValueError("blast: ссылка за начало потока")
+                raise ValueError("blast: back-reference before start of stream")
             start = len(out) - dist
             if dist >= length:
                 out += out[start:start + length]
-            else:  # перекрывающееся копирование, побайтно
+            else:  # overlapping copy, byte by byte
                 for k in range(length):
                     out.append(out[start + k])
         else:
@@ -153,13 +155,13 @@ _LOCAL_HDR = struct.Struct("<4s5H3I2H")
 
 
 def read_raw(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
-    """Сырые сжатые байты члена архива, минуя декомпрессоры zipfile."""
+    """Raw compressed bytes of a member, bypassing zipfile's decompressors."""
     fp = zf.fp
     fp.seek(info.header_offset)
     hdr = _LOCAL_HDR.unpack(fp.read(_LOCAL_HDR.size))
     if hdr[0] != b"PK\x03\x04":
-        raise ValueError(f"{info.filename}: битый локальный заголовок")
-    fp.seek(hdr[9] + hdr[10], 1)  # имя + extra
+        raise ValueError(f"{info.filename}: corrupt local header")
+    fp.seek(hdr[9] + hdr[10], 1)  # file name + extra field
     return fp.read(info.compress_size)
 
 
@@ -170,18 +172,18 @@ def extract(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
         data = zf.read(info)
     if len(data) != info.file_size:
         raise ValueError(
-            f"{info.filename}: размер {len(data)} != {info.file_size}")
+            f"{info.filename}: size {len(data)} != {info.file_size}")
     if binascii.crc32(data) != info.CRC:
-        raise ValueError(f"{info.filename}: CRC32 не сошёлся")
+        raise ValueError(f"{info.filename}: CRC32 mismatch")
     return data
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("archive", type=Path)
-    ap.add_argument("patterns", nargs="*", help="глоб-маски, по умолчанию всё")
-    ap.add_argument("-o", "--out", type=Path, help="каталог назначения")
-    ap.add_argument("--list", action="store_true", help="только перечислить")
+    ap.add_argument("patterns", nargs="*", help="glob masks; default is everything")
+    ap.add_argument("-o", "--out", type=Path, help="destination directory")
+    ap.add_argument("--list", action="store_true", help="list members only")
     args = ap.parse_args(argv)
 
     with zipfile.ZipFile(args.archive) as zf:
@@ -193,10 +195,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.list:
             for m in members:
                 print(f"{m.file_size:10d}  {m.compress_type:2d}  {m.filename}")
-            print(f"-- {len(members)} файлов", file=sys.stderr)
+            print(f"-- {len(members)} files", file=sys.stderr)
             return 0
         if not args.out:
-            ap.error("нужен -o OUT либо --list")
+            ap.error("need -o OUT or --list")
         args.out.mkdir(parents=True, exist_ok=True)
 
         bad = 0
@@ -204,29 +206,29 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 data = extract(zf, m)
             except ValueError as e:
-                print(f"ОШИБКА {e}", file=sys.stderr)
+                print(f"ERROR {e}", file=sys.stderr)
                 bad += 1
                 continue
-            # имена внутри контейнеров плоские, но защита от .. не лишняя
+            # names inside the containers are flat, but guard against .. anyway
             dest = args.out / Path(m.filename).name
             dest.write_bytes(data)
             if n % 200 == 0:
                 print(f"  {n}/{len(members)}", file=sys.stderr)
-        print(f"{len(members) - bad}/{len(members)} файлов в {args.out}",
+        print(f"{len(members) - bad}/{len(members)} files written to {args.out}",
               file=sys.stderr)
         return 1 if bad else 0
 
 
 def _selfcheck() -> None:
-    """Прогоняет несколько членов реального контейнера; CRC32 -- эталон."""
+    """Run a few members of the real container; the CRC32 is the oracle."""
     import os
     root = os.environ.get("MDK2_GOG")
-    assert root, "нужен MDK2_GOG в окружении"
+    assert root, "MDK2_GOG must be set in the environment"
     with zipfile.ZipFile(Path(root) / "data" / "base.zip") as zf:
         members = zf.infolist()
         assert any(m.compress_type == _IMPLODE for m in members)
         for m in members[:20] + members[-5:]:
-            extract(zf, m)  # бросит ValueError при расхождении CRC
+            extract(zf, m)  # raises ValueError on a CRC mismatch
     print("selfcheck ok")
 
 
