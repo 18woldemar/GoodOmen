@@ -206,8 +206,17 @@ def write_obj(m: Model, path: Path) -> None:
     path.write_text("\n".join(lines) + "\n")
 
 
-def preview(m: Model, path: Path, size: int = 512, yaw: float = 0.6) -> None:
-    """Flat-shaded software render, purely to eyeball that the strips work."""
+def preview(m: Model, path, size: int = 512, yaw: float = 0.6,
+            texture: Path | None = None) -> None:
+    """Software render, purely to eyeball that the geometry works.
+
+    With a texture it rasterises with a z-buffer and affine UV interpolation;
+    without one it falls back to flat shading and the painter's algorithm.
+    Texture rows are top-down in the PNG but bottom-up in the model, so v is
+    flipped on sampling -- the same convention noted in tools/tex2png.py.
+    """
+    if texture is not None:
+        return _preview_textured(m, path, texture, size, yaw)
     import math
     from PIL import Image, ImageDraw
 
@@ -246,7 +255,88 @@ def preview(m: Model, path: Path, size: int = 512, yaw: float = 0.6) -> None:
         tone = (shade, int(shade * 0.93), int(shade * 0.82))
         draw.polygon([(pa[0], pa[1]), (pb[0], pb[1]), (pc[0], pc[1])],
                      fill=tone, outline=(40, 42, 48))
-    img.save(path)
+    img.save(path, format="PNG")
+
+
+def _preview_textured(m: Model, path, texture: Path,
+                      size: int, yaw: float) -> None:
+    import math
+    from PIL import Image
+
+    tex = Image.open(texture).convert("RGB")
+    tw, th = tex.size
+    tpix = tex.load()
+
+    posed, tris = m.posed()
+    verts = [p for p, _ in posed]
+    uvs = [uv for _, uv in posed]
+    xs = [v[0] for v in verts]
+    ys = [v[1] for v in verts]
+    zs = [v[2] for v in verts]
+    cx, cy, cz = ((min(a) + max(a)) / 2 for a in (xs, ys, zs))
+    span = max(max(a) - min(a) for a in (xs, ys, zs)) or 1.0
+    scale = size * 0.44 / span
+    cos, sin = math.cos(yaw), math.sin(yaw)
+
+    proj = []
+    for x, y, z in verts:
+        x, y, z = x - cx, y - cy, z - cz
+        xr, yr = x * cos - y * sin, x * sin + y * cos
+        proj.append((size / 2 + xr * scale, size / 2 - z * scale, yr))
+
+    img = Image.new("RGB", (size, size), (24, 26, 30))
+    out = img.load()
+    zbuf = [1e30] * (size * size)
+
+    for a, b, c in tris:
+        pa, pb, pc = proj[a], proj[b], proj[c]
+        area = ((pb[0] - pa[0]) * (pc[1] - pa[1])
+                - (pb[1] - pa[1]) * (pc[0] - pa[0]))
+        if abs(area) < 1e-6:
+            continue
+        x0 = max(0, int(min(pa[0], pb[0], pc[0])))
+        x1 = min(size - 1, int(max(pa[0], pb[0], pc[0])) + 1)
+        y0 = max(0, int(min(pa[1], pb[1], pc[1])))
+        y1 = min(size - 1, int(max(pa[1], pb[1], pc[1])) + 1)
+        ua, ub, uc = uvs[a], uvs[b], uvs[c]
+        for py in range(y0, y1 + 1):
+            for px in range(x0, x1 + 1):
+                w0 = ((pb[0] - pa[0]) * (py + .5 - pa[1])
+                      - (pb[1] - pa[1]) * (px + .5 - pa[0])) / area
+                w1 = ((pc[0] - pb[0]) * (py + .5 - pb[1])
+                      - (pc[1] - pb[1]) * (px + .5 - pb[0])) / area
+                w2 = 1.0 - w0 - w1
+                if w0 < 0 or w1 < 0 or w2 < 0:
+                    continue
+                depth = w1 * pa[2] + w2 * pb[2] + w0 * pc[2]
+                idx = py * size + px
+                if depth >= zbuf[idx]:
+                    continue
+                zbuf[idx] = depth
+                u = w1 * ua[0] + w2 * ub[0] + w0 * uc[0]
+                v = w1 * ua[1] + w2 * ub[1] + w0 * uc[1]
+                sx = int(u * tw) % tw
+                sy = int((1.0 - v) * th) % th
+                out[px, py] = tpix[sx, sy]
+    img.save(path, format="PNG")
+
+
+def turntable(m: Model, path: Path, texture: Path | None = None,
+              frames: int = 24, size: int = 320) -> None:
+    """Spin the model around Z and write an animated GIF."""
+    import io
+    import math
+    from PIL import Image
+
+    shots = []
+    for i in range(frames):
+        buf = io.BytesIO()
+        preview(m, buf, size=size, yaw=2 * math.pi * i / frames,
+                texture=texture)
+        buf.seek(0)
+        shots.append(Image.open(buf).convert("P", palette=Image.ADAPTIVE))
+    shots[0].save(path, save_all=True, append_images=shots[1:],
+                  duration=80, loop=0, optimize=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -254,6 +344,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("src", type=Path)
     ap.add_argument("-o", "--out", type=Path, help="write an OBJ here")
     ap.add_argument("--preview", type=Path, help="write a preview PNG here")
+    ap.add_argument("--texture", type=Path, help="PNG to map onto the preview")
+    ap.add_argument("--turntable", type=Path,
+                    help="write an animated GIF spinning around Z")
+    ap.add_argument("--frames", type=int, default=24)
     ap.add_argument("--stats", action="store_true",
                     help="parse a whole directory and report")
     args = ap.parse_args(argv)
@@ -282,7 +376,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.out:
         write_obj(m, args.out)
     if args.preview:
-        preview(m, args.preview)
+        preview(m, args.preview, texture=args.texture)
+    if args.turntable:
+        turntable(m, args.turntable, texture=args.texture,
+                  frames=args.frames)
     if not args.out and not args.preview:
         for n in m.nodes[:40]:
             print(f"  {n['name']:<20} parent={n['parent']} "
