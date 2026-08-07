@@ -15,7 +15,7 @@ scratch. The model is OpenMW and devilutionX.
 | `tools/unpack.py` | Unpacks the `data/*.zip` containers. **4751/4751 files, every CRC32 matches.** |
 | `tools/tex2png.py` | Converts `.tex` textures to PNG. **761/761.** |
 | `tools/mod2obj.py` | Reads `.mod` models. **2207/2207, 857321 triangles.** Exports OBJ, renders textured previews and turntables. |
-| `tools/mod2html.py` | Packs a model into a single self-contained WebGL viewer — geometry and textures inlined, no libraries, no server. |
+| `tools/mod2html.py` | Packs a model — or, with `--scene`, a whole level and everything standing in it — into a single self-contained WebGL viewer. Geometry and textures inlined, no libraries, no server. |
 | `tools/bsp.py` | Reads and validates the `.bsp` collision trees; point-in-solid and drop queries. **692/692 validate.** |
 | `tools/scene.py` | Reads the level scene graphs — every object's type, position, parent and resource. **54 files, 5633 objects, 0 complaints.** |
 | `tools/refdec.py` | Reference decoder: runs the original's block codec under emulation. A research oracle, not engine code. |

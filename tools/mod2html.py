@@ -13,9 +13,17 @@ Geometry comes from tools/mod2obj.py, so the same rules apply -- triangle
 strips over consecutive vertices, node-local positions summed down the parent
 chain, one texture per node named by the byte at +0x87.
 
+With `--scene` it packs a whole level instead of one model: every object the
+scene graph places, geometry merged into one buffer. See tools/scene.py for
+the graph itself, and `place()` below for the one thing that is still a
+judgement call -- whether a model is authored in world space or has to be
+moved to its object.
+
 Usage:
     python3 tools/mod2html.py extracted/base/ml7z_castle.mod -o castle.html
     python3 tools/mod2html.py extracted/base/kurt.mod -o kurt.html --png png/
+    python3 tools/mod2html.py --scene extracted/base/l1.lua -o l1.html \\
+            --resources extracted --png png/
 """
 
 from __future__ import annotations
@@ -29,6 +37,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import scene as sg  # noqa: E402
 from mod2obj import Model  # noqa: E402
 
 PAGE = """<!doctype html><meta charset=utf-8><title>__TITLE__</title>
@@ -158,8 +167,94 @@ frame();
 """
 
 
-def build(model: Model, png_dir: Path | None) -> tuple[dict, dict]:
-    verts, tris = model.posed()
+def _rotate(q, p):
+    """Rotate p by the quaternion q, which is (w, x, y, z) as in the .mod."""
+    w, x, y, z = q
+    tx = 2 * (y * p[2] - z * p[1])
+    ty = 2 * (z * p[0] - x * p[2])
+    tz = 2 * (x * p[1] - y * p[0])
+    return (p[0] + w * tx + (y * tz - z * ty),
+            p[1] + w * ty + (z * tx - x * tz),
+            p[2] + w * tz + (x * ty - y * tx))
+
+
+def place(obj: dict, verts: list) -> list:
+    """Put one object's vertices where the object stands.
+
+    Some models are authored in world space and are already standing where
+    their object is -- a level's rooms and its fixed scenery, `l1_r1.mod` for
+    the object `l1_r1`. Others are prototypes authored around the origin and
+    reused: `dr1.mod` is one door mesh placed at 21 different doorways. The
+    first kind must not be moved and the second must be.
+
+    Nothing in the scene graph says which is which. `flag`, `group`, the
+    parent, and the model's own root translation were all checked against the
+    2845 objects that name a model, and none of them separates the two; the
+    engine must be deciding it somewhere else. What does separate them cleanly
+    is the geometry: 1741 models sit around the origin and 960 sit around
+    their object's position already, with 144 in between. So the rule here is
+    to measure it -- move the model only when it is not already there.
+
+    This is a stand-in for a fact not yet recovered, and it is only ever wrong
+    by a whole object's displacement, which is obvious on sight in the viewer.
+    """
+    box_lo = [min(v[0][c] for v in verts) for c in range(3)]
+    box_hi = [max(v[0][c] for v in verts) for c in range(3)]
+    centre = [(box_lo[c] + box_hi[c]) / 2 for c in range(3)]
+    span = max(box_hi[c] - box_lo[c] for c in range(3)) or 1.0
+    here = sum((centre[c] - obj["position"][c]) ** 2 for c in range(3))
+    if here < span * span:
+        return verts                                   # already in place
+    return [(tuple(_rotate(obj["rotation"], v[0])[c] + obj["position"][c]
+                   for c in range(3)), v[1], v[2]) for v in verts]
+
+
+def selftest() -> None:
+    """`place()` on the two cases it exists to tell apart."""
+    unit = [((0.0, 0.0, 0.0), (0, 0), None), ((1.0, 1.0, 1.0), (0, 0), None)]
+    far = [((10.0, 0.0, 0.0), (0, 0), None), ((11.0, 1.0, 1.0), (0, 0), None)]
+    quarter_turn = (0.70710678, 0.0, 0.0, 0.70710678)   # 90 degrees about z
+
+    at_origin = {"position": [10.0, 0.0, 0.0], "rotation": (1.0, 0, 0, 0)}
+    assert place(at_origin, unit)[0][0] == (10.0, 0.0, 0.0), "prototype"
+
+    already_there = {"position": [10.5, 0.5, 0.5], "rotation": quarter_turn}
+    assert place(already_there, far) is far, "world-authored, leave it"
+
+    turned = place({"position": [0.0, 0.0, 0.0],
+                 "rotation": quarter_turn}, far)[0][0]
+    assert max(abs(turned[c] - (0.0, 10.0, 0.0)[c]) for c in range(3)) < 1e-6, \
+        turned
+    print("mod2html.py: self-test passed")
+
+
+def scene_geometry(path: Path, resources: Path) -> tuple[list, list, int]:
+    """Merge every model a scene graph places. -> (vertices, triangles, count)"""
+    graph = sg.parse(path.read_text(errors="replace"))
+    cache: dict[Path, Model] = {}
+    verts: list = []
+    tris: list = []
+    placed = 0
+    for o in graph["objects"]:
+        if o["resource"] is None:
+            continue
+        found = sg.resolve(o, graph, resources)
+        if not isinstance(found, Path) or found.suffix != ".mod":
+            continue
+        model = cache.get(found)
+        if model is None:
+            model = cache[found] = Model(found.read_bytes())
+        v, t = model.posed()
+        if not v:
+            continue
+        base = len(verts)
+        verts += place(o, v)
+        tris += [(a + base, b + base, c + base) for a, b, c in t]
+        placed += 1
+    return verts, tris, placed
+
+
+def build(verts: list, tris: list, png_dir: Path | None) -> tuple[dict, dict]:
     by_tex: dict[str | None, list[int]] = {}
     for a, b, c in tris:
         by_tex.setdefault(verts[a][2], []).extend((a, b, c))
@@ -201,15 +296,33 @@ def build(model: Model, png_dir: Path | None) -> tuple[dict, dict]:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
-    ap.add_argument("src", type=Path)
-    ap.add_argument("-o", "--out", type=Path, required=True)
+    ap.add_argument("src", type=Path, nargs="?",
+                    help="a .mod, or a scene .lua with --scene")
+    ap.add_argument("-o", "--out", type=Path)
     ap.add_argument("--png", type=Path, default=Path("png"),
                     help="directory of converted textures")
+    ap.add_argument("--scene", action="store_true",
+                    help="src is a level scene graph, pack the whole level")
+    ap.add_argument("--resources", type=Path, default=Path("extracted"),
+                    help="extraction root, to resolve the scene's resources")
+    ap.add_argument("--selftest", action="store_true", help="check place()")
     args = ap.parse_args(argv)
 
-    m = Model(args.src.read_bytes())
-    mesh, textures = build(m, args.png if args.png.is_dir() else None)
-    stats = (f"{len(m.nodes)} nodes &middot; "
+    if args.selftest:
+        selftest()
+        return 0
+    if args.src is None or args.out is None:
+        ap.error("src and -o are required")
+
+    if args.scene:
+        verts, tris, placed = scene_geometry(args.src, args.resources)
+        what = f"{placed} objects"
+    else:
+        m = Model(args.src.read_bytes())
+        verts, tris = m.posed()
+        what = f"{len(m.nodes)} nodes"
+    mesh, textures = build(verts, tris, args.png if args.png.is_dir() else None)
+    stats = (f"{what} &middot; "
              f"{sum(d['count'] for d in mesh['draws']) // 3} triangles &middot; "
              f"{len(textures)} textures")
     page = (PAGE.replace("__TITLE__", args.src.stem)
