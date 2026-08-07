@@ -43,7 +43,8 @@ requires the same answers.
 ## What it draws
 
     ./goodomen --window --play 1 1       # level 1 started at checkpoint 1
-    ./goodomen --window --play 1 1 --walk  # ...on foot, with collision
+    ./goodomen --window --play 1 5 --walk  # ...on foot, running, with collision
+    ./goodomen --run 1 5 45              # the same 45 seconds headless, checked
     ./goodomen --window --level l1.lua   # the scene graph alone, no rooms
     ./goodomen --level l1.lua            # the same frame offscreen, and its pixels checked
     ./goodomen --window                  # a window, and a triangle in it

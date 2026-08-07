@@ -739,7 +739,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
     let version = video.version();
     let mut scene = Scene::default();
     // SAFETY: the context Video::open made is current on this thread.
-    let (loaded, rooms, checkpoints, collision) = unsafe {
+    let started_level = unsafe {
         goodomen::game::level::start(
             &video.gl,
             &mut install,
@@ -750,6 +750,13 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         )
         .map_err(|e| e.to_string())?
     };
+    let goodomen::game::level::Started {
+        scripts: level_scripts,
+        loaded,
+        rooms,
+        checkpoints,
+        collision,
+    } = started_level;
 
     let spawn = checkpoints
         .iter()
@@ -803,6 +810,8 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         );
         let mut at = body.position;
         let mut cull = true;
+        // the driver runs alongside the drawing: this is the game loop
+        let mut ticking = goodomen::game::api::Ticking::default();
         let started = std::time::Instant::now();
         let mut last = std::time::Instant::now();
         loop {
@@ -811,7 +820,12 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                     Event::Quit { .. }
                     | Event::KeyDown { keycode: Some(Keycode::Escape), .. } => {
                         unsafe { scene.delete(&video.gl) };
-                        return Ok(summary);
+                        let (fired, survived) = ticking.total();
+                        return Ok(format!(
+                            "{summary}, ran {:.0}s: {} rooms entered, \
+                             {survived} of {fired} handler calls ran to the end",
+                            ticking.clock, ticking.rooms_entered
+                        ));
                     }
                     Event::KeyDown { keycode: Some(Keycode::C), .. } => cull = !cull,
                     Event::MouseMotion { xrel, yrel, .. } => {
@@ -848,6 +862,14 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 at = [at[0] + d[0] / length * speed * dt, at[1] + d[1] / length * speed * dt, at[2]];
                 if held(Scancode::Space) { at[2] += speed * dt; }
                 if held(Scancode::LCtrl) { at[2] -= speed * dt; }
+            }
+
+            // the scripts get their tick before the frame is drawn, so what
+            // is drawn is the state they just left behind
+            if let Err(e) =
+                goodomen::game::api::tick(&level_scripts, &rooms, at, dt, &mut ticking)
+            {
+                eprintln!("goodomen: {e}");
             }
 
             // the room under the camera decides what is drawn, every frame
