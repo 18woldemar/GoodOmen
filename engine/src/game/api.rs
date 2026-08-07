@@ -1501,7 +1501,12 @@ pub fn fire_events(
             let (slot, value) = pair?;
             if let (Value::String(s), Value::Function(_)) = (&slot, &value) {
                 let s = s.to_string_lossy().to_string();
-                if s.starts_with("On") {
+                // `OnCreate` is excluded because it is **not** a slot waiting
+                // to be probed: [`create`] has already fired it for real, and
+                // the original's 0x1000000 bit exists precisely so that no
+                // object is created twice. Firing it here would be a second
+                // creation, which the game does not have.
+                if s.starts_with("On") && s != "OnCreate" {
                     slots.push(s);
                 }
             }
@@ -1544,6 +1549,49 @@ pub fn level(scripts: &Scripts, number: u32, checkpoint: u32, section: &str) -> 
         ))
         .set_name("level")
         .exec()?;
+    create(scripts)?;
+    Ok(())
+}
+
+/// `OnCreate(gob)` over everything the level made, which is a step of its own
+/// and not something a script does.
+///
+/// 0x42e170 walks the whole object tree once at the end of the load sequence
+/// (0x4012e0 calls it, and `mdk2.lua`'s own call graph names the step: "setup
+/// scripts for existing objects"). The handler cannot fire when the object is
+/// built, because a level script assigns its handlers *after* the scene graph
+/// has run — so the sweep comes last, when every `gob.OnCreate = function` has
+/// been seen.
+///
+/// **Once per object, ever.** 0x42e3e7 tests bit 0x1000000 in `omgob[0xb4]`
+/// and sets it before firing, so nothing gets a second `OnCreate` — which is
+/// what makes this safe to call from a driver that may reload a level. The
+/// call takes **one** argument, unlike `OnDamage`'s five.
+///
+/// This is what fills the spawner queues: 396 of the 682 spawners a boot sets
+/// up are queued by an `OnCreate` and by nothing else.
+pub fn create(scripts: &Scripts) -> Result<(), Error> {
+    let globals = scripts.lua.globals();
+    let fresh: Vec<String> = {
+        let w = world::world(&scripts.lua).ok_or_else(|| Error::Pragma("no world".into()))?;
+        w.iter().filter(|(_, g)| !g.created).map(|(_, g)| g.name.clone()).collect()
+    };
+    for name in fresh {
+        {
+            let mut w =
+                world::world_mut(&scripts.lua).ok_or_else(|| Error::Pragma("no world".into()))?;
+            let Some(id) = w.find(&name) else { continue };
+            match w.get_mut(id) {
+                Some(g) if !g.created => g.created = true,
+                _ => continue,
+            }
+        }
+        if let Ok(gob) = globals.get::<mlua::Table>(name.as_str()) {
+            if let Ok(handler) = gob.get::<mlua::Function>("OnCreate") {
+                let _ = handler.call::<Value>(gob);
+            }
+        }
+    }
     Ok(())
 }
 

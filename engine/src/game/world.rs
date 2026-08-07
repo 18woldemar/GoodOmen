@@ -56,6 +56,10 @@ pub struct Gob {
     /// A bitmask of `DAMAGE_*`. 13 flags, every one a power of two, so all of
     /// them together are 8191 and fit the `i16` the original keeps them in.
     pub damage_filter: i16,
+    /// Whether `OnCreate` has already fired for it — bit **0x1000000** in the
+    /// original's `omgob[0xb4]`, tested and set at 0x42e3e7 so that no object
+    /// is created twice. See [`crate::game::api::create`].
+    pub created: bool,
     pub bbox_min: Option<[f64; 3]>,
     pub bbox_max: Option<[f64; 3]>,
     pub flag: f64,
@@ -385,6 +389,7 @@ pub fn install(lua: &Lua) -> Result<(), Error> {
             hitpoints: 0,
             max_hitpoints: 0,
             damage_filter: 0,
+            created: false,
             bbox_min: vector(&arg(17)),
             bbox_max: vector(&arg(18)),
             // OBJ_STATICLIGHT omits the trailing flag: nineteen arguments,

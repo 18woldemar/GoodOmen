@@ -356,6 +356,24 @@ for _, job in ipairs(JOBS) do
   local key = "l" .. job[1] .. " cp" .. job[2]
   if ok then
     BOOTED[table.getn(BOOTED) + 1] = key
+    -- `OnCreate` is a step of the load, not a handler to be surveyed. The
+    -- original sweeps the whole object tree once at the end of the sequence
+    -- (0x42e170, from 0x4012e0) and guards it with bit 0x1000000 in
+    -- `omgob[0xb4]` so nothing is created twice -- which is why it is fired
+    -- here, before anything else, and skipped in the survey below. It has to
+    -- come last in the load because a level script assigns its handlers
+    -- *after* the scene graph has run. It is what fills the spawner queues.
+    local created = {}
+    for name, gob in pairs(_G) do
+      if type(gob) == "table" and rawget(gob, "__gob")
+         and type(rawget(gob, "OnCreate")) == "function" then
+        created[table.getn(created) + 1] = name
+      end
+    end
+    sort(created)
+    for i = 1, table.getn(created) do
+      pcall(_G[created[i]].OnCreate, _G[created[i]])
+    end
     local nboot = table.getn(CALLS)
     for i = 1, nboot do USED[CALLS[i]] = (USED[CALLS[i]] or 0) + 1 end
     if PATHS and PATHS[job[1]] then
@@ -380,7 +398,8 @@ for _, job in ipairs(JOBS) do
         local gob = _G[names[i]]
         slots = {}
         for slot, fn in pairs(gob) do
-          if type(fn) == "function" and strfind(slot, "^On") then
+          if type(fn) == "function" and strfind(slot, "^On")
+             and slot ~= "OnCreate" then
             slots[table.getn(slots) + 1] = slot
           end
         end

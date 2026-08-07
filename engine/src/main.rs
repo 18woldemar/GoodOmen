@@ -583,6 +583,7 @@ fn boot(
     let (mut fired, mut survived) = (0usize, 0usize);
     let (mut moves, mut playing) = (0u64, 0usize);
     let (mut spawners, mut spawned, mut armed, mut died) = (0usize, 0usize, 0usize, 0usize);
+    let mut queued = 0usize;
     let mut why: std::collections::BTreeMap<String, usize> = Default::default();
     let mut faults: std::collections::BTreeSet<u32> = Default::default();
     let mut resources = std::collections::BTreeSet::new();
@@ -640,6 +641,9 @@ fn boot(
                     spawned += b.spawned.len();
                     armed += b.spawned.iter().filter(|(_, hp)| *hp > 0).count();
                     died += b.died.len();
+                    // spawners a handler has filled but nothing has
+                    // drained: a boot fires handlers and never ticks
+                    queued += b.spawners.values().filter(|s| s.queue > 0).count();
                     for (name, count) in &b.unimplemented {
                         *work.entry(name.clone()).or_insert(0) += count;
                     }
@@ -713,7 +717,7 @@ fn boot(
          ({missing} missing), {rooms} rooms, {checkpoints} checkpoints, \
          {commands} commands over {bindings} bindings (0 faults), \
          {stasis} objects in stasis, {timers} timers, \
-         {spawners} spawners set up, \
+         {spawners} spawners set up ({queued} left queued), \
          {} functions called with no behaviour yet{}",
         resources.len(),
         sounds.len(),
