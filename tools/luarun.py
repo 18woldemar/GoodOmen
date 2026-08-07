@@ -179,6 +179,11 @@ def modernise(text: str) -> tuple[str, int, int]:
 
 
 def preprocess(text: str, defines: set[str] | None = None) -> str:
+    """The pragma pass and the two rewrites, which is what a script needs."""
+    return modernise(pragmas(text, defines))[0]
+
+
+def pragmas(text: str, defines: set[str] | None = None) -> str:
     """Resolve Lua 3's `$if` / `$ifnot` / `$else` / `$end` pragmas.
 
     Lines are blanked rather than removed so that error messages from Lua
@@ -207,7 +212,7 @@ def preprocess(text: str, defines: set[str] | None = None) -> str:
         out.append(line if all(stack) else "")
     if stack:
         raise LuaError(f"{len(stack)} unterminated $if")
-    return modernise("\n".join(out))[0]
+    return "\n".join(out)
 
 
 STUBS = r"""
@@ -377,6 +382,56 @@ end
 """
 
 
+def digest(files: list[Path], override: Path | None,
+           gamedir: str | None) -> int:
+    """`name upvalues breaks` a line -- what the two Lua 3 rewrites did to
+    each script -- and, with --engine, the same from the engine, compared.
+
+    The `override/` copy of a script wins, because that is what the engine's
+    own loader does and `override/level1.lua` differs by sixty lines. Without
+    that rule the two sides read different files and agree by accident.
+    """
+    import subprocess
+    patch = {}
+    if override and override.is_dir():
+        patch = {f.name.lower(): f for f in override.rglob("*.lua")}
+    chosen: dict[str, Path] = {}
+    for f in files:
+        chosen.setdefault(f.name.lower(), f)
+    chosen.update(patch)
+
+    mine = {}
+    for name in sorted(chosen):
+        text = chosen[name].read_text(errors="replace")
+        _, upvals, breaks = modernise(pragmas(text))
+        mine[name] = (upvals, breaks)
+
+    if not gamedir:
+        for name, (u, b) in mine.items():
+            print(f"{name} {u} {b}")
+        print(f"{len(mine)} scripts", file=sys.stderr)
+        return 0
+
+    root = Path(__file__).resolve().parent.parent
+    out = subprocess.run(
+        ["cargo", "run", "--quiet", "--release", "--manifest-path",
+         str(root / "engine/Cargo.toml"), "--", gamedir, "--lua"],
+        capture_output=True, text=True, check=True).stdout
+    theirs = {}
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) == 3:
+            theirs[f[0]] = (int(f[1]), int(f[2]))
+    bad = [f"{n}: {mine[n]} against the engine's {theirs.get(n)}"
+           for n in sorted(mine) if theirs.get(n) != mine[n]]
+    bad += [f"{n}: the engine compiled it and this did not"
+            for n in sorted(set(theirs) - set(mine))]
+    for line in bad[:20]:
+        print(f"MISMATCH {line}", file=sys.stderr)
+    print(f"{len(mine)} scripts, {len(bad)} disagree", file=sys.stderr)
+    return 1 if bad else 0
+
+
 def _obj_key(o: dict) -> tuple:
     return (o["name"], o["type"], o["parent"] or "",
             *(float(f"{v:.6g}") for v in o["position"]),
@@ -471,6 +526,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tree", type=Path,
                     help="extraction root: makes dofile() work by preparing "
                          "every script in one flat directory first")
+    ap.add_argument("--digest", action="store_true",
+                    help="`name upvalues breaks` a line, which is what the "
+                         "engine prints for --lua")
+    ap.add_argument("--engine", metavar="GAMEDIR",
+                    help="run the engine over this installation and require "
+                         "it to rewrite exactly the same things")
     ap.add_argument("--override", type=Path,
                     help="the game's override/ directory, which the engine "
                          "reads in preference to the archives -- it is a "
@@ -485,6 +546,9 @@ def main(argv: list[str] | None = None) -> int:
     files = sorted(args.src.rglob("*.lua")) if args.src.is_dir() else [args.src]
     if not files:
         ap.error(f"no .lua under {args.src}")
+
+    if args.digest or args.engine:
+        return digest(files, args.override, args.engine)
 
     if args.crosscheck:
         files = [f for f in files if "mdkRegisterObject(" in

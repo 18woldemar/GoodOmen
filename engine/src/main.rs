@@ -10,6 +10,7 @@ use goodomen::formats::container::crc32;
 use goodomen::formats::model::Model;
 use goodomen::formats::tex::Texture;
 use goodomen::game::install::Install;
+use goodomen::game::script::Scripts;
 use goodomen::render::{triangle, Video};
 use glow::HasContext;
 
@@ -18,6 +19,7 @@ fn main() {
     let tex = args.iter().any(|a| a == "--tex");
     let models = args.iter().any(|a| a == "--mod");
     let trees = args.iter().any(|a| a == "--bsp");
+    let scripts = args.iter().any(|a| a == "--lua");
 
     // the renderer needs no game files, so it is answered before the
     // installation is looked for
@@ -61,7 +63,7 @@ fn main() {
         }
     };
 
-    if tex || models || trees {
+    if tex || models || trees || scripts {
         // `--expect N`, the same convention the Python tools use: a check
         // that silently found nothing is the failure mode worth guarding
         let expect = args
@@ -75,8 +77,10 @@ fn main() {
             ("textures", textures(&mut install, expect.is_none()))
         } else if models {
             ("models", meshes(&mut install, expect.is_none()))
-        } else {
+        } else if trees {
             ("trees", collision(&mut install, expect.is_none()))
+        } else {
+            ("scripts", compile_scripts(&mut install, expect.is_none()))
         };
         if let Some(n) = expect {
             if found != n {
@@ -287,6 +291,71 @@ fn probe_points(bsp: &Bsp) -> Vec<[f64; 3]> {
         }
     }
     out
+}
+
+/// Preprocess and compile every shipped `.lua`, the way the engine will have
+/// to at run time: through [`Install::read`], so the `override/` copy of a
+/// script wins over the container's.
+///
+/// Compiling is not running. Running them needs the 133 engine functions a
+/// boot touches, which is the next milestone; this says the Lua 3 source is
+/// accepted by a Lua 5.1 the engine carries itself.
+fn compile_scripts(install: &mut Install, list: bool) -> usize {
+    let mut names: Vec<String> = entries_named(install, ".lua")
+        .into_iter()
+        .map(|(n, _, _)| n)
+        .collect();
+    if let Some(dir) = install.override_dir.clone() {
+        if let Ok(read) = std::fs::read_dir(&dir) {
+            for e in read.flatten() {
+                let n = e.file_name().to_string_lossy().to_ascii_lowercase();
+                if n.ends_with(".lua") && !names.contains(&n) {
+                    names.push(n);
+                }
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+
+    let engine = match Scripts::new() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("goodomen: lua: {e}");
+            std::process::exit(1);
+        }
+    };
+    let (mut upvalues, mut breaks) = (0usize, 0usize);
+    for name in &names {
+        let data = match install.read(name) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("goodomen: {name}: {e}");
+                std::process::exit(1);
+            }
+        };
+        // the scripts are Latin-1 in places, and Lua does not care
+        let source: String = data.iter().map(|&b| b as char).collect();
+        match engine.compile(name, &source) {
+            Ok((u, b)) => {
+                upvalues += u;
+                breaks += b;
+                if list {
+                    println!("{name} {u} {b}");
+                }
+            }
+            Err(e) => {
+                eprintln!("goodomen: {name}: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    eprintln!(
+        "{} scripts compile, {upvalues} upvalue references and {breaks} \
+         `break` variables rewritten",
+        names.len()
+    );
+    names.len()
 }
 
 /// Every container member with this extension, lowercased and sorted, so that
