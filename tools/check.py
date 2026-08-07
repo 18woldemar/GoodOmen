@@ -91,6 +91,8 @@ ENGINE = [
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--tex", "--expect", "761"], None),
+    ("the engine's models agree with mod2obj.py",
+     ["modcheck.py", "extracted", "--run", "$MDK2_GOG"], "base"),
     ("the Windows build runs the same",
      ["sh", "tools/winbuild.sh"], None),
     ("the engine's own tests pass",

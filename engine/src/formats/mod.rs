@@ -4,4 +4,5 @@
 
 pub mod blast;
 pub mod container;
+pub mod model;
 pub mod tex;
