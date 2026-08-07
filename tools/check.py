@@ -51,6 +51,8 @@ CORPUS = [
      "base/demo1_5.omn"),
     ("sound headers are WAVC over Interplay ACM",
      ["wavc.py", "extracted", "--validate"], "sounds"),
+    ("music playlists parse", ["wavc.py", "$MDK2_GOG/Music", "--playlists"],
+     None),
     ("checkpoints stand in open space",
      ["spawn.py", "extracted", "--all", "--expect", "126"],
      "scripts/level1.lua"),
@@ -112,9 +114,17 @@ def main(argv: list[str] | None = None) -> int:
         failed += not ok
 
     if not args.quick:
-        exe = Path(_env().get("MDK2_GOG", "")) / "mdk2Main.exe"
+        env = _env()
+        exe = Path(env.get("MDK2_GOG", "")) / "mdk2Main.exe"
         for label, cmd, needs in CORPUS + (SLOW if args.slow else []):
-            if not (EXTRACTED / needs).exists():
+            cmd = [c.replace("$MDK2_GOG", env.get("MDK2_GOG", ""))
+                   for c in cmd]
+            if needs is None:                       # a path in the game dir
+                if not Path(cmd[1]).is_dir():
+                    print(f"skip  {label} -- no {cmd[1]}")
+                    skipped += 1
+                    continue
+            elif not (EXTRACTED / needs).exists():
                 print(f"skip  {label} -- no extracted/{needs}")
                 skipped += 1
                 continue

@@ -29,6 +29,21 @@ The six genuine RIFF files are footstep sounds -- `kurt_walkl.wav`,
 `cone_walkr.wav` and four others -- short enough that compressing them was not
 worth it.
 
+**The music is the same codec without the wrapper.** `Music/` holds 27 bare
+`.acm` streams, one per track, stereo at 22050 Hz and 84 MiB in total, each
+beside a `.mus` playlist -- the Infinity Engine's playlist format again,
+unchanged:
+
+    Track01
+    1
+    A   Track01 A
+
+a name, a segment count, and one line per segment giving its tag, its
+directory and the tag to loop back to. Every one of the 27 is a single
+segment looping on itself. This tool reads a bare `.acm` as happily as a
+wrapped one; it just has no header to trim against, so the whole decode is
+kept.
+
 Checked across all 992: every one has the magic, every one has the ACM magic
 at offset 28, every one satisfies `28 + compressed == filesize`, and **all 992
 decode to exactly the number of bytes their header states**. Compression runs
@@ -61,6 +76,15 @@ class WavcError(ValueError):
 
 
 def parse(data: bytes) -> dict:
+    if data[:4] == ACM_MAGIC:            # music: a bare stream, no wrapper
+        # ACM's own count is samples across all channels, not frames: for
+        # track01 it is 12802458, which at 22050 Hz stereo is 4:50 -- what
+        # ffprobe reports -- and twice that if you read it as frames
+        samples, channels = struct.unpack_from("<IH", data, 4)
+        rate = struct.unpack_from("<H", data, 10)[0]
+        return {"decoded": samples * 2, "compressed": len(data),
+                "channels": channels, "bits": 16, "rate": rate,
+                "payload": data, "bare": True}
     if data[:8] != MAGIC:
         raise WavcError("not a WAVCV1.0 file")
     decoded, compressed, header = struct.unpack_from("<3I", data, 8)
@@ -75,7 +99,8 @@ def parse(data: bytes) -> dict:
     if data[HEADER:HEADER + 4] != ACM_MAGIC:
         raise WavcError("no Interplay ACM magic at the payload")
     return {"decoded": decoded, "compressed": compressed, "channels": channels,
-            "bits": bits, "rate": rate, "payload": data[HEADER:]}
+            "bits": bits, "rate": rate, "payload": data[HEADER:],
+            "bare": False}
 
 
 # The last ACM block is not padded out by the encoder, and 11 of the 992
@@ -121,6 +146,24 @@ def _data_chunk(wav: bytes) -> int:
     raise WavcError("no data chunk")
 
 
+def playlist(path: Path) -> dict:
+    """Read a `.mus`: a name, a segment count, then one line per segment."""
+    lines = [l.strip() for l in path.read_text(errors="replace").splitlines()
+             if l.strip()]
+    if len(lines) < 2:
+        raise WavcError(f"{path.name}: too short to be a playlist")
+    name, count = lines[0], int(lines[1])
+    segments = []
+    for line in lines[2:2 + count]:
+        parts = line.split()
+        segments.append({"tag": parts[0],
+                         "directory": parts[1] if len(parts) > 1 else name,
+                         "loops_to": parts[2] if len(parts) > 2 else None})
+    if len(segments) != count:
+        raise WavcError(f"{path.name}: {len(segments)} segments, said {count}")
+    return {"name": name, "segments": segments}
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("src", type=Path, help="a file or a directory")
@@ -128,12 +171,30 @@ def main(argv: list[str] | None = None) -> int:
                     help="a .wav, or a directory to fill")
     ap.add_argument("--validate", action="store_true",
                     help="check every header; decode nothing")
+    ap.add_argument("--playlists", action="store_true",
+                    help="read the .mus playlists beside the music")
     ap.add_argument("--ffmpeg", default="ffmpeg")
     args = ap.parse_args(argv)
 
-    files = sorted(args.src.rglob("*.wav")) if args.src.is_dir() else [args.src]
+    if args.playlists:
+        mus = sorted(args.src.rglob("*.mus"))
+        total = 0
+        for m in mus:
+            pl = playlist(m)
+            total += len(pl["segments"])
+            print("  " + f"{pl['name']:12s} " + ", ".join(
+                f"{s['tag']} -> {s['directory']}, loops to {s['loops_to']}"
+                for s in pl["segments"]))
+        print(f"{total} segments in {len(mus)} playlists", file=sys.stderr)
+        return 0
+
+    if args.src.is_dir():
+        files = (sorted(args.src.rglob("*.wav"))
+                 + sorted(args.src.rglob("*.acm")))
+    else:
+        files = [args.src]
     if not files:
-        ap.error(f"no .wav under {args.src}")
+        ap.error(f"no .wav or .acm under {args.src}")
 
     if args.validate:
         ok = riff = 0
@@ -150,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
                 bad.append(f"{f.name}: {e}")
         for line in bad[:5]:
             print(f"  {line}", file=sys.stderr)
-        print(f"{ok} WAVC files valid, {riff} plain RIFF, {len(bad)} bad",
+        print(f"{ok} ACM streams valid, {riff} plain RIFF, {len(bad)} bad",
               file=sys.stderr)
         return 1 if bad else 0
 
