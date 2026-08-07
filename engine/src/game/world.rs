@@ -46,6 +46,16 @@ pub struct Gob {
     pub resource: Option<String>,
     /// Four numbers whose meaning is set by the object's type.
     pub payload: [f64; 4],
+    /// Hitpoints and the most it can have. Both are **`i16`** in the
+    /// original — `gob + 0x84` is its `omgob`, and 0x10, 0x12, 0x14 there are
+    /// the damage filter, the hitpoints and the maximum. See
+    /// [`crate::game::api`] for the arithmetic, which has two rules that are
+    /// easy to get wrong and are in the code rather than invented.
+    pub hitpoints: i16,
+    pub max_hitpoints: i16,
+    /// A bitmask of `DAMAGE_*`. 13 flags, every one a power of two, so all of
+    /// them together are 8191 and fit the `i16` the original keeps them in.
+    pub damage_filter: i16,
     pub bbox_min: Option<[f64; 3]>,
     pub bbox_max: Option<[f64; 3]>,
     pub flag: f64,
@@ -96,6 +106,36 @@ impl World {
                 self.generation += 1;
             }
         }
+    }
+
+    /// Take `n` hitpoints off, and say whether that killed it.
+    ///
+    /// Read out of the original at **0x40e8c0**, and both halves matter:
+    /// hitpoints **clamp at zero** rather than going negative, and the
+    /// routine's return value *is* the death condition — the engine does not
+    /// test for it separately.
+    pub fn hurt(&mut self, id: Id, n: i16) -> bool {
+        let Some(gob) = self.gobs.get_mut(id as usize) else { return false };
+        gob.hitpoints = gob.hitpoints.saturating_sub(n);
+        if gob.hitpoints <= 0 {
+            gob.hitpoints = 0;
+            return true;
+        }
+        false
+    }
+
+    /// Put `n` hitpoints back, up to the maximum.
+    ///
+    /// From 0x40e8f0, and the first line is the one worth having: **something
+    /// already at zero is not healed at all.** A corpse stays a corpse, and
+    /// an implementation that only added and clamped would quietly bring the
+    /// dead back.
+    pub fn heal(&mut self, id: Id, n: i16) {
+        let Some(gob) = self.gobs.get_mut(id as usize) else { return };
+        if gob.hitpoints <= 0 {
+            return;
+        }
+        gob.hitpoints = gob.hitpoints.saturating_add(n).min(gob.max_hitpoints);
     }
 
     pub fn generation(&self) -> u64 {
@@ -198,6 +238,16 @@ pub fn install(lua: &Lua) -> Result<(), Error> {
                 number(&arg(15)),
                 number(&arg(16)),
             ],
+            // **Where the starting hitpoints come from is still open.** The
+            // scene graph does not carry them -- the payload is type-specific
+            // and none of the 5633 objects spends a slot on health -- so the
+            // original's per-type constructor sets them, below 0x42ac60.
+            // Zero is the honest default until that is read: it means
+            // `mdkAddHitpoints` does nothing, which is exactly what the
+            // original does to something already at zero.
+            hitpoints: 0,
+            max_hitpoints: 0,
+            damage_filter: 0,
             bbox_min: vector(&arg(17)),
             bbox_max: vector(&arg(18)),
             // OBJ_STATICLIGHT omits the trailing flag: nineteen arguments,
@@ -232,6 +282,18 @@ pub fn install(lua: &Lua) -> Result<(), Error> {
 /// Read the world back out of a Lua state.
 pub fn world(lua: &Lua) -> Option<mlua::AppDataRef<'_, World>> {
     lua.app_data_ref::<World>()
+}
+
+/// The same, to change something in it.
+pub fn world_mut(lua: &Lua) -> Option<mlua::AppDataRefMut<'_, World>> {
+    lua.app_data_mut::<World>()
+}
+
+/// One object, to change.
+impl World {
+    pub fn get_mut(&mut self, id: Id) -> Option<&mut Gob> {
+        self.gobs.get_mut(id as usize)
+    }
 }
 
 /// Read a table's `__gob` — the id a Lua-side handle carries.

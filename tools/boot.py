@@ -164,7 +164,16 @@ ANSWERS = {"chGetGameWasReset": "0", "mdkLoadLevelIsInstant": "0",
            "chRand": "function() _rand = math.mod((_rand or 127) * 1103515245 "
                      "+ 12345, 2147483648) return _rand / 2147483648 end",
            "mdkGetGobType": "function(g) if g then return g.__kind end "
-                            "return -1 end"}
+                            "return -1 end",
+           # the damage model is three i16 on the gob and a bitmask, and the
+           # engine answers all four for real (see engine/src/game/api.rs).
+           # A stub owes a *number*: Lua 5.1 has no bit operations and the
+           # ALL_CAPS constants here are strings, so `mdkIsDamageType` cannot
+           # do the `and` at all. Zero everywhere is what an object with no
+           # hitpoints reads as on both sides.
+           "mdkIsDamageType": "0", "mdkGetHitpoints": "0",
+           "mdkGobGetHealth": "0", "mdkGobGetDamageFilter": "0",
+           "mdkSubtractHitpoints": "0"}
 
 # The tick loop. `steps` is the player's path, injected from Python; the
 # engine state it needs -- a clock, timers, stasis, the room boxes -- is all

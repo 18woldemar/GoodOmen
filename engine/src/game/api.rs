@@ -760,6 +760,81 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             Ok(w.find(&name).and_then(|id| w.get(id)).map(|g| g.kind).unwrap_or(-1.0))
         })?,
     )?;
+    // --- damage, which is in the binary and did not have to be invented ---
+    //
+    // A gob's `omgob` is at `gob + 0x84`, and three `i16` in it are the whole
+    // model: **0x10 the damage filter, 0x12 the hitpoints, 0x14 the most it
+    // can have**. The getters name themselves — `mdkGobGetDamageFilter`
+    // reads 0x10 (0x4108e0), `mdkGetHitpoints` reads 0x12 (0x40e920) — and
+    // `mdkGobGetHealth` (0x40f340) is **the quotient of the two**, so health
+    // is a fraction and not a count.
+    //
+    // The 13 `DAMAGE_*` constants are every one a power of two, from
+    // `DAMAGE_GOODGUY` 1 to `DAMAGE_PUNCH` 4096, so all of them together are
+    // 8191 and the `i16` is exactly wide enough.
+    globals.set(
+        "mdkIsDamageType",
+        // 0x4108b0, and it is that short: `(a & b) != 0`. Neither argument is
+        // a gob -- it tests two masks against each other.
+        lua.create_function(|_, args: Variadic<Value>| {
+            let a = args.first().map(number).unwrap_or(0.0) as i64;
+            let b = args.get(1).map(number).unwrap_or(0.0) as i64;
+            Ok(if a & b != 0 { 1.0 } else { 0.0 })
+        })?,
+    )?;
+    globals.set(
+        "mdkGetHitpoints",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            Ok(with_gob(lua, args.first(), |g| g.hitpoints as f64).unwrap_or(0.0))
+        })?,
+    )?;
+    globals.set(
+        "mdkGobGetHealth",
+        // a fraction of the maximum, not a count -- and a maximum of zero is
+        // not a division, it is an object that has no health to speak of
+        lua.create_function(|lua, args: Variadic<Value>| {
+            Ok(with_gob(lua, args.first(), |g| {
+                if g.max_hitpoints > 0 {
+                    g.hitpoints as f64 / g.max_hitpoints as f64
+                } else {
+                    0.0
+                }
+            })
+            .unwrap_or(0.0))
+        })?,
+    )?;
+    globals.set(
+        "mdkGobGetDamageFilter",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            Ok(with_gob(lua, args.first(), |g| g.damage_filter as f64).unwrap_or(0.0))
+        })?,
+    )?;
+    globals.set(
+        "mdkGobSetDamageFilter",
+        // 0x4108c0, and it truncates to `i16` on the way in
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let mask = args.get(1).map(number).unwrap_or(0.0) as i64 as i16;
+            edit_gob(lua, args.first(), |g| g.damage_filter = mask);
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "mdkSubtractHitpoints",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let n = args.get(1).map(number).unwrap_or(0.0) as i64 as i16;
+            let died = change_gob(lua, args.first(), |w, id| w.hurt(id, n)).unwrap_or(false);
+            Ok(if died { 1.0 } else { 0.0 })
+        })?,
+    )?;
+    globals.set(
+        "mdkAddHitpoints",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let n = args.get(1).map(number).unwrap_or(0.0) as i64 as i16;
+            change_gob(lua, args.first(), |w, id| w.heal(id, n));
+            Ok(())
+        })?,
+    )?;
+
     // `chSndSwitchMusic(N)` is the same numbering as a room's `music`:
     // `Music/TrackNN`, with 0 and -1 stopping it. 148 calls, more than any
     // other sound function in the scripts.
@@ -955,6 +1030,32 @@ pub fn play_named(scripts: &Scripts, gob: &str, animation: &str) -> Result<(), E
         boot.playing.insert(gob.to_string(), id);
     }
     Ok(())
+}
+
+/// Read a field off the gob a script handed us.
+fn with_gob<T>(lua: &Lua, v: Option<&Value>, f: impl Fn(&Gob) -> T) -> Option<T> {
+    let name = v.and_then(gob_name)?;
+    let w = world::world(lua)?;
+    w.find(&name).and_then(|id| w.get(id)).map(f)
+}
+
+/// Change one, in place.
+fn edit_gob(lua: &Lua, v: Option<&Value>, f: impl FnOnce(&mut Gob)) {
+    let Some(name) = v.and_then(gob_name) else { return };
+    let Some(mut w) = world::world_mut(lua) else { return };
+    if let Some(id) = w.find(&name) {
+        if let Some(g) = w.get_mut(id) {
+            f(g);
+        }
+    }
+}
+
+/// And the two that are arithmetic on the arena rather than on one field.
+fn change_gob<T>(lua: &Lua, v: Option<&Value>, f: impl FnOnce(&mut world::World, world::Id) -> T) -> Option<T> {
+    let name = v.and_then(gob_name)?;
+    let mut w = world::world_mut(lua)?;
+    let id = w.find(&name)?;
+    Some(f(&mut w, id))
 }
 
 /// A gob's name, from the table the scripts hold it by.
