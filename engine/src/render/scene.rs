@@ -31,12 +31,15 @@ const VERTEX: &str = r#"#version 330 core
 layout (location = 0) in vec3 position;
 layout (location = 1) in vec2 uv;
 layout (location = 2) in float node;
+layout (location = 3) in vec3 normal;
 uniform mat4 view_projection;
 uniform mat4 model;
 uniform vec4 node_rotation[64];
 uniform vec4 node_offset[64];
 out vec2 vary_uv;
 out float vary_depth;
+out vec3 vary_world;
+out vec3 vary_normal;
 
 // (w, x, y, z), the order the models store one in
 vec3 turn(vec4 q, vec3 p) {
@@ -48,6 +51,10 @@ void main() {
     int i = int(node);
     vec3 posed = turn(node_rotation[i], position) + node_offset[i].xyz;
     vec4 world = model * vec4(posed, 1.0);
+    vary_world = world.xyz;
+    // the model matrix is a rotation and a translation, so the rotation
+    // alone carries the normal -- no inverse transpose needed
+    vary_normal = mat3(model) * turn(node_rotation[i], normal);
     vary_uv = uv;
     gl_Position = view_projection * world;
     vary_depth = gl_Position.w;
@@ -61,20 +68,80 @@ pub const MAX_NODES: usize = 64;
 /// No lighting yet: the levels ship static lights as objects and nothing
 /// reads them. A little distance shading instead, so that shape is visible
 /// at all rather than a flat silhouette.
+/// The levels ship their lighting as objects — `OBJ_STATICLIGHT`, 2080 of
+/// them over the corpus — and this is what reads it. The **falloff is ours**,
+/// not the original's: nothing in the data says what curve it used, so this
+/// takes the light's own radius as the reach and squares a linear ramp
+/// inside it, which is bounded and looks right. The colour, radius and
+/// intensity are all the object's, out of its payload.
 const FRAGMENT: &str = r#"#version 330 core
 in vec2 vary_uv;
 in float vary_depth;
+in vec3 vary_world;
+in vec3 vary_normal;
 uniform sampler2D albedo;
 uniform float alpha_test;
 uniform float fade_distance;
+uniform int light_count;
+uniform vec3 light_position[16];
+uniform vec3 light_colour[16];
+uniform float light_radius[16];
 out vec4 fragment;
 void main() {
     vec4 texel = texture(albedo, vary_uv);
     if (texel.a < alpha_test) discard;
+    vec3 n = normalize(vary_normal);
+    // MDK2's static lights are small and local -- the median radius is 15
+    // units in arenas a hundred across -- so they *add* to a base level
+    // rather than being the whole of the lighting. Without one the levels
+    // read almost black, which is a rendering choice made here and not
+    // something the data says.
+    vec3 lit = vec3(0.75);
+    for (int i = 0; i < light_count; i++) {
+        vec3 to = light_position[i] - vary_world;
+        float d = length(to);
+        float reach = max(1.0 - d / light_radius[i], 0.0);
+        lit += light_colour[i] * reach * reach * max(dot(n, to / max(d, 0.001)), 0.0);
+    }
     float fade = clamp(1.0 - vary_depth / fade_distance, 0.45, 1.0);
-    fragment = vec4(texel.rgb * fade, 1.0);
+    fragment = vec4(texel.rgb * min(lit, vec3(1.6)) * fade, 1.0);
 }
 "#;
+
+/// How many lights reach the shader at once — the nearest to the camera.
+pub const MAX_LIGHTS: usize = 16;
+
+/// One `OBJ_STATICLIGHT`, as its payload describes it.
+///
+/// The payload was unexplained until it was surveyed over all 2080: slot 0 is
+/// a **packed `0xRRGGBB`** — every one of them a whole number in range, and
+/// the commonest decode to a pale lilac, a deep blue, a warm yellow — slot 1
+/// is the **radius** in units, slot 2 the **intensity**, and slot 3 a flag
+/// field taking exactly four values.
+#[derive(Clone, Copy, Debug)]
+pub struct Light {
+    pub position: [f32; 3],
+    pub colour: [f32; 3],
+    pub radius: f32,
+    pub intensity: f32,
+}
+
+impl Light {
+    /// From the four payload numbers and a position.
+    pub fn from_payload(position: [f64; 3], payload: [f64; 4]) -> Light {
+        let packed = payload[0] as u32;
+        Light {
+            position: [position[0] as f32, position[1] as f32, position[2] as f32],
+            colour: [
+                ((packed >> 16) & 255) as f32 / 255.0,
+                ((packed >> 8) & 255) as f32 / 255.0,
+                (packed & 255) as f32 / 255.0,
+            ],
+            radius: payload[1].max(1.0) as f32,
+            intensity: payload[2].max(0.0) as f32,
+        }
+    }
+}
 
 pub struct GpuTexture {
     pub texture: glow::Texture,
@@ -109,12 +176,31 @@ pub struct Scene {
     textures: HashMap<String, GpuTexture>,
     /// White, for a node that names no texture.
     blank: Option<glow::Texture>,
+    /// Every `OBJ_STATICLIGHT` the level placed.
+    pub lights: Vec<Light>,
     /// `(model name, its transform)`, in the order the scene graph gave them.
     draws: Vec<(String, Mat4)>,
     /// The room each draw belongs to, or `None` for an object in no room at
     /// all — which is **never culled**, as the original does not cull it.
     rooms: Vec<Option<usize>>,
     pub missing: usize,
+}
+
+/// The triangle's own normal, right-handed over the winding the strips give.
+fn face_normal(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> [f32; 3] {
+    let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    let n = [
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    ];
+    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+    if len == 0.0 {
+        [0.0, 0.0, 1.0]
+    } else {
+        [(n[0] / len) as f32, (n[1] / len) as f32, (n[2] / len) as f32]
+    }
 }
 
 /// Every node's transform for animation 0 at `clock`, packed for the shader.
@@ -203,7 +289,7 @@ impl Scene {
             && model.nodes.len() <= MAX_NODES
             && !model.animations.is_empty();
         let mesh = if here { model.local() } else { model.posed() };
-        let mut data: Vec<f32> = Vec::with_capacity(mesh.triangles.len() * 3 * 6);
+        let mut data: Vec<f32> = Vec::with_capacity(mesh.triangles.len() * 3 * 9);
         let mut parts: Vec<Part> = Vec::new();
 
         for tri in &mesh.triangles {
@@ -222,12 +308,23 @@ impl Scene {
                     count: 3,
                 }),
             }
+            // The vertex record carries no normal -- its 12 spare bytes are
+            // not one, and three readings of them were refuted -- so the
+            // triangle's own is used. Flat shading, which is what the
+            // geometry of this era looks like anyway.
+            let face = face_normal(
+                mesh.positions[tri[0] as usize],
+                mesh.positions[tri[1] as usize],
+                mesh.positions[tri[2] as usize],
+            );
             for &v in tri {
                 let p = mesh.positions[v as usize];
                 let uv = mesh.uvs[v as usize];
                 let node = if here { mesh.node[v as usize] as f32 } else { 0.0 };
                 data.extend_from_slice(&[
-                    p[0] as f32, p[1] as f32, p[2] as f32, uv[0], uv[1], node,
+                    p[0] as f32, p[1] as f32, p[2] as f32,
+                    uv[0], uv[1], node,
+                    face[0], face[1], face[2],
                 ]);
             }
         }
@@ -241,13 +338,15 @@ impl Scene {
             std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(&data[..])),
             glow::STATIC_DRAW,
         );
-        let stride = 6 * std::mem::size_of::<f32>() as i32;
+        let stride = 9 * std::mem::size_of::<f32>() as i32;
         gl.enable_vertex_attrib_array(0);
         gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, stride, 0);
         gl.enable_vertex_attrib_array(1);
         gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, stride, 12);
         gl.enable_vertex_attrib_array(2);
         gl.vertex_attrib_pointer_f32(2, 1, glow::FLOAT, false, stride, 20);
+        gl.enable_vertex_attrib_array(3);
+        gl.vertex_attrib_pointer_f32(3, 3, glow::FLOAT, false, stride, 24);
 
         self.models.insert(
             name.to_ascii_lowercase(),
@@ -353,6 +452,7 @@ impl Scene {
         fade: f32,
         visible: Option<&std::collections::BTreeSet<usize>>,
         clock: f64,
+        eye: [f32; 3],
     ) -> Result<usize, String> {
         let shader = program(gl, VERTEX, FRAGMENT)?;
         if self.blank.is_none() {
@@ -394,6 +494,37 @@ impl Scene {
             gl.get_uniform_location(shader, "fade_distance").as_ref(),
             fade.max(1.0),
         );
+        // the nearest lights to the camera, which is the cheap choice and
+        // enough for a room: a level ships hundreds
+        let mut near: Vec<&Light> = self.lights.iter().collect();
+        near.sort_by(|a, b| {
+            let d = |l: &Light| {
+                (0..3).map(|c| (l.position[c] - eye[c]).powi(2)).sum::<f32>()
+            };
+            d(a).total_cmp(&d(b))
+        });
+        near.truncate(MAX_LIGHTS);
+        let mut positions = Vec::with_capacity(MAX_LIGHTS * 3);
+        let mut colours = Vec::with_capacity(MAX_LIGHTS * 3);
+        let mut radii = Vec::with_capacity(MAX_LIGHTS);
+        for l in &near {
+            positions.extend_from_slice(&l.position);
+            colours.extend(l.colour.iter().map(|c| c * l.intensity));
+            radii.push(l.radius);
+        }
+        gl.uniform_1_i32(
+            gl.get_uniform_location(shader, "light_count").as_ref(),
+            near.len() as i32,
+        );
+        if !near.is_empty() {
+            gl.uniform_3_f32_slice(
+                gl.get_uniform_location(shader, "light_position").as_ref(), &positions);
+            gl.uniform_3_f32_slice(
+                gl.get_uniform_location(shader, "light_colour").as_ref(), &colours);
+            gl.uniform_1_f32_slice(
+                gl.get_uniform_location(shader, "light_radius").as_ref(), &radii);
+        }
+
         gl.active_texture(glow::TEXTURE0);
         gl.uniform_1_i32(gl.get_uniform_location(shader, "albedo").as_ref(), 0);
 

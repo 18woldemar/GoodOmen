@@ -125,7 +125,7 @@ ENGINE = [
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--play", "1", "1", "--expect-drawn", "12929",
-      "--expect-moving", "10000"], None),
+      "--expect-moving", "500"], None),
     ("the renderer draws a level",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",

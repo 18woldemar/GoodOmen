@@ -621,11 +621,12 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
     let mut yaw = spawn.facing;
     let mut pitch = 0.0f64;
     let summary = format!(
-        "l{number} cp{checkpoint}: {} objects, {} placed, {} triangles, in {} \
+        "l{number} cp{checkpoint}: {} objects, {} placed, {} triangles, {} lights, in {} \
          ({} rooms visible from it)",
         loaded.objects,
         loaded.placed,
         loaded.triangles,
+        scene.lights.len(),
         if where_.is_empty() { "no room".into() } else { where_ },
         visible.as_ref().map(|v| v.len()).unwrap_or(0)
     );
@@ -721,6 +722,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                     600.0,
                     if cull { visible.as_ref() } else { None },
                     started.elapsed().as_secs_f64(),
+                    from,
                 )?;
             }
             video.window.gl_swap_window();
@@ -743,8 +745,8 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
         // a fixed clock, so the frame the check looks at is the same one
         // every run: the animations are deterministic in time
-        let culled = scene.draw(&video.gl, &projection.times(&view), 600.0, visible.as_ref(), 0.0)?;
-        let all = scene.draw(&video.gl, &projection.times(&view), 600.0, None, 0.0)?;
+        let culled = scene.draw(&video.gl, &projection.times(&view), 600.0, visible.as_ref(), 0.0, eye)?;
+        let all = scene.draw(&video.gl, &projection.times(&view), 600.0, None, 0.0, eye)?;
         video.gl.finish();
 
         // The corpus check says the shader's *premise* is right -- node-local
@@ -756,7 +758,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         video.gl.read_pixels(0, 0, width, height, glow::RGBA, glow::UNSIGNED_BYTE,
                              glow::PixelPackData::Slice(Some(&mut first)));
         video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
-        scene.draw(&video.gl, &projection.times(&view), 600.0, visible.as_ref(), 0.5)?;
+        scene.draw(&video.gl, &projection.times(&view), 600.0, visible.as_ref(), 0.5, eye)?;
         video.gl.finish();
         let mut later = vec![0u8; (width * height * 4) as usize];
         video.gl.read_pixels(0, 0, width, height, glow::RGBA, glow::UNSIGNED_BYTE,
@@ -769,7 +771,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
 
         // put the first frame back, so `--save` writes what was measured
         video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
-        scene.draw(&video.gl, &projection.times(&view), 600.0, visible.as_ref(), 0.0)?;
+        scene.draw(&video.gl, &projection.times(&view), 600.0, visible.as_ref(), 0.0, eye)?;
         video.gl.finish();
         if let Some(i) = std::env::args().position(|a| a == "--save") {
             if let Some(path) = std::env::args().nth(i + 1) {
@@ -977,7 +979,7 @@ fn level(
                 video.gl.viewport(0, 0, w as i32, h as i32);
                 video.gl.clear_color(0.05, 0.06, 0.09, 1.0);
                 video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
-                scene.draw(&video.gl, &projection.times(&view), span * 2.0, None, 0.0)?;
+                scene.draw(&video.gl, &projection.times(&view), span * 2.0, None, 0.0, eye)?;
             }
             video.window.gl_swap_window();
             let _ = EYE;
@@ -991,7 +993,7 @@ fn level(
         let projection = Mat4::perspective(1.1, 1.0, span * 0.002, span * 4.0);
         video.gl.clear_color(0.05, 0.06, 0.09, 1.0);
         video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
-        scene.draw(&video.gl, &projection.times(&view), span * 2.0, None, 0.0)?;
+        scene.draw(&video.gl, &projection.times(&view), span * 2.0, None, 0.0, eye)?;
         video.gl.finish();
 
         let mut pixels = vec![0u8; (width * height * 4) as usize];
