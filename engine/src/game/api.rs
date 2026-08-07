@@ -835,6 +835,46 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         })?,
     )?;
 
+    // The difficulty, which is the other half of every hitpoint in the game.
+    // `menu.lua` is the only caller of the setter, with 0.2, 0.35, 0.5 and
+    // 1.0 -- Easy, Medium, Hard and "Jinkies!".
+    globals.set(
+        "mdkSetDifficulty",
+        // 0x43aa60, straight into the global at 0x4bb71c
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let d = args.first().map(number).unwrap_or(0.0) as f32;
+            if let Some(mut w) = world::world_mut(lua) {
+                w.set_difficulty(d);
+            }
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "mdkGetDifficulty",
+        lua.create_function(|lua, _: Variadic<Value>| {
+            Ok(world::world(lua).map(|w| w.difficulty()).unwrap_or(world::DEFAULT_DIFFICULTY) as f64)
+        })?,
+    )?;
+    globals.set(
+        "mdkDiffScale",
+        // 0x43aaf0, which is the scaling routine itself exposed to scripts
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let base = args.first().map(number).unwrap_or(0.0) as i64 as i32;
+            let d = world::world(lua).map(|w| w.difficulty()).unwrap_or(world::DEFAULT_DIFFICULTY);
+            Ok(world::diff_scale(d, base) as f64)
+        })?,
+    )?;
+    globals.set(
+        "mdkCreateDestructable",
+        // 0x440e00. `boss.lua` is its only caller -- 16 times, giving
+        // Zizzy's parts their own health as the fight goes on.
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let base = args.get(1).map(number).unwrap_or(0.0) as i64 as i32;
+            change_gob(lua, args.first(), |w, id| w.make_destructable(id, base));
+            Ok(())
+        })?,
+    )?;
+
     // `chSndSwitchMusic(N)` is the same numbering as a room's `music`:
     // `Music/TrackNN`, with 0 and -1 stopping it. 148 calls, more than any
     // other sound function in the scripts.

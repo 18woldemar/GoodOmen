@@ -173,7 +173,12 @@ ANSWERS = {"chGetGameWasReset": "0", "mdkLoadLevelIsInstant": "0",
            # hitpoints reads as on both sides.
            "mdkIsDamageType": "0", "mdkGetHitpoints": "0",
            "mdkGobGetHealth": "0", "mdkGobGetDamageFilter": "0",
-           "mdkSubtractHitpoints": "0"}
+           "mdkSubtractHitpoints": "0",
+           # the difficulty, the other half of every hitpoint. Hard, because
+           # that is the setting the binary's enemy table is written for --
+           # `mdkDiffScale` doubles the number, so 0.5 is 1x.
+           "mdkGetDifficulty": "0.5",
+           "mdkDiffScale": "function(n) return n end"}
 
 # The tick loop. `steps` is the player's path, injected from Python; the
 # engine state it needs -- a clock, timers, stasis, the room boxes -- is all

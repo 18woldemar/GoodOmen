@@ -168,6 +168,8 @@ SLOW = [
     ("the random numbers are the original's",
      ["rand.py", "$MDK2_GOG/mdk2Main.exe", "--engine", "$MDK2_GOG",
       "--count", "2000"], None),
+    ("the enemy health table is the original's",
+     ["health.py", "$MDK2_GOG/mdk2Main.exe", "--engine"], None),
     ("the controller walks every level",
      ["walksim.py", "extracted/base", "--resources", "extracted", "--all",
       "--expect-standing", "2556", "--expect-inside", "6"], "base"),

@@ -227,6 +227,29 @@ fn main() {
         return;
     }
 
+    // `--health` prints the enemy table at each of the four difficulties, so
+    // `tools/health.py` can hold it against the binary it came out of.
+    // Any bases after it are scaled too, which is how the rule that keeps a
+    // non-zero base off zero gets checked: the table has no record small
+    // enough to reach it.
+    if let Some(i) = args.iter().position(|a| a == "--health") {
+        use goodomen::game::world::{diff_scale, BASE_HITPOINTS, DIFFICULTY};
+        let scaled = |base: i32| -> String {
+            DIFFICULTY
+                .iter()
+                .map(|(_, d)| diff_scale(*d, base).to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        for (kind, name, base) in BASE_HITPOINTS {
+            println!("{} {} {} {}", kind as i64, name, base, scaled(base));
+        }
+        for base in args[i + 1..].iter().filter_map(|a| a.parse::<i32>().ok()) {
+            println!("- - {} {}", base, scaled(base));
+        }
+        return;
+    }
+
     // `--music DIR` reads the 27 bare ACM streams under `Music/` and checks
     // the two things streaming them adds: that rewinding really starts over,
     // and that a queued source produces sound.

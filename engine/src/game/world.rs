@@ -61,6 +61,88 @@ pub struct Gob {
     pub flag: f64,
 }
 
+/// The four difficulties the menu offers, and the number each one hands to
+/// `mdkSetDifficulty`. Out of `scripts/menu.lua` (the only caller in the whole
+/// game) and `mdk2.str` 680, 681, 682 and **685** for the names — the fourth
+/// is not 683, which is "Configure Joystick".
+///
+/// The number is not the multiplier: [`diff_scale`] doubles it first, so
+/// **Hard is 1.0x and the table below is what you fight on Hard.**
+pub const DIFFICULTY: [(&str, f32); 4] = [
+    ("Easy", 0.2),
+    ("Medium", 0.35),
+    ("Hard", 0.5),
+    ("Jinkies!", 1.0),
+];
+
+/// Ours. The original leaves the global at 0x4bb71c **uninitialised** — the
+/// bytes in the file are `00 ff ff 00`, and `mdkSetDifficulty` from the
+/// new-game menu is its only writer, so a level reached any other way scales
+/// its enemies by whatever was in that memory. Hard is the one that makes
+/// [`BASE_HITPOINTS`] literal.
+pub const DEFAULT_DIFFICULTY: f32 = DIFFICULTY[2].1;
+
+/// **The enemy table**, at 0x4ab2e8 in the original: 19 records of 0x88 bytes,
+/// terminated by a zero first field. Field 0 is the `OBJ_*` type, +0x04 the
+/// name below, +0x3c the base hitpoints. The constructor at 0x42f2e0 walks it
+/// linearly for a matching type and passes +0x3c through [`diff_scale`].
+///
+/// Five of the types have no `OBJ_*` constant, so they are unreachable from a
+/// script and named here only by the table's own string. `grunt` appears
+/// twice because `OBJ_INVISOGRUNT` is a grunt with a separate record.
+///
+/// Hunting for a *constant* here found nothing for a whole session: the
+/// hitpoints are not literals in the code, they are this table scaled at run
+/// time. See [`crate::game::api`] for the rest of the damage model.
+pub const BASE_HITPOINTS: [(f64, &str, i32); 19] = [
+    (201.0, "samsmite", 20),   // OBJ_SAMSMITE
+    (215.0, "samfire", 20),    // no OBJ_ constant
+    (216.0, "samrock", 20),    // OBJ_OBSIDIANSAMSMITE
+    (203.0, "conehead", 45),   // OBJ_CONEHEAD
+    (250.0, "coneciv", 50),    // OBJ_CONEHEADCIV1
+    (200.0, "bif", 400),       // OBJ_BIF
+    (204.0, "hans", 700),      // OBJ_HANS
+    (205.0, "hoser", 55),      // OBJ_HOSER
+    (202.0, "grunt", 40),      // OBJ_GRUNT
+    (219.0, "grunt", 40),      // OBJ_INVISOGRUNT
+    (207.0, "doganboy", 100),  // OBJ_DOGANBOY
+    (214.0, "ultradogan", 225),
+    (211.0, "bfb", 500),
+    (220.0, "shwang", 1000), // OBJ_SHWANG
+    (210.0, "badmax", 5000),
+    (217.0, "poopsy", 65), // OBJ_POOPSY
+    (206.0, "angel", 500), // OBJ_ANGEL
+    (208.0, "birdbrain1", 200),
+    (260.0, "zizzy", 2000), // OBJ_ZIZZY
+];
+
+/// The base hitpoints for a type, if it is one the table names.
+pub fn base_hitpoints(kind: f64) -> Option<i32> {
+    BASE_HITPOINTS.iter().find(|(k, _, _)| *k == kind).map(|(_, _, hp)| *hp)
+}
+
+/// Scale a base by the difficulty, exactly as 0x42d020 does — the routine the
+/// scripts see as `mdkDiffScale`.
+///
+/// Two details are in the code and would not be guessed. The multiplier is
+/// **twice** the difficulty (`fadd st,st` before the multiply), which is why
+/// Hard's 0.5 leaves the base alone. And a **non-zero base never scales to
+/// zero**: the result is pushed off zero to ±1 in whichever direction the base
+/// went, so the weakest enemy on Easy still takes a hit to kill.
+pub fn diff_scale(difficulty: f32, base: i32) -> i32 {
+    // `ftol` truncates toward zero, which `as i32` also does
+    let scaled = (2.0 * difficulty * base as f32) as i32;
+    match (scaled, base) {
+        (0, b) if b > 0 => 1,
+        (0, b) if b < 0 => -1,
+        _ => scaled,
+    }
+}
+
+/// The damage filter every type constructor writes as a literal **9** —
+/// `DAMAGE_GOODGUY | DAMAGE_SNIPER`, the two kinds an enemy is hurt by.
+pub const FILTER_GOODGUY_SNIPER: i16 = 9;
+
 #[derive(Default)]
 pub struct World {
     gobs: Vec<Gob>,
@@ -69,6 +151,9 @@ pub struct World {
     by_name: std::collections::HashMap<String, Id>,
     /// Bumped by every move, so nothing has to diff the world to notice one.
     generation: u64,
+    /// `None` until a script picks one, which is the original's state too —
+    /// see [`DEFAULT_DIFFICULTY`] for what that costs it.
+    difficulty: Option<f32>,
 }
 
 impl World {
@@ -76,11 +161,40 @@ impl World {
         World::default()
     }
 
-    pub fn register(&mut self, gob: Gob) -> Id {
+    pub fn register(&mut self, mut gob: Gob) -> Id {
+        // The original builds the gob and then constructs it by type, and the
+        // enemy constructor is where the hitpoints come from. Here that is one
+        // step, so the table is applied on the way in.
+        if let Some(base) = base_hitpoints(gob.kind) {
+            gob.max_hitpoints = diff_scale(self.difficulty(), base) as i16;
+            gob.hitpoints = gob.max_hitpoints;
+            gob.damage_filter = FILTER_GOODGUY_SNIPER;
+        }
         let id = self.gobs.len() as Id;
         self.by_name.insert(gob.name.clone(), id);
         self.gobs.push(gob);
         id
+    }
+
+    /// What `mdkGetDifficulty` answers, and what [`diff_scale`] is fed.
+    pub fn difficulty(&self) -> f32 {
+        self.difficulty.unwrap_or(DEFAULT_DIFFICULTY)
+    }
+
+    pub fn set_difficulty(&mut self, d: f32) {
+        self.difficulty = Some(d);
+    }
+
+    /// Give something a maximum and fill it — what `mdkCreateDestructable`
+    /// (0x440e00, into the constructor at 0x424f00) does with the base a
+    /// script hands it. The **negative fallback** is the original's: if the
+    /// scaled value comes out below zero it keeps the base instead.
+    pub fn make_destructable(&mut self, id: Id, base: i32) {
+        let scaled = diff_scale(self.difficulty(), base) as i16;
+        let Some(gob) = self.gobs.get_mut(id as usize) else { return };
+        gob.max_hitpoints = if scaled >= 0 { scaled } else { base as i16 };
+        gob.hitpoints = gob.max_hitpoints;
+        gob.damage_filter = FILTER_GOODGUY_SNIPER;
     }
 
     /// Move an object. The scripts do this through `mdkGobSetPosition` and
@@ -239,22 +353,9 @@ pub fn install(lua: &Lua) -> Result<(), Error> {
                 number(&arg(16)),
             ],
             // The scene graph carries none of this -- no object spends a
-            // payload slot on health -- and the original's **six** type
-            // constructors set it (0x424f41, 0x42594d, 0x42650e, 0x426cc8,
-            // 0x42f382, 0x42f63c). Each writes the maximum and then
-            // `hitpoints = maximum`, so a thing starts whole; the first also
-            // sets the damage filter to a literal **9**, which is
-            // `DAMAGE_GOODGUY | DAMAGE_SNIPER`.
-            //
-            // The maximum is **not a constant**: 0x42d020 computes
-            // `(int)(2 * difficulty * base)` from a global float the game
-            // sets at run time (0x4bb71c, uninitialised in the file), and
-            // rounds a positive base up to 1 rather than down to 0. So
-            // health is per-type *and* per-difficulty, and the base per type
-            // is the number still to be read.
-            //
-            // Zero until then, which makes `mdkAddHitpoints` do nothing --
-            // exactly what the original does to something already at zero.
+            // payload slot on health -- and the original's type constructors
+            // set it. `World::register` fills all three in from the type,
+            // because that is the step the original takes next.
             hitpoints: 0,
             max_hitpoints: 0,
             damage_filter: 0,
@@ -352,5 +453,49 @@ mod tests {
         world.register(Gob { name: "d".into(), position: [2.0, 0.0, 0.0], ..Gob::default() });
         assert_eq!(world.len(), 2);
         assert_eq!(world.get(world.find("d").unwrap()).unwrap().position[0], 2.0);
+    }
+
+    /// The scale is `2 * difficulty`, so the four menu settings are 0.4x,
+    /// 0.7x, 1x and 2x — and a grunt's 40 is 40 only on Hard.
+    #[test]
+    fn the_difficulty_doubles_and_hard_leaves_the_base_alone() {
+        let scaled: Vec<i32> = DIFFICULTY.iter().map(|(_, d)| diff_scale(*d, 40)).collect();
+        assert_eq!(scaled, [16, 28, 40, 80]);
+        assert_eq!(diff_scale(DIFFICULTY[3].1, 2000), 4000, "Zizzy on Jinkies!");
+    }
+
+    /// The half of 0x42d020 that has to be read rather than guessed: nothing
+    /// with a base is left on zero hitpoints, in either direction.
+    #[test]
+    fn a_non_zero_base_never_scales_to_zero() {
+        assert_eq!(diff_scale(0.0, 5000), 1, "a difficulty of zero still leaves one");
+        assert_eq!(diff_scale(0.0, -5000), -1);
+        assert_eq!(diff_scale(0.5, 0), 0, "but zero stays zero");
+    }
+
+    /// Registering an enemy fills the three fields the constructor fills.
+    #[test]
+    fn an_enemy_is_registered_whole() {
+        let mut world = World::new();
+        world.set_difficulty(DIFFICULTY[3].1); // Jinkies!
+        let id = world.register(Gob { name: "z".into(), kind: 260.0, ..Gob::default() });
+        let zizzy = world.get(id).unwrap();
+        assert_eq!(zizzy.max_hitpoints, 4000);
+        assert_eq!(zizzy.hitpoints, zizzy.max_hitpoints, "a thing starts whole");
+        assert_eq!(zizzy.damage_filter, FILTER_GOODGUY_SNIPER);
+
+        // and a door is not an enemy
+        let d = world.register(Gob { name: "d".into(), kind: 800.0, ..Gob::default() });
+        assert_eq!(world.get(d).unwrap().max_hitpoints, 0);
+    }
+
+    /// `mdkCreateDestructable(gob, 350)` — one of `boss.lua`'s sixteen.
+    #[test]
+    fn a_destructable_takes_the_base_a_script_gives_it() {
+        let mut world = World::new(); // Hard by default, so 350 stays 350
+        let id = world.register(Gob { name: "heart".into(), ..Gob::default() });
+        world.make_destructable(id, 350);
+        assert_eq!(world.get(id).unwrap().hitpoints, 350);
+        assert!(world.hurt(id, 349) == false && world.hurt(id, 1), "and 350 hits kill it");
     }
 }
