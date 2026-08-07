@@ -340,7 +340,8 @@ if not ok then io.write("!\\t" .. tostring(err) .. "\\n") end
 """
 
 
-def run(source: str, extra: str = "", trace: bool = False) -> str:
+def run(source: str, extra: str = "", trace: bool = False,
+        timeout: float = 300) -> str:
     """Run one preprocessed script under the prelude. -> its stdout."""
     if trace:
         if "]=====]" in source:
@@ -348,8 +349,11 @@ def run(source: str, extra: str = "", trace: bool = False) -> str:
         extra += "\nSOURCE = [=====[\n" + source + "\n]=====]\n" + TRACE
         source = ""
     program = PRELUDE + "\n" + extra + "\n" + source
-    p = subprocess.run([LUA, "-"], input=program, capture_output=True,
-                       text=True)
+    try:
+        p = subprocess.run([LUA, "-"], input=program, capture_output=True,
+                           text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise LuaError(f"did not finish in {timeout:g}s")
     if p.returncode:
         err = [l for l in (p.stderr or "").splitlines()
                if l.strip() and not l.lstrip().startswith(("stack traceback",

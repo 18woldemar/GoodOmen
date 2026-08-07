@@ -63,10 +63,28 @@ that each add themselves. See tools/rooms.py.
 `extracted/scripts`: `override/` is a shipped patch and it adds level 1's
 checkpoints 13 and 14.
 
+**After the boot, the handlers.** The level scripts hang 443 tables of them
+on the object globals -- `OnEnterRoom`, `OnCreate`, `OnDie`, `OnUpdate`,
+`OnTimer`, `OnDamage`, `OnCollision` and thirteen rarer ones -- and every one
+of those tables names an object the scene graph registers. `--events` calls
+each of them once, and **42129 of 49546 calls run to the end**.
+
+That is a survey of the surface, not a simulation: a handler called out of
+context is not doing what it would do in the game. Its worth is in the 7417
+that do not survive, because each one names something the engine has to hold,
+and they come in two kinds. Engine data, mostly numbers a stub answers with
+nil: `mdkGobDistance(gob, player)` and `mdkGobDistancePoint(gob, "l1_r8wp")`
+are the two that matter -- proximity is how this game triggers nearly
+everything, and both are implementable today from the scene graph's positions
+and waypoints. And script state that only exists mid-game: `TutFuncs`,
+`SetUpDoorAndEnemies`, `GenDone` are methods another object's handler
+installs, so calling handlers in an arbitrary order is bound to miss them.
+
 Usage:
     python3 tools/boot.py extracted                  # all ten, all checkpoints
     python3 tools/boot.py extracted --level 1        # one level
     python3 tools/boot.py extracted --api            # the functions it needs
+    python3 tools/boot.py extracted --events         # and fire the handlers
 """
 
 from __future__ import annotations
@@ -86,10 +104,16 @@ CHECKPOINT = re.compile(
 
 # `level()` reads these before it starts, and the menu is what normally sets
 # them. Nothing here needs a real save game.
-ANSWERS = {"chGetGameWasReset": "0", "mdkLoadLevelIsInstant": "0"}
+#
+# `chGetDeltaT` is here because the stub's rule -- a name with Get in it
+# hands back a handle -- is wrong for the scalar getters, and the handlers
+# do arithmetic on what it returns. That is the shape of nearly everything
+# `--events` reports: an engine function that has to answer with a number.
+ANSWERS = {"chGetGameWasReset": "0", "mdkLoadLevelIsInstant": "0",
+           "chGetDeltaT": "0.0333"}
 
 DRIVER = """
-BOOTED, FAILED, WANTED = {}, {}, {}
+BOOTED, FAILED, WANTED, FIRED = {}, {}, {}, {}
 -- what each checkpoint demands: the argument, not just the call
 function mdkPreloadRes(name, ...)
   CALLS[table.getn(CALLS) + 1] = "mdkPreloadRes"
@@ -109,12 +133,30 @@ for _, job in ipairs(JOBS) do
   local key = "l" .. job[1] .. " cp" .. job[2]
   if ok then
     BOOTED[table.getn(BOOTED) + 1] = key
+    if EVENTS then
+      -- every handler the level script hung on an object global. Calling one
+      -- out of context is a survey of the surface, not a simulation: what it
+      -- is for is the engine functions the handlers reach for, and the ones
+      -- that fail name the state the engine still has to hold.
+      for name, gob in pairs(_G) do
+        if type(gob) == "table" and rawget(gob, "name") == name then
+          for slot, fn in pairs(gob) do
+            if type(fn) == "function" and strfind(slot, "^On") then
+              local fine, ferr = pcall(fn, gob, gob, 1, "DAMAGE_NORMAL", 1)
+              local k = slot .. "|" .. (fine and "" or tostring(ferr))
+              FIRED[k] = (FIRED[k] or 0) + 1
+            end
+          end
+        end
+      end
+    end
     for i = 1, table.getn(CALLS) do USED[CALLS[i]] = (USED[CALLS[i]] or 0) + 1 end
   else
     FAILED[table.getn(FAILED) + 1] = key .. ": " .. tostring(err)
   end
 end
 io.write("===\\n")
+for k, n in pairs(FIRED) do io.write("ev\\t" .. k .. "\\t" .. n .. "\\n") end
 for i = 1, table.getn(BOOTED) do io.write("ok\\t" .. BOOTED[i] .. "\\n") end
 for i = 1, table.getn(FAILED) do io.write("no\\t" .. FAILED[i] .. "\\n") end
 for name, n in pairs(USED) do io.write("fn\\t" .. name .. "\\t" .. n .. "\\n") end
@@ -128,7 +170,8 @@ def checkpoints(script: Path) -> list[int]:
                    CHECKPOINT.findall(script.read_text(errors="replace"))})
 
 
-def boot(tree: Path, override: Path | None, levels: list[int]) -> dict:
+def boot(tree: Path, override: Path | None, levels: list[int],
+         events: bool = False, extra: dict | None = None) -> dict:
     """Run `level(n, cp, nil)` for every checkpoint of every level.
 
     One Lua process for all of them: preparing the script tree costs more
@@ -149,14 +192,16 @@ def boot(tree: Path, override: Path | None, levels: list[int]) -> dict:
     if not jobs:
         raise SystemExit("no level scripts under " + str(tree))
 
-    answers = "".join(f'ANSWERS["{k}"] = {v}\n' for k, v in ANSWERS.items())
+    answers = "".join(f'ANSWERS["{k}"] = {v}\n'
+                      for k, v in {**ANSWERS, **(extra or {})}.items())
     stubs = ("ANSWERS = {}\n" + answers + luarun.stub_source()
              + f"LUADIR = [[{tmp}]]\nUSED = {{}}\n"
+             + f"EVENTS = {'1' if events else 'nil'}\n"
              + "JOBS = {" + ",".join(f"{{{n},{cp}}}" for n, cp in jobs) + "}\n")
     source = (tmp / "mdk2.lua").read_text()
     out = luarun.run(source + DRIVER, stubs)
 
-    booted, failed, used, wanted = [], [], {}, {}
+    booted, failed, used, wanted, fired = [], [], {}, {}, {}
     for line in out.split("===\n", 1)[-1].splitlines():
         kind, _, rest = line.partition("\t")
         if kind == "ok":
@@ -166,8 +211,12 @@ def boot(tree: Path, override: Path | None, levels: list[int]) -> dict:
         elif kind in ("fn", "res"):
             name, _, count = rest.partition("\t")
             (used if kind == "fn" else wanted)[name] = int(count)
+        elif kind == "ev":
+            slot, _, count = rest.rpartition("\t")
+            event, _, err = slot.partition("|")
+            fired[(event, err)] = int(count)
     return {"jobs": jobs, "booted": booted, "failed": failed,
-            "used": used, "wanted": wanted}
+            "used": used, "wanted": wanted, "fired": fired}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -176,8 +225,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--level", type=int, help="just this one")
     ap.add_argument("--api", action="store_true",
                     help="list the engine functions the boots called")
+    ap.add_argument("--answer", action="append", default=[],
+                    metavar="NAME=VALUE",
+                    help="what an engine function returns, for the run")
+    ap.add_argument("--events", action="store_true",
+                    help="also fire every handler the boot leaves hanging on "
+                         "the objects, and report what stops it")
     ap.add_argument("--resources", action="store_true",
                     help="check that every resource the boots demand exists")
+    ap.add_argument("--expect-handlers", type=int, metavar="N",
+                    help="fail unless exactly N handler calls survive")
     ap.add_argument("--expect", type=int, metavar="N",
                     help="fail unless exactly N checkpoints boot")
     args = ap.parse_args(argv)
@@ -185,7 +242,31 @@ def main(argv: list[str] | None = None) -> int:
     gog = os.environ.get("MDK2_GOG")
     over = Path(gog) / "override" if gog else None
     r = boot(args.tree, over if over and over.is_dir() else None,
-             [args.level] if args.level else list(range(1, 11)))
+             [args.level] if args.level else list(range(1, 11)), args.events,
+             dict(a.split("=", 1) for a in args.answer))
+
+    if args.events:
+        by_event: dict[str, list[int]] = {}
+        reasons: dict[str, int] = {}
+        for (event, err), n in r["fired"].items():
+            hit = by_event.setdefault(event, [0, 0])
+            hit[0] += n
+            hit[1] += n if not err else 0
+            if err:
+                reasons[re.sub(r"^.*?:\d+: ", "", err)] = \
+                    reasons.get(re.sub(r"^.*?:\d+: ", "", err), 0) + n
+        for event, (all_, ok) in sorted(by_event.items(),
+                                        key=lambda kv: -kv[1][0]):
+            print(f"{event:16s} {ok:5d}/{all_:<5d} run to the end")
+        survived = sum(v[1] for v in by_event.values())
+        print(f"\n{survived}/{sum(v[0] for v in by_event.values())} handler "
+              f"calls survive; what stops the rest:")
+        for why, n in sorted(reasons.items(), key=lambda kv: -kv[1])[:15]:
+            print(f"  {n:5d}x  {why}")
+        if args.expect_handlers and survived != args.expect_handlers:
+            print(f"expected {args.expect_handlers} handler calls to survive",
+                  file=sys.stderr)
+            return 1
 
     if args.api:
         for name, n in sorted(r["used"].items(), key=lambda kv: -kv[1]):
