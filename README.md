@@ -48,7 +48,9 @@ It reads the game out of its own directory — `data/*.zip` first and then
   wears `kurt.mod`, and the engine drives his locomotion the way the
   original's `mdkWalkerAnimUpdate` does — **every one of `kurt.mod`'s 61
   animation ids is a constant the binary names `ANIM_*`**, and 6292 of the
-  corpus's 6311 are.
+  corpus's 6311 are. Characters and pickups are placed from their type too:
+  the convention holds for 55 of the 149 `OBJ_*` types, which is what puts
+  them in the world at all.
 
 **Linux and Windows are both tested**, and the Windows build is
 cross-compiled and run under Wine inside a real installation as part of the

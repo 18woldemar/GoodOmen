@@ -125,7 +125,6 @@ pub unsafe fn start(
         .map(|(_, g)| crate::render::scene::Light::from_payload(g.position, g.payload))
         .collect();
 
-    let player = boot.player.clone();
     let placements: Vec<(String, Mat4, Option<usize>, world::Id, bool)> = w
         .iter()
         .filter_map(|(id, gob)| {
@@ -142,11 +141,12 @@ pub unsafe fn start(
             // uninitialised. It is applied to **the player**, which the
             // level named itself through `mdkSetPlayModeGobs`, and where
             // `OBJ_KURT` wearing `kurt.mod` is not in doubt.
-            let is_player = player.as_deref() == Some(gob.name.as_str());
-            let from_type = named.is_none() && is_player;
-            let resource = named.or_else(|| {
-                is_player.then(|| crate::game::api::model_for_type(gob.kind)).flatten()
-            })?;
+            // The convention holds for 55 of the 149 `OBJ_*` types, and the
+            // renderer refuses the two whose vertices are not sane, so it is
+            // applied to everything now rather than to the player alone:
+            // it is what puts the characters and the pickups in the world.
+            let from_type = named.is_none();
+            let resource = named.or_else(|| crate::game::api::model_for_type(gob.kind))?;
             Some((
                 resource,
                 Mat4::translation([

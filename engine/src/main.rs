@@ -843,7 +843,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
     let mut pitch = 0.0f64;
     let summary = format!(
         "l{number} cp{checkpoint}: {} objects, {} placed ({} by their type), {} triangles, \
-         {} posed, {} lights, in {} \
+         {} posed, {} lights, {} refused, in {} \
          ({} rooms visible from it)",
         loaded.objects,
         loaded.placed,
@@ -851,6 +851,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         loaded.triangles,
         scene.posed_draws(),
         scene.lights.len(),
+        scene.refused,
         if where_.is_empty() { "no room".into() } else { where_ },
         visible.as_ref().map(|v| v.len()).unwrap_or(0)
     );

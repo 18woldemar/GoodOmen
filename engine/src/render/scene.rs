@@ -196,6 +196,10 @@ pub struct Scene {
     hidden: Vec<Vec<u32>>,
     /// The game's own draw distance, from `chFogStartEnd`.
     pub fog: Option<f32>,
+    /// Models refused because their vertices are not finite or not of a
+    /// sane size — the uninitialised-root family.
+    pub refused: usize,
+    refused_names: std::collections::BTreeSet<String>,
     /// The room each draw belongs to, or `None` for an object in no room at
     /// all — which is **never culled**, as the original does not cull it.
     rooms: Vec<Option<usize>>,
@@ -309,6 +313,29 @@ impl Scene {
             && model.nodes.len() <= MAX_NODES
             && !model.animations.is_empty();
         let mesh = if here { model.local() } else { model.posed() };
+
+        // **A model whose vertices are not finite and not of a sane size is
+        // refused**, because one bad vertex takes the whole draw call with
+        // it.
+        //
+        // Eight models carry an uninitialised translation on a dummy root
+        // that draws nothing: six NaN — `fishy`, `chuckles`, `flyer`,
+        // `l1_r7cloudspin`, `l3_slide`, `l7_dshwang` — and two merely
+        // absurd, `cloak` at 3.5e26 units across and `zizzy` at 2.2e24.
+        // **None of them reaches this guard**, and that is the point worth
+        // recording: all eight are animated, so the mesh above is
+        // `local()`, which never accumulates a root translation. Only the
+        // bind pose does, and only a *static* model takes it. The guard is
+        // there for a static model with the same defect, which the corpus
+        // does not happen to contain.
+        const SANE: f64 = 1.0e4;
+        let ok = mesh.positions.iter().all(|p| {
+            p.iter().all(|c| c.is_finite() && c.abs() < SANE)
+        });
+        if !ok {
+            self.refused += 1;
+            return;
+        }
         let mut data: Vec<f32> = Vec::with_capacity(mesh.triangles.len() * 3 * 9);
         let mut parts: Vec<Part> = Vec::new();
 
@@ -398,6 +425,9 @@ impl Scene {
         if self.models.contains_key(&key) {
             return true;
         }
+        if self.refused_names.contains(&key) {
+            return false;
+        }
         let Ok(bytes) = install.read(&format!("{key}.mod")) else {
             self.missing += 1;
             return false;
@@ -418,6 +448,10 @@ impl Scene {
             }
         }
         self.upload_model(gl, &key, &model);
+        if !self.models.contains_key(&key) {
+            self.refused_names.insert(key);
+            return false;
+        }
         true
     }
 
