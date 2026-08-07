@@ -217,10 +217,28 @@ STUBS = r"""
 -- itself, and any other unknown global is one of its functions.
 CALLS = {}
 ANSWERS = ANSWERS or {}
+-- The engine's ALL_CAPS constants are numbers: the scripts add them together
+-- as bit flags -- `omAnimPlay(gob, ANIM_X, ANIMFLAG_NOTRANS+ANIMFLAG_INTERRUPT)`
+-- -- and the values are nowhere in the scripts. Here a constant stands for
+-- its own name, so `+` on two strings joins them instead. The sum only ever
+-- goes back into a stubbed engine function, which does not read it. Numeric
+-- strings still add as numbers: 5.1 tries coercion before the metamethod.
+debug.setmetatable("", {__index = string,
+                        __add = function(a, b) return a .. "+" .. b end})
 -- registering an object defines a global of that name, which is how the
 -- scene graphs name their parents and how the level scripts reach them
 function mdkRegisterObject(name, ...)
   CALLS[table.getn(CALLS) + 1] = "mdkRegisterObject"
+  _G[name] = {name = name}
+  return _G[name]
+end
+-- and so does creating one from a script: level5.lua says
+--   mdkCreateObjectLua("doorwav", OBJ_NONE, mdkGetScene(), nil, nil)
+--   doorwav.wav = omGobAddSound(doorwav, "jd_doors", 0)
+-- so the name in the first argument is a global by the time the next line
+-- runs. Three of the ten levels do not boot without this.
+function mdkCreateObjectLua(name, ...)
+  CALLS[table.getn(CALLS) + 1] = "mdkCreateObjectLua"
   _G[name] = {name = name}
   return _G[name]
 end
@@ -440,6 +458,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dump", metavar="PATH",
                     help="after running, print this global as JSON, e.g. "
                          "--dump Level.scenegraph.checkpoints")
+    ap.add_argument("--call", metavar="LUA",
+                    help="run this once the script has loaded, and count "
+                         "only what it does -- `--call 'Level.Init(1)'` is "
+                         "the engine's own entry into a level")
     ap.add_argument("--trace", action="store_true",
                     help="report the engine calls made, and where it stopped")
     ap.add_argument("--tree", type=Path,
@@ -517,7 +539,7 @@ def main(argv: list[str] | None = None) -> int:
                           stubs + DUMP)
                 sys.stdout.write(out.split("---\n", 1)[-1])
                 ok += 1
-            elif args.trace:
+            elif args.trace or args.call:
                 # the engine loads the scene graph named by Level.file while
                 # it is loading the level script -- the comment above
                 # PreInitLevel in mdk2.lua says "called from the bowels of
@@ -532,6 +554,10 @@ def main(argv: list[str] | None = None) -> int:
                             "  return _pre()\nend\n")
                     boot += "".join(f"dofile('{b}')\n"
                                     for b in args.boot[1:])
+                # `--call` counts only what the call itself does, so the
+                # tally is cleared once the script has finished loading
+                if args.call:
+                    source += "\nCALLS = {}\n" + args.call + "\n"
                 out = run(boot + source, stubs, trace=True)
                 body = out.split("---\n", 1)[-1].splitlines()
                 calls = [l for l in body if not l.startswith("!")]
@@ -540,7 +566,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{f.name}: {len(calls)} engine functions, "
                       f"{total} calls" +
                       (f", stopped at {fail[0][2:]}" if fail else ", ran to the end"))
-                for l in calls[:12]:
+                for l in (calls if args.call else calls[:12]):
                     n, c = l.split("\t")
                     print(f"    {c:>5}x  {n}")
                 ok += not fail
