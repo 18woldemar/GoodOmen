@@ -1154,6 +1154,10 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         level_scripts.lua.app_data_ref::<goodomen::game::api::Boot>(),
     ) {
         scene.follow(&w, &boot.playing, &boot.hidden);
+        // and the fog the level start asked for. `Level.Init` sets it on
+        // nine of the levels; the rest do it from an `OnEnterRoom`, so it
+        // arrives once the player is in the room that wants it.
+        scene.fog = boot.fog;
     }
 
     // the level's own ambient sounds, placed where its objects stand. No
@@ -1214,7 +1218,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
     let summary = format!(
         "l{number} cp{checkpoint}: {} objects, {} placed ({} by their type), {} triangles, \
          {} posed, {} lights, {} refused, in {} \
-         ({} rooms visible from it, {standing_in}, {track_here}), {sounding}",
+         ({} rooms visible from it, {standing_in}, {track_here}), {sounding}, {}",
         loaded.objects,
         loaded.placed,
         loaded.by_type,
@@ -1223,7 +1227,21 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         scene.lights.len(),
         scene.refused,
         if where_.is_empty() { "no room".into() } else { where_ },
-        visible.as_ref().map(|v| v.len()).unwrap_or(0)
+        visible.as_ref().map(|v| v.len()).unwrap_or(0),
+        // the level's own fog, which is per room and set by an OnEnterRoom
+        // handler; level 1 sets none at all
+        if scene.fog.on {
+            format!(
+                "fog {:.0}-{:.0} at {:.2},{:.2},{:.2}",
+                scene.fog.near,
+                scene.fog.far,
+                scene.fog.colour[0],
+                scene.fog.colour[1],
+                scene.fog.colour[2]
+            )
+        } else {
+            "no fog".to_string()
+        }
     );
 
     if show {
@@ -1349,7 +1367,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
             ) {
                 scene.follow(&w, &boot.playing, &boot.hidden);
                 // the game's own draw distance, once it has named one
-                scene.fog = boot.fog.map(|(_, far)| far as f32);
+                scene.fog = boot.fog;
             }
 
             // the room under the camera decides what is drawn, every frame
@@ -1466,8 +1484,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 scene.draw(
                     &video.gl,
                     &projection.times(&view),
-                    // the level's own fog distance when it has set one
-                    scene.fog.unwrap_or(600.0),
+                    scene.fog,
                     if cull { visible.as_ref() } else { None },
                     started.elapsed().as_secs_f64(),
                     from,
@@ -1508,8 +1525,8 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
         // a fixed clock, so the frame the check looks at is the same one
         // every run: the animations are deterministic in time
-        let culled = scene.draw(&video.gl, &projection.times(&view), 600.0, visible.as_ref(), 0.0, eye)?;
-        let all = scene.draw(&video.gl, &projection.times(&view), 600.0, None, 0.0, eye)?;
+        let culled = scene.draw(&video.gl, &projection.times(&view), scene.fog, visible.as_ref(), 0.0, eye)?;
+        let all = scene.draw(&video.gl, &projection.times(&view), scene.fog, None, 0.0, eye)?;
         video.gl.finish();
 
         if let Some(i) = std::env::args().position(|a| a == "--save") {
@@ -1718,7 +1735,15 @@ fn level(
                 video.gl.viewport(0, 0, w as i32, h as i32);
                 video.gl.clear_color(0.05, 0.06, 0.09, 1.0);
                 video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
-                scene.draw(&video.gl, &projection.times(&view), span * 2.0, None, 0.0, eye)?;
+                scene.draw(
+                    &video.gl,
+                    &projection.times(&view),
+                    // this mode frames one model, so the level's fog does not apply
+                    goodomen::render::scene::Fog { far: span * 2.0, ..Default::default() },
+                    None,
+                    0.0,
+                    eye,
+                )?;
             }
             video.window.gl_swap_window();
             let _ = EYE;
@@ -1733,7 +1758,15 @@ fn level(
         let projection = Mat4::perspective(1.1, 1.0, span * 0.002, span * 4.0);
         video.gl.clear_color(0.05, 0.06, 0.09, 1.0);
         video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
-        scene.draw(&video.gl, &projection.times(&view), span * 2.0, None, 0.0, eye)?;
+        scene.draw(
+                    &video.gl,
+                    &projection.times(&view),
+                    // this mode frames one model, so the level's fog does not apply
+                    goodomen::render::scene::Fog { far: span * 2.0, ..Default::default() },
+                    None,
+                    0.0,
+                    eye,
+                )?;
         video.gl.finish();
 
         let mut pixels = vec![0u8; (width * height * 4) as usize];

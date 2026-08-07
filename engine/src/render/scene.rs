@@ -81,7 +81,8 @@ in vec3 vary_world;
 in vec3 vary_normal;
 uniform sampler2D albedo;
 uniform float alpha_test;
-uniform float fade_distance;
+uniform vec4 fog;          // start, end, enabled, unused
+uniform vec3 fog_colour;
 uniform int light_count;
 uniform vec3 light_position[16];
 uniform vec3 light_colour[16];
@@ -103,8 +104,13 @@ void main() {
         float reach = max(1.0 - d / light_radius[i], 0.0);
         lit += light_colour[i] * reach * reach * max(dot(n, to / max(d, 0.001)), 0.0);
     }
-    float fade = clamp(1.0 - vary_depth / fade_distance, 0.45, 1.0);
-    fragment = vec4(texel.rgb * min(lit, vec3(1.6)) * fade, 1.0);
+    vec3 colour = texel.rgb * min(lit, vec3(1.6));
+    // MDK2's fog is fixed-function OpenGL and the mode is read, not guessed:
+    // `glFogi(GL_FOG_MODE, GL_LINEAR)` at 0x454492, start and end through
+    // `chFogStartEnd`, the colour through `chFogColor`. GL 3.3 core has no
+    // fixed-function fog, so the same arithmetic is done here.
+    float f = clamp((fog.y - vary_depth) / max(fog.y - fog.x, 0.001), 0.0, 1.0);
+    fragment = vec4(mix(fog_colour, colour, mix(1.0, f, fog.z)), 1.0);
 }
 "#;
 
@@ -194,8 +200,9 @@ pub struct Scene {
     playing: Vec<Option<f64>>,
     /// Node indices the scripts have hidden, per draw.
     hidden: Vec<Vec<u32>>,
-    /// The game's own draw distance, from `chFogStartEnd`.
-    pub fog: Option<f32>,
+    /// The game's own fog, from `chFogStartEnd`, `chFogColor` and
+    /// `chFogEnable` — see [`Fog`].
+    pub fog: Fog,
     /// Models refused because their vertices are not finite or not of a
     /// sane size — the uninitialised-root family.
     pub refused: usize,
@@ -204,6 +211,31 @@ pub struct Scene {
     /// all — which is **never culled**, as the original does not cull it.
     rooms: Vec<Option<usize>>,
     pub missing: usize,
+}
+
+/// The game's fog, which is fixed-function OpenGL in the original.
+///
+/// `chFogEnable` is `glEnable(GL_FOG)` (0x4542b0), `chFogStartEnd` is two
+/// `glFogf` calls with `GL_FOG_START` and `GL_FOG_END` (0x4542f0), and
+/// `chFogColor` is `glFogfv(GL_FOG_COLOR, ...)` (0x454376). **The mode is
+/// `GL_LINEAR`**, set once at 0x454492 and never changed — so the falloff is
+/// `(end - z) / (end - start)`, clamped, and not exponential.
+///
+/// The defaults here are ours and are only what a level that sets nothing
+/// gets: 56 of the scripts' fog calls are `chFogEnable()` and every level
+/// that enables it also sets a colour.
+#[derive(Clone, Copy, Debug)]
+pub struct Fog {
+    pub near: f32,
+    pub far: f32,
+    pub colour: [f32; 3],
+    pub on: bool,
+}
+
+impl Default for Fog {
+    fn default() -> Fog {
+        Fog { near: 50.0, far: 600.0, colour: [0.05, 0.06, 0.09], on: false }
+    }
 }
 
 /// The triangle's own normal, right-handed over the winding the strips give.
@@ -593,7 +625,7 @@ impl Scene {
         &mut self,
         gl: &glow::Context,
         view_projection: &Mat4,
-        fade: f32,
+        fog: Fog,
         visible: Option<&std::collections::BTreeSet<usize>>,
         clock: f64,
         eye: [f32; 3],
@@ -650,9 +682,18 @@ impl Scene {
             .collect();
         let zero = vec![0.0f32; MAX_NODES * 4];
         let alpha_at = gl.get_uniform_location(shader, "alpha_test");
-        gl.uniform_1_f32(
-            gl.get_uniform_location(shader, "fade_distance").as_ref(),
-            fade.max(1.0),
+        gl.uniform_4_f32(
+            gl.get_uniform_location(shader, "fog").as_ref(),
+            fog.near,
+            fog.far.max(fog.near + 1.0),
+            if fog.on { 1.0 } else { 0.0 },
+            0.0,
+        );
+        gl.uniform_3_f32(
+            gl.get_uniform_location(shader, "fog_colour").as_ref(),
+            fog.colour[0],
+            fog.colour[1],
+            fog.colour[2],
         );
         // the nearest lights to the camera, which is the cheap choice and
         // enough for a room: a level ships hundreds

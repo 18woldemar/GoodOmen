@@ -209,8 +209,9 @@ pub struct Boot {
     pub hidden: BTreeSet<(String, String)>,
     /// The same, for collision rather than drawing (`omGobGMSetSolid`).
     pub intangible: BTreeSet<(String, String)>,
-    /// `(near, far)` from `chFogStartEnd` — the game's own draw distance.
-    pub fog: Option<(f64, f64)>,
+    /// `chFogStartEnd`, `chFogColor` and `chFogEnable`, which between them
+    /// are the game's own draw distance. See [`crate::render::scene::Fog`].
+    pub fog: crate::render::scene::Fog,
     /// Objects frozen until the player arrives — a level holds its encounters
     /// this way, and a boot of all ten puts hundreds there.
     pub stasis: BTreeSet<String>,
@@ -1105,10 +1106,32 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         "chFogStartEnd",
         lua.create_function(|lua, args: Variadic<Value>| {
             let mut boot = boot_mut(lua)?;
-            boot.fog = Some((
-                args.first().map(number).unwrap_or(0.0),
-                args.get(1).map(number).unwrap_or(0.0),
-            ));
+            boot.fog.near = args.first().map(number).unwrap_or(0.0) as f32;
+            boot.fog.far = args.get(1).map(number).unwrap_or(0.0) as f32;
+            Ok(())
+        })?,
+    )?;
+
+    // `chFogEnable()` is `glEnable(GL_FOG)` and `chFogDisable()` its
+    // opposite; 56 of the scripts' 61 fog calls are the bare enable.
+    for name in ["chFogEnable", "chFogDisable"] {
+        let on = name == "chFogEnable";
+        globals.set(
+            name,
+            lua.create_function(move |lua, _: Variadic<Value>| {
+                boot_mut(lua)?.fog.on = on;
+                Ok(())
+            })?,
+        )?;
+    }
+    // `chFogColor(r, g, b, a)` is `glFogfv(GL_FOG_COLOR, ...)`. The alpha is
+    // always 1 in the shipped scripts and fog has no alpha to give, so only
+    // the three channels are kept.
+    globals.set(
+        "chFogColor",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let c = |i: usize| args.get(i).map(number).unwrap_or(0.0) as f32;
+            boot_mut(lua)?.fog.colour = [c(0), c(1), c(2)];
             Ok(())
         })?,
     )?;
@@ -1987,6 +2010,35 @@ mod tests {
         assert_eq!(walk_animation(0.0, 0.0), "ANIM_DEFAULT");
         // a twitch is not a walk
         assert_eq!(walk_animation(0.01, -0.01), "ANIM_DEFAULT");
+    }
+
+    /// The fog is three separate calls and a level uses all three — this is
+    /// `level9.lua`'s `Level.Init`, verbatim.
+    #[test]
+    fn the_three_fog_calls_make_one_state() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        assert!(!scripts.lua.app_data_ref::<Boot>().unwrap().fog.on, "off until asked");
+        scripts
+            .lua
+            .load(
+                "chFogStartEnd(50, 200)\n\
+                 chFogColor(0.0, 0.1, 0.2, 1)\n\
+                 chFogEnable()",
+            )
+            .exec()
+            .unwrap();
+        let fog = scripts.lua.app_data_ref::<Boot>().unwrap().fog;
+        assert_eq!((fog.near, fog.far), (50.0, 200.0));
+        assert_eq!(fog.colour, [0.0, 0.1, 0.2], "the alpha is dropped, fog has none");
+        assert!(fog.on);
+
+        // and `l3_elev02dead.OnEnterRoom` turns it off again without
+        // disturbing the distances
+        scripts.lua.load("chFogDisable()").exec().unwrap();
+        let fog = scripts.lua.app_data_ref::<Boot>().unwrap().fog;
+        assert!(!fog.on);
+        assert_eq!((fog.near, fog.far), (50.0, 200.0));
     }
 
     /// A grunt is 40 hitpoints on Hard and `DAMAGE_GOODGUY` is 1, which is
