@@ -500,6 +500,10 @@ function frame(){
     const mus = hereName.split(' + ')
       .map(r => ROOMS[r] && ROOMS[r].music).filter(Boolean);
     if (mus.length) log.unshift('♪ ' + mus.join(', '));
+    // the room's reverb: an EAX 2.0 preset, see rooms.environment()
+    const env = hereName.split(' + ')
+      .map(r => ROOMS[r] && ROOMS[r].env).filter(Boolean);
+    if (env.length) log.unshift('~ ' + env.join(', '));
     lastRoom = hereName;
     document.getElementById('events').textContent = log.slice(0, 4).join('\n');
   }
@@ -618,7 +622,8 @@ def _rooms(graph_path: Path, resources: Path) -> dict | None:
     return {name: {"box": (r["box"][0] + r["box"][1]) if r["box"] else None,
                    "vis": rm.visible_from(table, name),
                    "on": hooks.get(name, []),
-                   "music": rm.track(r["music"])}
+                   "music": rm.track(r["music"]),
+                   "env": rm.environment(r["env"])}
             for name, r in table.items() if r["live"]}
 
 

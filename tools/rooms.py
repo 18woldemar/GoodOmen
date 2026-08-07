@@ -152,6 +152,40 @@ def rooms(graph: dict, objects: dict, others: dict | None = None) -> dict:
     return out
 
 
+# EAX 2.0's environment presets, DSPROPERTY_EAX_ENVIRONMENT 0..25. They are
+# a published list, which is what makes this checkable rather than a guess.
+EAX = ("GENERIC", "PADDEDCELL", "ROOM", "BATHROOM", "LIVINGROOM", "STONEROOM",
+       "AUDITORIUM", "CONCERTHALL", "CAVE", "ARENA", "HANGAR",
+       "CARPETEDHALLWAY", "HALLWAY", "STONECORRIDOR", "ALLEY", "FOREST",
+       "CITY", "MOUNTAINS", "QUARRY", "PLAIN", "PARKINGLOT", "SEWERPIPE",
+       "UNDERWATER", "DRUGGED", "DIZZY", "PSYCHOTIC")
+
+
+def environment(env) -> str | None:
+    """A room's `env` as the reverb preset it names. -> "HALLWAY" or None.
+
+    `mdkRoomSetEnv(room, 12)` and `chSndSetEnvironment(12)` are **EAX 2.0
+    environment presets**, and four things say so rather than one:
+
+    * the range fits exactly -- rooms use 0 to 23, the scripts reach 25, and
+      EAX 2.0 defines 0 to 25 and no more;
+    * the names fit the rooms. Of the 85 rooms with `tun` in their name,
+      **71 use a corridor preset** (HALLWAY, STONECORRIDOR, CARPETEDHALLWAY,
+      SEWERPIPE) against 24 of the other 121. HALLWAY alone takes 51 of the
+      tunnels, and ARENA, QUARRY, ALLEY, PARKINGLOT, CAVE and HANGAR take
+      none of them;
+    * `boss.lua` sets ARENA (9) as the Zizzy fight begins, PLAIN (19) when
+      the player is warped in, and **PSYCHOTIC (25) on the line after
+      `zizzy.hypno = 1`** -- the hypnosis attack;
+    * `debug.lua` binds a key that does `soundEnv = soundEnv + 1` and passes
+      it straight in, which is how one walks a table of presets and not how
+      one edits a structure.
+    """
+    if env is None or not 0 <= int(env) < len(EAX):
+        return None
+    return EAX[int(env)]
+
+
 def track(music) -> str | None:
     """The music a room asks for, as the file it names. -> "Track18" or None.
 
@@ -302,7 +336,9 @@ def main(argv: list[str] | None = None) -> int:
                                  ("C", r["checkpoint"])) if on)
                 print(f"{name:24s} {flags:5s} sees {len(r['visible']):3d}"
                       + (f"  {track(r['music']) or 'music off'}"
-                         if r["music"] else ""))
+                         if r["music"] else "")
+                      + (f"  {environment(r['env'])}"
+                         if r["env"] is not None else ""))
         print(f"l{n}: {len(table)} rooms, {len(dead_here)} dead names, "
               f"{len(boxless)} live but boxless, "
               f"{sum(len(r['visible']) for r in table.values())} visibility links, "
