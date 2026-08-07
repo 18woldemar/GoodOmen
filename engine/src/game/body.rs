@@ -44,6 +44,11 @@ struct Tree {
     bsp: Bsp,
     lo: [f64; 3],
     hi: [f64; 3],
+    /// The object this tree belongs to. Deduping by resource is safe *and*
+    /// unambiguous: over all ten level graphs, **every one of the 605
+    /// collision resources is named by exactly one object**, so a tree
+    /// identifies its gob and `OnCollision` has something to name.
+    gob: String,
 }
 
 #[derive(Default)]
@@ -58,6 +63,7 @@ impl Collision {
         let mut out = Collision::default();
         let mut seen = std::collections::HashSet::new();
         for (_, gob) in world.iter() {
+            let owner = gob.name.clone();
             let Some(resource) = gob.resource.as_ref().map(|r| r.to_ascii_lowercase()) else {
                 continue;
             };
@@ -87,6 +93,7 @@ impl Collision {
                 bsp,
                 lo: [lo[0] - PAD, lo[1] - PAD, lo[2] - PAD],
                 hi: [hi[0] + PAD, hi[1] + PAD, hi[2] + PAD],
+                gob: owner,
             });
         }
         out
@@ -101,9 +108,47 @@ impl Collision {
     }
 
     pub fn solid(&self, p: [f64; 3]) -> bool {
-        self.trees.iter().any(|t| {
+        self.at(p).is_some()
+    }
+
+    /// **Which** tree holds this point, as an index. Same descent as
+    /// [`Collision::solid`]; the index is what turns "the body hit
+    /// something" into "the body hit *that object*".
+    pub fn at(&self, p: [f64; 3]) -> Option<usize> {
+        self.trees.iter().position(|t| {
             (0..3).all(|c| t.lo[c] <= p[c] && p[c] <= t.hi[c]) && t.bsp.contains(p)
         })
+    }
+
+    /// The object a tree belongs to.
+    pub fn owner(&self, tree: usize) -> Option<&str> {
+        self.trees.get(tree).map(|t| t.gob.as_str())
+    }
+
+    /// Which tree stops the body here, sampling exactly where
+    /// [`Collision::blocked`] does — otherwise the two could disagree about
+    /// whether there was a collision at all.
+    pub fn blocking(&self, p: [f64; 3]) -> Option<usize> {
+        let mut h = STEP;
+        while h <= EYE + 1e-9 {
+            if let Some(t) = self.at([p[0], p[1], p[2] - EYE + h]) {
+                return Some(t);
+            }
+            h += (EYE - STEP) / 2.0;
+        }
+        None
+    }
+
+    /// The tree **under** the feet, which is what the body is standing on.
+    ///
+    /// Sampled below them rather than at them, which is where
+    /// [`Collision::footed`] looks: `settle` lifts the body clear of the
+    /// surface it landed on, so at the feet there is nothing left to find.
+    /// The game's own floors are thick enough that either probe answers, and
+    /// a floor that is one plane thick — which is what a test builds — only
+    /// answers to this one.
+    pub fn footing(&self, p: [f64; 3]) -> Option<usize> {
+        self.at([p[0], p[1], p[2] - EYE - 0.05])
     }
 
     /// Only the body above step height stops it; below is a kerb to walk over.
@@ -133,6 +178,12 @@ pub struct Body {
     /// Frames that finished inside geometry. This one must stay zero.
     pub inside: usize,
     pub travelled: f64,
+    /// The collision trees the body is against **this frame** — what it
+    /// walked into and what it stands on. The driver diffs this between
+    /// frames, and a name entering it is an `OnCollision` and a name leaving
+    /// it is the same handler called with `nil`, which is how the scripts
+    /// spell "the collision ended".
+    pub touching: std::collections::BTreeSet<usize>,
 }
 
 impl Body {
@@ -145,6 +196,7 @@ impl Body {
             hits: 0,
             inside: 0,
             travelled: 0.0,
+            touching: Default::default(),
         }
     }
 
@@ -182,13 +234,23 @@ impl Body {
     pub fn step(&mut self, world: &Collision, direction: [f64; 2], jump: bool, speed: f64, dt: f64) {
         let was = [self.position[0], self.position[1]];
         let start = self.position;
+        // what the body is against this frame, for `OnCollision`. Two honest
+        // sources and no others: the thing it walked into, and the thing it
+        // is standing on. A body never ends up *inside* geometry -- the
+        // checks hold that at zero -- so sampling its own column would find
+        // nothing at all.
+        self.touching.clear();
 
         let length = (direction[0] * direction[0] + direction[1] * direction[1]).sqrt();
         if length > 0.0 {
             let run = speed * dt;
             let (dx, dy) = (direction[0] / length * run, direction[1] / length * run);
-            if world.blocked([self.position[0] + dx, self.position[1] + dy, self.position[2]]) {
+            let ahead = [self.position[0] + dx, self.position[1] + dy, self.position[2]];
+            if world.blocked(ahead) {
                 self.hits += 1;
+                if let Some(t) = world.blocking(ahead) {
+                    self.touching.insert(t);
+                }
             }
             // in pieces, so a fast frame cannot step over a thin wall
             let pieces = (run / 0.25).ceil().max(1.0) as usize;
@@ -237,6 +299,10 @@ impl Body {
         }
         if world.blocked(self.position) {
             self.inside += 1;
+        }
+        // and what it finishes the frame standing on
+        if let Some(t) = world.footing(self.position) {
+            self.touching.insert(t);
         }
         self.travelled += (0..3)
             .map(|c| (self.position[c] - start[c]).powi(2))
@@ -293,8 +359,24 @@ mod tests {
                 bsp: Bsp::parse(&d).unwrap(),
                 lo: [-100.0; 3],
                 hi: [100.0; 3],
+                gob: "the floor".into(),
             }],
         }
+    }
+
+    /// A tree names its object, which is what turns "the body hit
+    /// something" into an `OnCollision` about *that* object.
+    #[test]
+    fn what_the_body_stands_on_can_be_named() {
+        let world = floor();
+        let mut body = Body::new([0.0, 0.0, 5.0], 0.0);
+        for _ in 0..60 {
+            body.step(&world, [0.0, 0.0], false, WALK, 1.0 / 30.0);
+        }
+        assert!(body.on_ground, "it should have landed");
+        let named: Vec<&str> =
+            body.touching.iter().filter_map(|&t| world.owner(t)).collect();
+        assert_eq!(named, ["the floor"]);
     }
 
     #[test]

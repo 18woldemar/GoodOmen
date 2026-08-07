@@ -936,8 +936,23 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
                 api::walk_animation(moved[0] * fx + moved[1] * fy, moved[0] * -fy + moved[1] * fx),
             );
         }
-        api::tick(&scripts, &rooms, body.position, body.yaw, dt, &mut state)
-            .map_err(|e| e.to_string())?;
+        // what the body is against this frame, by name, so `OnCollision`
+        // has an object to be about
+        let touching = body
+            .touching
+            .iter()
+            .filter_map(|&t| collision.owner(t).map(str::to_string))
+            .collect();
+        api::tick_touching(
+            &scripts,
+            &rooms,
+            body.position,
+            body.yaw,
+            dt,
+            &mut state,
+            &touching,
+        )
+        .map_err(|e| e.to_string())?;
     }
 
     // what the scripts actually did to the world while it ran
@@ -968,6 +983,8 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         ("animations chosen", playing, expect_flag("--expect-playing")),
         ("object moves", moved as usize, expect_flag("--expect-moves")),
         ("sounds fired", fired_sounds, expect_flag("--expect-sounds")),
+        ("collisions", state.collisions, expect_flag("--expect-collisions")),
+        ("objects touched", state.touched.len(), expect_flag("--expect-touched")),
     ] {
         if let Some(want) = want {
             if got != want {
@@ -980,12 +997,23 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
          travelled {:.0} units, met a wall on {} frames, inside geometry on {}, \
          {} rooms entered, {survived} of {fired} handler calls ran to the end, \
          {moved} object moves, {playing} animations chosen, \
-         {fired_sounds} sounds fired{} [{}]",
+         {fired_sounds} sounds fired, {} objects touched and {} of them \
+         scripted{}{} [{}]",
         if recorded { "the game's own recorded" } else { "held-forwards" },
         body.travelled,
         body.hits,
         body.inside,
         state.rooms_entered,
+        state.touched.len(),
+        state.collisions,
+        if state.touched.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " <{}>",
+                state.touched.iter().take(6).cloned().collect::<Vec<_>>().join(", ")
+            )
+        },
         if what.is_empty() { String::new() } else { format!(" ({})", what.join(", ")) },
         slots.join(", ")
     ))
@@ -1248,7 +1276,19 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
             // the scripts get their tick before the frame is drawn, so what
             // is drawn is the state they just left behind
             if let Err(e) =
-                goodomen::game::api::tick(&level_scripts, &rooms, at, yaw, dt, &mut ticking)
+                goodomen::game::api::tick_touching(
+                    &level_scripts,
+                    &rooms,
+                    at,
+                    yaw,
+                    dt,
+                    &mut ticking,
+                    &body
+                        .touching
+                        .iter()
+                        .filter_map(|&t| collision.owner(t).map(str::to_string))
+                        .collect(),
+                )
             {
                 eprintln!("goodomen: {e}");
             }

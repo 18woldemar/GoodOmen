@@ -33,9 +33,12 @@ It reads the game out of its own directory — `data/*.zip` first and then
 - **starts every level at every checkpoint**: 129 boots, 2093 resources named
   and none missing, 677 rooms;
 - **runs one**: the body walks with collision, the driver ticks, and
-  `OnEnterRoom`, `OnTimer` and `OnUpdate` fire in the order the scripts
-  expect — **11728 of 11958 handler calls run to the end**, which is
-  `tools/boot.py`'s figure to the digit. The player's own object moves with
+  `OnEnterRoom`, `OnTimer`, `OnUpdate` and **`OnCollision`** fire in the order
+  the scripts expect — **11728 of 11958 handler calls run to the end**, which
+  is `tools/boot.py`'s figure to the digit. Collisions come off the real
+  collision world: a BSP tree names its object because **every one of the 605
+  collision resources is named by exactly one object**, and `target == nil`
+  is how the scripts spell the end of one, so both edges are events. The player's own object moves with
   the body, so proximity reaches the scripts: walking about level 6 is enough
   to make `l6_kermit` start an animation on its own;
 - **draws it**: OpenGL 3.3 core, textured, animated in the vertex shader, lit

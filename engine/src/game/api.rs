@@ -1111,9 +1111,40 @@ pub struct Ticking {
     pub rooms_entered: usize,
     /// `slot -> (fired, ran to the end)`.
     pub fired: BTreeMap<String, (usize, usize)>,
+    /// The objects the body was against last tick, so entering and leaving
+    /// are both events.
+    pub touching: BTreeSet<String>,
+    pub collisions: usize,
+    /// Every object the body was ever against. Reported beside the collision
+    /// count because the two answer different questions: whether the body
+    /// meets anything, and whether what it meets is scripted.
+    pub touched: BTreeSet<String>,
 }
 
 impl Ticking {
+    /// `OnCollision(gob, target, part)`, with the arguments the scripts
+    /// name: what was hit, **what hit it** — and `nil` there is how they
+    /// spell "the collision ended", which six of the 67 handlers test for —
+    /// and which model part took it.
+    ///
+    /// **`part` is always -1 and that is a stated limit, not an oversight.**
+    /// The collision world is one BSP per object, not one per model node, so
+    /// there is nothing to resolve a part from. 46 of the 67 handlers never
+    /// read it; the 21 that do compare it against
+    /// `omGobGMGetSltIndexByName`, which never returns -1 for a real slot,
+    /// so they take the branch they take today — the one where nothing
+    /// happened.
+    fn collide(&mut self, gob: &mlua::Table, target: Option<mlua::Table>) {
+        let Ok(handler) = gob.get::<mlua::Function>("OnCollision") else { return };
+        let entry = self.fired.entry("OnCollision".to_string()).or_insert((0, 0));
+        entry.0 += 1;
+        self.collisions += 1;
+        let hit: Value = target.map(Value::Table).unwrap_or(Value::Nil);
+        if handler.call::<Value>((gob.clone(), hit, -1i64)).is_ok() {
+            entry.1 += 1;
+        }
+    }
+
     fn call(&mut self, gob: &mlua::Table, slot: &str) {
         let Ok(handler) = gob.get::<mlua::Function>(slot) else { return };
         let entry = self.fired.entry(slot.to_string()).or_insert((0, 0));
@@ -1146,6 +1177,20 @@ pub fn tick(
     facing: f64,
     dt: f64,
     state: &mut Ticking,
+) -> Result<(), Error> {
+    tick_touching(scripts, rooms, at, facing, dt, state, &Default::default())
+}
+
+/// The same tick, told what the body is against. `touching` is object names,
+/// which is what `crate::game::body::Collision::owner` hands back.
+pub fn tick_touching(
+    scripts: &Scripts,
+    rooms: &Visibility,
+    at: [f64; 3],
+    facing: f64,
+    dt: f64,
+    state: &mut Ticking,
+    touching: &BTreeSet<String>,
 ) -> Result<(), Error> {
     state.clock += dt;
     let globals = scripts.lua.globals();
@@ -1185,6 +1230,27 @@ pub fn tick(
                 state.call(&gob, "OnEnterRoom");
             }
         }
+    }
+
+    // what the body is against, and both edges of it: a name that has just
+    // appeared is a collision, and one that has just gone is the same
+    // handler called with nil, which is how the scripts spell the end of one
+    if *touching != state.touching {
+        let player = scripts.lua.named_registry_value::<mlua::Table>("player").ok();
+        let began: Vec<String> = touching.difference(&state.touching).cloned().collect();
+        let ended: Vec<String> = state.touching.difference(touching).cloned().collect();
+        for name in began {
+            state.touched.insert(name.clone());
+            if let Ok(gob) = globals.get::<mlua::Table>(name.as_str()) {
+                state.collide(&gob, player.clone());
+            }
+        }
+        for name in ended {
+            if let Ok(gob) = globals.get::<mlua::Table>(name.as_str()) {
+                state.collide(&gob, None);
+            }
+        }
+        state.touching = touching.clone();
     }
 
     // timers that have come due, taken out of the queue first so a handler
