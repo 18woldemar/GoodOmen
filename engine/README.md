@@ -42,8 +42,14 @@ requires the same answers.
 
 ## What it draws
 
-    ./goodomen --window        # a window, and a triangle in it
-    ./goodomen --triangle      # the same triangle offscreen, and three pixels checked
+    ./goodomen --window --level l1.lua   # level 1, textured
+    ./goodomen --level l1.lua            # the same frame offscreen, and its pixels checked
+    ./goodomen --window                  # a window, and a triangle in it
+    ./goodomen --triangle                # the same triangle offscreen, three pixels checked
+
+A level is the scene graph **run**, its models and textures uploaded, and
+every object placed — 409 objects and 74658 triangles for level 1. There is
+no lighting yet and no room culling.
 
 `--triangle` is the renderer's own check: it opens a hidden window, draws
 into a framebuffer object and reads three pixels back — the centre, a corner,

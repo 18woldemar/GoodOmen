@@ -11,6 +11,7 @@ use goodomen::formats::model::Model;
 use goodomen::formats::tex::Texture;
 use goodomen::game::install::Install;
 use goodomen::game::script::Scripts;
+use goodomen::render::camera::Mat4;
 use goodomen::render::{triangle, Video};
 use glow::HasContext;
 
@@ -32,6 +33,29 @@ fn main() {
             Err(e) if e.starts_with(goodomen::render::NO_VIDEO) => {
                 println!("skip: {e}");
             }
+            Err(e) => {
+                eprintln!("goodomen: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    // `--level l1` renders a level; with `--window` it is shown, without it
+    // the pixels are checked offscreen the way `--triangle` is
+    if let Some(i) = args.iter().position(|a| a == "--level") {
+        let graph = args.get(i + 1).cloned().unwrap_or_else(|| "l1.lua".into());
+        let show = args.iter().any(|a| a == "--window");
+        let root = args
+            .iter()
+            .zip(std::iter::once(&String::new()).chain(args.iter()))
+            .find(|(a, before)| {
+                !a.starts_with("--") && *before != "--level" && *before != "--expect"
+            })
+            .map(|(a, _)| std::path::PathBuf::from(a))
+            .unwrap_or_else(Install::beside_the_binary);
+        match level(&root, &graph, show) {
+            Ok(line) => println!("{line}"),
+            Err(e) if e.starts_with(goodomen::render::NO_VIDEO) => println!("skip: {e}"),
             Err(e) => {
                 eprintln!("goodomen: {e}");
                 std::process::exit(1);
@@ -130,6 +154,142 @@ fn main() {
         install.entry_count(),
         bytes as f64 / (1024.0 * 1024.0)
     );
+}
+
+/// Load a level and draw it — into a window if `show`, otherwise offscreen
+/// with the pixels checked.
+///
+/// The camera has nothing to go on yet, so it frames the level's own extent
+/// from a fixed direction: deterministic, and the same picture every run.
+fn level(root: &std::path::Path, graph: &str, show: bool) -> Result<String, String> {
+    use goodomen::render::{scene::Scene, Offscreen};
+
+    let mut install = Install::open(root).map_err(|e| e.to_string())?;
+    let mut video = Video::open("goodomen", 1024, 768, show)?;
+    let version = video.version();
+    let mut scene = Scene::default();
+
+    // SAFETY: the context is current on this thread from here on.
+    let loaded = unsafe {
+        goodomen::game::level::load(&video.gl, &mut install, &mut scene, graph)
+            .map_err(|e| e.to_string())?
+    };
+    let (lo, hi) = scene.bounds();
+    let centre = [
+        (lo[0] + hi[0]) / 2.0,
+        (lo[1] + hi[1]) / 2.0,
+        (lo[2] + hi[2]) / 2.0,
+    ];
+    let span = (0..3).map(|c| hi[c] - lo[c]).fold(1.0f32, f32::max);
+    let eye = [
+        centre[0] + span * 0.7,
+        centre[1] - span * 0.7,
+        centre[2] + span * 0.4,
+    ];
+    let view = Mat4::look_at(eye, centre, [0.0, 0.0, 1.0]);
+
+    let summary = format!(
+        "{graph}: {} objects, {} placed ({} name no model), {} triangles, \
+         {} draws, {span:.0} units across",
+        loaded.objects,
+        loaded.placed,
+        loaded.without_a_model,
+        loaded.triangles,
+        scene.draw_count()
+    );
+
+    if show {
+        use sdl2::event::Event;
+        use sdl2::keyboard::Keycode;
+        println!("OpenGL {version}\n{summary}");
+        loop {
+            for event in video.events.poll_iter() {
+                match event {
+                    Event::Quit { .. }
+                    | Event::KeyDown { keycode: Some(Keycode::Escape), .. } => {
+                        unsafe { scene.delete(&video.gl) };
+                        return Ok("closed".into());
+                    }
+                    _ => {}
+                }
+            }
+            let (w, h) = video.window.drawable_size();
+            let projection =
+                Mat4::perspective(1.1, w as f32 / h.max(1) as f32, span * 0.002, span * 4.0);
+            unsafe {
+                video.gl.viewport(0, 0, w as i32, h as i32);
+                video.gl.clear_color(0.05, 0.06, 0.09, 1.0);
+                video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+                scene.draw(&video.gl, &projection.times(&view), span * 2.0)?;
+            }
+            video.window.gl_swap_window();
+        }
+    }
+
+    // offscreen, and then three questions of the pixels
+    let (width, height) = (512i32, 512i32);
+    unsafe {
+        let target = Offscreen::new(&video.gl, width, height)?;
+        let projection = Mat4::perspective(1.1, 1.0, span * 0.002, span * 4.0);
+        video.gl.clear_color(0.05, 0.06, 0.09, 1.0);
+        video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+        scene.draw(&video.gl, &projection.times(&view), span * 2.0)?;
+        video.gl.finish();
+
+        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        video.gl.read_pixels(
+            0,
+            0,
+            width,
+            height,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelPackData::Slice(Some(&mut pixels)),
+        );
+        target.delete(&video.gl);
+        scene.delete(&video.gl);
+
+        let clear = [13u8, 15, 23];
+        let mut drawn = 0usize;
+        let mut colours = std::collections::HashSet::new();
+        for p in pixels.chunks_exact(4) {
+            if (0..3).any(|c| (p[c] as i32 - clear[c] as i32).abs() > 1) {
+                drawn += 1;
+                colours.insert((p[0], p[1], p[2]));
+            }
+        }
+        // `--save PATH` writes the frame as a plain PPM, which is ten lines
+        // and needs no encoder. It is for looking at while working; nothing
+        // in the checks reads it.
+        if let Some(i) = std::env::args().position(|a| a == "--save") {
+            if let Some(path) = std::env::args().nth(i + 1) {
+                let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
+                // GL counts rows from the bottom, PPM from the top
+                for row in (0..height).rev() {
+                    for col in 0..width {
+                        let o = ((row * width + col) * 4) as usize;
+                        ppm.extend_from_slice(&pixels[o..o + 3]);
+                    }
+                }
+                std::fs::write(&path, ppm).map_err(|e| e.to_string())?;
+            }
+        }
+
+        let coverage = drawn as f64 / (width * height) as f64;
+        if coverage < 0.02 {
+            return Err(format!("almost nothing drawn: {:.1}% of the frame", coverage * 100.0));
+        }
+        // a level drawn with the wrong UVs, or with the textures not arriving,
+        // comes out in a handful of flat colours
+        if colours.len() < 256 {
+            return Err(format!("only {} distinct colours -- the textures did not arrive", colours.len()));
+        }
+        Ok(format!(
+            "OpenGL {version}: {summary}, {:.0}% of the frame in {} colours",
+            coverage * 100.0,
+            colours.len()
+        ))
+    }
 }
 
 /// A window with the triangle in it, until it is closed or Escape is pressed.

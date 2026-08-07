@@ -10,6 +10,8 @@
 
 use glow::HasContext;
 
+pub mod camera;
+pub mod scene;
 pub mod triangle;
 
 /// The prefix [`Video::open`] puts on an error that means "there is no

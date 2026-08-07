@@ -36,5 +36,13 @@ case "$TRI" in
   *) echo "the Windows build did not draw the triangle:"; echo "$TRI"; exit 1 ;;
 esac
 
+# and a whole level, which is the renderer, the Lua and every format at once
+LVL=$(cd "$MDK2_GOG" && WINEDEBUG=-all "$WINE" goodomen-check.exe --level l1.lua 2>/dev/null)
+case "$LVL" in
+  *"of the frame in"*|skip:*) ;;
+  *) echo "the Windows build did not draw a level:"; echo "$LVL"; exit 1 ;;
+esac
+
 echo "$OUT" | tail -1
 echo "$TRI" | tail -1
+echo "$LVL" | tail -1
