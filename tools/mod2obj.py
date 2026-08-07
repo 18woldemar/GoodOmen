@@ -330,8 +330,19 @@ class Model:
             return _slerp(a, b, u)
         return tuple(a[c] + (b[c] - a[c]) * u for c in range(4))
 
-    def animate(self, anim: dict, t: float) -> tuple[list, list]:
-        """-> (vertices, triangles) with the animation applied at t in [0,1]."""
+    def node_world(self, anim: dict, t: float) -> list:
+        """Each node's world transform at t in [0,1]. -> [(quat, offset)].
+
+        Split out of `animate()` so a renderer can pose the model itself:
+        MDK2 models are **rigid hierarchies**, one node per vertex and no
+        skinning weights, so a vertex only needs its own node's quaternion
+        and offset. That is two vec4 of uniform per node, which is what
+        `tools/mod2html.py` ships to the browser instead of re-posing the
+        geometry on the CPU every frame.
+        """
+        return self._node_world(anim, t)
+
+    def _node_world(self, anim: dict, t: float) -> list:
         n = len(self.nodes)
         trans = [list(node["translation"]) for node in self.nodes]
         quat = [(1.0, 0.0, 0.0, 0.0)] * n   # (w, x, y, z)
@@ -376,9 +387,22 @@ class Model:
                                 tuple(pt[c] + r[c] for c in range(3)))
             return world[i]
 
+        return [walk(i) for i in range(n)]
+
+    def animate(self, anim: dict, t: float) -> tuple[list, list]:
+        """-> (vertices, triangles) with the animation applied at t in [0,1]."""
+        world = self._node_world(anim, t)
+
+        def rot(q, p):
+            w, x, y, z = q
+            return (
+                p[0]*(1-2*(y*y+z*z)) + p[1]*2*(x*y-z*w) + p[2]*2*(x*z+y*w),
+                p[0]*2*(x*y+z*w) + p[1]*(1-2*(x*x+z*z)) + p[2]*2*(y*z-x*w),
+                p[0]*2*(x*z-y*w) + p[1]*2*(y*z+x*w) + p[2]*(1-2*(x*x+y*y)))
+
         verts, tris = [], []
         for ni, node in enumerate(self.nodes):
-            q, off = walk(ni)
+            q, off = world[ni]
             tex = self.node_texture(node)
             for g in range(node["group_first"],
                            node["group_first"] + node["group_count"]):

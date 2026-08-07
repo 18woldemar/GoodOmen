@@ -23,6 +23,20 @@ camera can stop being a camera: **G** switches between flying and walking,
 space jumps. The controller is in the page, roughly forty lines of it, and
 what it does and does not do is written down there.
 
+**The animated objects move.** Nearly half of a level is on something that
+is supposed to be: level 1 places 142 animated objects against 110 static
+ones. MDK2's models are rigid hierarchies -- one node per vertex, no skinning
+weights -- so posing one is a quaternion and an offset per node, two vec4 of
+uniform. `scene_movers()` samples each model's node table 30 times over a
+loop and uploads the model's geometry once; the page draws it once per object
+with that object's own placement. `--movers` checks that arithmetic against
+`tools/mod2obj.py`'s, which shares no code with it, over every animated
+object in a level.
+
+Two ceilings, both deliberate: a model with more than 64 nodes does not fit
+the uniform array WebGL 1 guarantees and stays in its bind pose (9 of level
+1's models), and only animation 0 plays, on a loop.
+
 For one of the ten levels it also embeds the **room graph** (`tools/rooms.py`)
 and uses the level's own visibility: standing in a room, only that room and
 the rooms it lists are drawn, which at the game's own spawn points is a median
@@ -117,6 +131,101 @@ for (const [name, uri] of Object.entries(TEX)) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
   };
   img.src = uri;
+}
+
+// --- the animated objects, when the page was built with --scene ---------
+// MOVE.data is one vertex buffer of every animated *model* -- six floats,
+// position, uv, node index -- and MOVE.movers places those models in the
+// world. MDK2 models are rigid hierarchies: one node per vertex and no
+// skinning weights, so posing is a quaternion and an offset per node, which
+// fits in two vec4 of uniform. The node tables are sampled 30 times over a
+// loop by tools/mod2html.py; nothing here reads keyframes.
+const MOVE = __MOVE__;
+let mprog = null, mbuf = null, uM = {};
+if (MOVE){
+  mprog = gl.createProgram();
+  gl.attachShader(mprog, sh(gl.VERTEX_SHADER, `
+    attribute vec3 aPos; attribute vec2 aUV; attribute float aNode;
+    uniform mat4 uMVP;
+    uniform vec4 uNodeQ[64];       // (x, y, z, w) -- the file stores (w,x,y,z)
+    uniform vec4 uNodeT[64];
+    uniform vec4 uObjQ; uniform vec3 uObjP;
+    varying vec2 vUV; varying float vZ;
+    vec3 qrot(vec4 q, vec3 v){
+      return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+    }
+    void main(){
+      int i = int(aNode + 0.5);
+      vec3 p = qrot(uNodeQ[i], aPos) + uNodeT[i].xyz;
+      p = qrot(uObjQ, p) + uObjP;
+      gl_Position = uMVP * vec4(p, 1.0);
+      vUV = aUV; vZ = gl_Position.w;
+    }`));
+  gl.attachShader(mprog, sh(gl.FRAGMENT_SHADER, `
+    precision mediump float; uniform sampler2D uTex; uniform float uCut;
+    varying vec2 vUV; varying float vZ;
+    void main(){
+      vec4 c = texture2D(uTex, vec2(vUV.x, 1.0 - vUV.y));
+      if (c.a < uCut) discard;
+      float fog = clamp(vZ / 4000.0, 0.0, 0.75);
+      gl_FragColor = vec4(mix(c.rgb, vec3(0.05,0.06,0.07), fog), c.a);
+    }`));
+  gl.linkProgram(mprog);
+  for (const n of ['uMVP','uNodeQ','uNodeT','uObjQ','uObjP','uCut'])
+    uM[n] = gl.getUniformLocation(mprog, n);
+  mbuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, mbuf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(bytes(MOVE.data).buffer),
+                gl.STATIC_DRAW);
+  for (const m of MOVE.models){
+    m.Q = []; m.T = [];
+    for (const f of m.frames){
+      const q = new Float32Array(64 * 4), t = new Float32Array(64 * 4);
+      for (let i = 0; i < 64; i++){
+        if (i < m.nodes){
+          q[i*4] = f[i*8]; q[i*4+1] = f[i*8+1];
+          q[i*4+2] = f[i*8+2]; q[i*4+3] = f[i*8+3];
+          t[i*4] = f[i*8+4]; t[i*4+1] = f[i*8+5]; t[i*4+2] = f[i*8+6];
+        } else { q[i*4+3] = 1.0; }
+      }
+      m.Q.push(q); m.T.push(t);
+    }
+    m.frames = null;                       // the flat copy is no longer needed
+  }
+  // the scene graph stores (w, x, y, z); the shader wants (x, y, z, w)
+  for (const o of MOVE.movers)
+    o.q = new Float32Array([o.quat[1], o.quat[2], o.quat[3], o.quat[0]]);
+}
+function drawMovers(mvp, now, blend){
+  if (!MOVE) return;
+  gl.useProgram(mprog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, mbuf);
+  const aP = gl.getAttribLocation(mprog, 'aPos');
+  const aU = gl.getAttribLocation(mprog, 'aUV');
+  const aN = gl.getAttribLocation(mprog, 'aNode');
+  gl.enableVertexAttribArray(aP); gl.vertexAttribPointer(aP, 3, gl.FLOAT, false, 24, 0);
+  gl.enableVertexAttribArray(aU); gl.vertexAttribPointer(aU, 2, gl.FLOAT, false, 24, 12);
+  gl.enableVertexAttribArray(aN); gl.vertexAttribPointer(aN, 1, gl.FLOAT, false, 24, 20);
+  gl.uniformMatrix4fv(uM.uMVP, false, mvp);
+  gl.uniform1f(uM.uCut, blend ? 0.02 : 0.35);
+  for (const o of MOVE.movers){
+    if (shown && !shown.has(o.room)) continue;
+    const m = MOVE.models[o.model];
+    const f = Math.floor(now / m.seconds * MOVE.frames) % MOVE.frames;
+    gl.uniform4fv(uM.uNodeQ, m.Q[f]);
+    gl.uniform4fv(uM.uNodeT, m.T[f]);
+    gl.uniform4fv(uM.uObjQ, o.q);
+    gl.uniform3fv(uM.uObjP, o.pos);
+    for (const d of m.draws){
+      if (!!d.blend !== blend) continue;
+      gl.bindTexture(gl.TEXTURE_2D, textures[d.tex] || blank);
+      gl.drawArrays(gl.TRIANGLES, d.first, d.count);
+    }
+  }
+  gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 20, 0);
+  gl.enableVertexAttribArray(aUV);  gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 20, 12);
 }
 
 // --- collision, when the page was built with --walk ---------------------
@@ -321,7 +430,9 @@ function frame(){
   const f = 1/Math.tan(0.9/2), a = w/h, near = MESH.span/2000, far = MESH.span*8;
   const proj = new Float32Array([f/a,0,0,0, 0,f,0,0,
     0,0,(far+near)/(near-far),-1, 0,0,2*far*near/(near-far),0]);
-  gl.uniformMatrix4fv(gl.getUniformLocation(prog,'uMVP'), false, mul(proj, view));
+  const mvp = mul(proj, view);
+  gl.uniformMatrix4fv(gl.getUniformLocation(prog,'uMVP'), false, mvp);
+  const now = performance.now() / 1000;
 
   // The .tex header says which textures carry alpha, so the opaque ones go
   // down first with the depth buffer writing, and the translucent ones after
@@ -353,6 +464,7 @@ function frame(){
       gl.bindTexture(gl.TEXTURE_2D, textures[d.tex] || blank);
       gl.drawArrays(gl.TRIANGLES, d.first, d.count);
     }
+  drawMovers(mvp, now, false);
   gl.enable(gl.BLEND); gl.depthMask(false);
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
   for (const d of MESH.draws)
@@ -361,6 +473,7 @@ function frame(){
       gl.bindTexture(gl.TEXTURE_2D, textures[d.tex] || blank);
       gl.drawArrays(gl.TRIANGLES, d.first, d.count);
     }
+  drawMovers(mvp, now, true);
   gl.depthMask(true); gl.disable(gl.BLEND);
   requestAnimationFrame(frame);
 }
@@ -477,7 +590,15 @@ def object_rooms(graph: dict) -> dict:
     return out
 
 
-def scene_geometry(path: Path, resources: Path) -> tuple[list, list, int]:
+def _moves(model: Model) -> bool:
+    """Whether scene_movers() will pose this model, so the static pass skips
+    it and nothing is drawn twice."""
+    return (model._sec(1) is not None and bool(model.animations())
+            and len(model.nodes) <= ANIM_MAX_NODES)
+
+
+def scene_geometry(path: Path, resources: Path,
+                   animate: bool = False) -> tuple[list, list, int]:
     """Merge every model a scene graph places. -> (vertices, triangles, count)
 
     Each triangle carries the name of the room its object is in, so that
@@ -499,6 +620,8 @@ def scene_geometry(path: Path, resources: Path) -> tuple[list, list, int]:
         model = cache.get(found)
         if model is None:
             model = cache[found] = Model(found.read_bytes())
+        if animate and _moves(model):
+            continue              # scene_movers() poses this one in the page
         v, t = model.posed()
         if not v:
             continue
@@ -508,6 +631,191 @@ def scene_geometry(path: Path, resources: Path) -> tuple[list, list, int]:
         tris += [(a + base, b + base, c + base, room) for a, b, c in t]
         placed += 1
     return verts, tris, placed
+
+
+ANIM_FRAMES = 30            # samples of a loop; the demo runs at 30 fps
+ANIM_MAX_NODES = 64         # 2 vec4 of uniform each, and WebGL1 promises 128
+
+
+def _duration(anim: dict) -> float:
+    """How long one loop of an animation lasts, in seconds.
+
+    The animation record's float at +8 is a **signed playback rate**, in
+    loops a second, so the duration is its reciprocal. Read as a *length* it
+    would have to explain 99 negative values, and a negative length means
+    nothing; a negative speed is exactly what the scripts ask for by name --
+    `omAnimSetSpeed(door, ANIM_OPEN, -1)` is how `elevators.lua` shuts a door
+    it opened. Over the corpus that puts the median loop at about a second and
+    a half. Not confirmed against the running game, so it sets the viewer's
+    playback speed and nothing that has to be exact.
+    """
+    rate = abs(anim.get("length") or 0.0)
+    if not 1e-3 < rate < 1e3:
+        return 2.0
+    return 1.0 / rate
+
+
+def scene_movers(path: Path, resources: Path) -> dict | None:
+    """The animated objects, posed in the browser rather than baked flat.
+
+    MDK2 models are rigid hierarchies -- each vertex belongs to exactly one
+    node, no skinning weights -- so a vertex needs only its own node's
+    quaternion and offset. Those are sampled here into a small table per
+    model and per frame, and the page multiplies them out: the geometry is
+    uploaded once per *model* and drawn once per *object*, with the node
+    table and the object's own placement as uniforms.
+
+    That matters for how much of a level moves. Level 1 places 151 animated
+    objects against 101 static ones, and 35583 of its 74658 triangles are on
+    something that is supposed to be moving.
+    """
+    graph = sg.parse(path.read_text(errors="replace"))
+    where = object_rooms(graph)
+    cache: dict[Path, Model] = {}
+    models: dict[Path, int] = {}
+    out_models: list = []
+    movers: list = []
+    data = bytearray()
+
+    for o in graph["objects"]:
+        if o["resource"] is None:
+            continue
+        found = sg.resolve(o, graph, resources)
+        if not isinstance(found, Path) or found.suffix != ".mod":
+            continue
+        model = cache.get(found)
+        if model is None:
+            model = cache[found] = Model(found.read_bytes())
+        anims = model.animations() if model._sec(1) is not None else []
+        if not anims or len(model.nodes) > ANIM_MAX_NODES:
+            continue                      # static, or too big for the uniforms
+        if found not in models:
+            packed = _pack_model(model, anims[0], data, resources)
+            if packed is None:
+                continue
+            models[found] = len(out_models)
+            out_models.append(packed)
+        movers.append({
+            "at": o["line"],           # the graph line: names are NOT unique
+            "model": models[found],
+            "pos": list(o["position"]),
+            "quat": list(o["rotation"]),
+            "room": where.get(o["name"]) or "",
+        })
+    if not movers:
+        return None
+    return {"data": base64.b64encode(bytes(data)).decode(),
+            "models": out_models, "movers": movers, "frames": ANIM_FRAMES}
+
+
+def _pack_model(model: Model, anim: dict, data: bytearray,
+                resources: Path | None = None) -> dict | None:
+    """Append one model's node-local vertices and sample its node table."""
+    first_vertex = len(data) // 24         # 6 floats: pos, uv, node index
+    draws: dict[str, list] = {}
+    for ni, node in enumerate(model.nodes):
+        tex = model.node_texture(node) or ""
+        for g in range(node["group_first"],
+                       node["group_first"] + node["group_count"]):
+            gfirst, count = model.groups[g]
+            for k in range(count - 2):
+                # the strip, expanded, so one draw can hold many nodes
+                idx = [gfirst + k, gfirst + k + 1, gfirst + k + 2]
+                if k & 1:
+                    idx[1], idx[2] = idx[2], idx[1]
+                for i in idx:
+                    pos, uv = model.vertices[i]
+                    draws.setdefault(tex, []).append(
+                        struct.pack("<6f", *pos, *uv, float(ni)))
+    if not draws:
+        return None
+    packed = []
+    for tex, rows in draws.items():
+        packed.append({"tex": tex, "first": len(data) // 24,
+                       "count": len(rows),
+                       "blend": _blended(tex, resources)})
+        for r in rows:
+            data += r
+    frames = []
+    for f in range(ANIM_FRAMES):
+        flat: list[float] = []
+        for q, off in model.node_world(anim, f / ANIM_FRAMES):
+            flat += [q[1], q[2], q[3], q[0], off[0], off[1], off[2], 0.0]
+        # six decimals: a quaternion rounded harder than this turns into
+        # a centimetre of error out at the end of a node 1000 units long
+        frames.append([round(v, 6) for v in flat])
+    return {"draws": packed, "nodes": len(model.nodes),
+            "seconds": _duration(anim), "frames": frames,
+            "first": first_vertex}
+
+
+def _qrot(q, v):
+    """The shader's rotation, with q as (x, y, z, w) -- see the vertex shader."""
+    x, y, z, w = q
+    c1 = (y*v[2] - z*v[1] + w*v[0], z*v[0] - x*v[2] + w*v[1],
+          x*v[1] - y*v[0] + w*v[2])
+    c2 = (y*c1[2] - z*c1[1], z*c1[0] - x*c1[2], x*c1[1] - y*c1[0])
+    return tuple(v[i] + 2.0 * c2[i] for i in range(3))
+
+
+def check_movers(path: Path, resources: Path) -> tuple[int, float, int]:
+    """Pose every mover the way the shader will, and compare with animate().
+
+    -> (movers checked, worst difference, models too big for the uniforms).
+    The two paths share no code: `animate()` walks the parent chain and
+    transforms vertices on the CPU, while this multiplies out the sampled
+    node table exactly as the vertex shader does. If they agree the page is
+    drawing what `tools/mod2obj.py` says it should.
+    """
+    packed = scene_movers(path, resources)
+    if not packed:
+        return 0, 0.0, 0
+    graph = sg.parse(path.read_text(errors="replace"))
+    worst, checked, big = 0.0, 0, 0
+    cache: dict[Path, Model] = {}
+    for o in graph["objects"]:
+        if o["resource"] is None:
+            continue
+        found = sg.resolve(o, graph, resources)
+        if not isinstance(found, Path) or found.suffix != ".mod":
+            continue
+        model = cache.get(found)
+        if model is None:
+            model = cache[found] = Model(found.read_bytes())
+        if model._sec(1) is None or not model.animations():
+            continue
+        if len(model.nodes) > ANIM_MAX_NODES:
+            big += 1
+            continue
+        anim = model.animations()[0]
+        mv = next((m for m in packed["movers"] if m["at"] == o["line"]), None)
+        if mv is None:                     # a model with no drawable groups
+            continue
+        table = packed["models"][mv["model"]]["frames"][0]
+        verts, tris = model.animate(anim, 0.0)
+        placed = place(o, verts, True)
+        oq = [mv["quat"][1], mv["quat"][2], mv["quat"][3], mv["quat"][0]]
+        cpu = [placed[i][0] for a, b, c in tris for i in (a, b, c)]
+        k = 0
+        for ni, node in enumerate(model.nodes):
+            q = table[ni * 8:ni * 8 + 4]
+            t = table[ni * 8 + 4:ni * 8 + 7]
+            for g in range(node["group_first"],
+                           node["group_first"] + node["group_count"]):
+                gf, count = model.groups[g]
+                for j in range(count - 2):
+                    idx = [gf + j, gf + j + 1, gf + j + 2]
+                    if j & 1:
+                        idx[1], idx[2] = idx[2], idx[1]
+                    for i in idx:
+                        p = _qrot(q, model.vertices[i][0])
+                        p = _qrot(oq, tuple(p[c] + t[c] for c in range(3)))
+                        p = tuple(p[c] + mv["pos"][c] for c in range(3))
+                        worst = max(worst, max(abs(p[c] - cpu[k][c])
+                                               for c in range(3)))
+                        k += 1
+        checked += 1
+    return checked, worst, big
 
 
 def scene_collision(path: Path, resources: Path) -> dict | None:
@@ -593,7 +901,8 @@ def _blended(name: str, resources: Path | None) -> bool:
 
 
 def build(verts: list, tris: list, png_dir: Path | None,
-          resources: Path | None = None) -> tuple[dict, dict]:
+          resources: Path | None = None,
+          also: list | None = None) -> tuple[dict, dict]:
     # grouped by room as well as by texture, so the page can drop the rooms
     # the level says are not visible from where you stand
     groups: dict[tuple, list[int]] = {}
@@ -628,7 +937,7 @@ def build(verts: list, tris: list, png_dir: Path | None,
 
     textures: dict[str, str] = {}
     if png_dir:
-        for d in draws:
+        for d in draws + list(also or []):
             name = d["tex"]
             if not name or name in textures:
                 continue
@@ -654,18 +963,33 @@ def main(argv: list[str] | None = None) -> int:
                     help="with --scene, embed the .bsp trees so the camera "
                          "can walk the level instead of flying")
     ap.add_argument("--selftest", action="store_true", help="check place()")
+    ap.add_argument("--movers", action="store_true",
+                    help="with --scene, check the shader's posing against "
+                         "mod2obj's, and print nothing else")
     args = ap.parse_args(argv)
 
     if args.selftest:
         selftest()
         return 0
+    if args.movers:
+        n, worst, big = check_movers(args.src, args.resources)
+        print(f"{n} animated objects posed, worst difference {worst:.1e}, "
+              f"{big} models over {ANIM_MAX_NODES} nodes", file=sys.stderr)
+        # the two paths are the same arithmetic; what is left is the
+        # rounding of the shipped node table, magnified by how far a vertex
+        # sits from its node's origin
+        return 0 if worst < 1e-2 else 1
     if args.src is None or args.out is None:
         ap.error("src and -o are required")
 
-    coll, spawns, room_graph = None, None, None
+    coll, spawns, room_graph, movers = None, None, None, None
     if args.scene:
-        verts, tris, placed = scene_geometry(args.src, args.resources)
+        movers = scene_movers(args.src, args.resources)
+        verts, tris, placed = scene_geometry(args.src, args.resources,
+                                             animate=movers is not None)
         what = f"{placed} objects"
+        if movers:
+            what += f" &middot; {len(movers['movers'])} animated"
         room_graph = _rooms(args.src, args.resources)
         if room_graph:
             what += f" &middot; {len(room_graph)} rooms"
@@ -681,7 +1005,9 @@ def main(argv: list[str] | None = None) -> int:
         what = f"{len(m.nodes)} nodes"
     mesh, textures = build(verts, tris,
                            args.png if args.png.is_dir() else None,
-                           args.resources if args.scene else None)
+                           args.resources if args.scene else None,
+                           [d for m in movers["models"] for d in m["draws"]]
+                           if movers else None)
     stats = (f"{what} &middot; "
              f"{sum(d['count'] for d in mesh['draws']) // 3} triangles &middot; "
              f"{len(textures)} textures")
@@ -691,7 +1017,8 @@ def main(argv: list[str] | None = None) -> int:
                 .replace("__TEX__", json.dumps(textures))
                 .replace("__COLL__", json.dumps(coll))
                 .replace("__SPAWNS__", json.dumps(spawns))
-                .replace("__ROOMS__", json.dumps(room_graph)))
+                .replace("__ROOMS__", json.dumps(room_graph))
+                .replace("__MOVE__", json.dumps(movers)))
     args.out.write_text(page)
     print(f"{args.out}: {stats.replace('&middot;', '|')}, "
           f"{len(page)/2**20:.1f} MiB", file=sys.stderr)
