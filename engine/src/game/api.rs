@@ -215,6 +215,10 @@ pub struct Boot {
     /// Objects frozen until the player arrives — a level holds its encounters
     /// this way, and a boot of all ten puts hundreds there.
     pub stasis: BTreeSet<String>,
+    /// Walkers that have been alerted. `mdkWalkerAlert` is idempotent —
+    /// 0x431760 tests the flag before setting it — so the shout that goes
+    /// with it happens exactly once per walker.
+    pub alerted: BTreeSet<String>,
     /// Objects running a scripted sequence — bit **0x800000** in the
     /// original's `omgob[0xb4]`, set by `mdkGobEnableScript` (0x40e210) and
     /// cleared by `mdkGobDisableScript` (0x40e230). The engine calls the Lua
@@ -652,6 +656,57 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 d += std::f64::consts::TAU;
             }
             Ok(if far < radius && d.abs() < angle { 1.0 } else { 0.0 })
+        })?,
+    )?;
+
+    // `mdkWalkerAlert(gob, shout)` — 0x43f610 into **0x431760**, and it is
+    // the loudest thing on level 1's work list at 150 calls.
+    //
+    //     if walker.alerted == 0:
+    //         walker.alerted = 1
+    //         if shout: broadcast(gob, <noise>, 100.0, 0)
+    //     return 1
+    //
+    // **Idempotent**: a walker already alerted is not alerted again, and the
+    // shout only goes out the first time. The broadcast (0x40e4f0) walks the
+    // world, skips the caller, and fires **event 4 — `OnHear`** on everything
+    // within the radius, with the handler taking `(self, noise, x, y, z)`.
+    // The 100 is the literal `0x42c80000` at 0x431789.
+    globals.set(
+        "mdkWalkerAlert",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(name) = args.first().and_then(gob_name) else { return Ok(1.0) };
+            if !boot_mut(lua)?.alerted.insert(name.clone()) {
+                return Ok(1.0); // already alerted, and the shout is once only
+            }
+            if args.get(1).map(number).unwrap_or(0.0) == 0.0 {
+                return Ok(1.0);
+            }
+            /// The radius of a walker's shout, from 0x431789.
+            const EARSHOT: f64 = 100.0;
+            let heard: Vec<(String, [f64; 3])> = {
+                let Some(w) = world::world(lua) else { return Ok(1.0) };
+                let Some(at) = w.find(&name).and_then(|id| w.get(id)).map(|g| g.position)
+                else {
+                    return Ok(1.0);
+                };
+                w.iter()
+                    .filter(|(_, g)| g.name != name && !g.name.is_empty())
+                    .filter(|(_, g)| {
+                        (0..3).map(|c| (g.position[c] - at[c]).powi(2)).sum::<f64>()
+                            < EARSHOT * EARSHOT
+                    })
+                    .map(|(_, g)| (g.name.clone(), at))
+                    .collect()
+            };
+            for (who, at) in heard {
+                let Ok(gob) = lua.globals().get::<mlua::Table>(who.as_str()) else { continue };
+                let Ok(handler) = gob.get::<mlua::Function>("OnHear") else { continue };
+                // the noise name is a global buffer in the original, empty
+                // for an alert; the position is where the shout came from
+                let _ = handler.call::<Value>((gob, "", at[0], at[1], at[2]));
+            }
+            Ok(1.0)
         })?,
     )?;
 
@@ -2166,6 +2221,47 @@ mod tests {
         assert_eq!(walk_animation(0.0, 0.0), "ANIM_DEFAULT");
         // a twitch is not a walk
         assert_eq!(walk_animation(0.01, -0.01), "ANIM_DEFAULT");
+    }
+
+    /// A shout reaches everything within 100 units and nothing outside it,
+    /// fires `OnHear` rather than a handler on the shouter, and happens
+    /// **once**: a walker already alerted does not alert again.
+    #[test]
+    fn an_alerted_walker_shouts_once_and_is_heard_within_a_hundred_units() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "heard = 0\n\
+                 where = 0\n\
+                 local function ear(gob, noise, x, y, z) heard = heard + 1; where = y end\n\
+                 mdkRegisterObject('shouter', OBJ_NONE, scene, nil, -1, 0,7,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkRegisterObject('near',    OBJ_NONE, scene, nil, -1, 0,50,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkRegisterObject('far',     OBJ_NONE, scene, nil, -1, 0,500,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 shouter.OnHear = ear; near.OnHear = ear; far.OnHear = ear\n\
+                 quiet = mdkWalkerAlert(shouter, 0)\n\
+                 after_quiet = heard\n\
+                 mdkWalkerAlert(shouter, 1)",
+            )
+            .exec()
+            .unwrap();
+        let g = scripts.lua.globals();
+        assert_eq!(g.get::<f64>("quiet").unwrap(), 1.0, "it always answers 1");
+        assert_eq!(g.get::<f64>("after_quiet").unwrap(), 0.0, "a silent alert is silent");
+        assert_eq!(
+            g.get::<f64>("heard").unwrap(),
+            0.0,
+            "and the second alert is ignored entirely -- 0x431760 tests the flag first"
+        );
+
+        // now one that has not been alerted before
+        scripts.lua.load("mdkWalkerAlert(near, 1)").exec().unwrap();
+        assert_eq!(g.get::<f64>("heard").unwrap(), 1.0, "the shouter hears, the far one does not");
+        assert_eq!(g.get::<f64>("where").unwrap(), 50.0, "and is told where the shout came from");
     }
 
     /// `mdkGobOnMagicSpot` is the one getter of the nine whose real answer

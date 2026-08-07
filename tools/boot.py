@@ -191,6 +191,11 @@ ANSWERS = {"chGetGameWasReset": "0", "mdkLoadLevelIsInstant": "0",
            # mdkIsCutSceneAllowed's default arm returns 1 (0x42a9f6);
            # loading here is synchronous; nothing is speaking; and Doc's
            # inventory starts empty. See engine/src/game/api.rs.
+           # idempotent, and the shout is once only (0x431760 tests the
+           # flag before setting it). The OnHear broadcast is the engine's;
+           # here only the flag, so the two agree on what stops.
+           "mdkWalkerAlert":
+               "function(g) if g then ALERTED[g.name] = 1 end return 1 end",
            "mdkIsCutSceneAllowed": "1", "chIsLoadingResources": "0",
            "mdkDialogIsDone": "1", "mdkDocHasItem": "0",
            "mdkGetDifficulty": "0.5",
@@ -385,7 +390,7 @@ for _, job in ipairs(JOBS) do
       rawset(_G, name, nil)
     end
   end
-  TIMERS, STASIS, CLOCK, ROOM, DELETES = {}, {}, 0, nil, {}
+  TIMERS, STASIS, CLOCK, ROOM, DELETES, ALERTED = {}, {}, 0, nil, {}, {}
   -- the engine sets these; without them `doloadingscreen` takes neither of
   -- its branches and nothing is preloaded, which is exactly the streaming
   -- half of a level start

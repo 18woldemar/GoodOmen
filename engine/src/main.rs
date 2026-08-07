@@ -584,6 +584,7 @@ fn boot(
     let (mut moves, mut playing) = (0u64, 0usize);
     let (mut spawners, mut spawned, mut armed, mut died) = (0usize, 0usize, 0usize, 0usize);
     let (mut queued, mut destroyed, mut homeless) = (0usize, 0usize, 0usize);
+    let mut alerted = 0usize;
     let mut why: std::collections::BTreeMap<String, usize> = Default::default();
     let mut faults: std::collections::BTreeSet<u32> = Default::default();
     let mut resources = std::collections::BTreeSet::new();
@@ -643,6 +644,7 @@ fn boot(
                     died += b.died.len();
                     destroyed += b.destroyed.len();
                     homeless += b.homeless;
+                    alerted += b.alerted.len();
                     // spawners a handler has filled but nothing has
                     // drained: a boot fires handlers and never ticks
                     queued += b.spawners.values().filter(|s| s.queue > 0).count();
@@ -703,6 +705,7 @@ fn boot(
         // the one that decides whether the delete lists are applied at the
         // right moment: a checkpoint must never lose its own room
         ("checkpoints left roomless", homeless, expect_flag("--expect-roomless")),
+        ("walkers alerted", alerted, expect_flag("--expect-alerted")),
     ] {
         if let Some(want) = want {
             if got != want {
@@ -723,7 +726,7 @@ fn boot(
          ({missing} missing), {rooms} rooms, {checkpoints} checkpoints, \
          {commands} commands over {bindings} bindings (0 faults), \
          {stasis} objects in stasis, {timers} timers, \
-         {spawners} spawners set up ({queued} left queued), \
+         {spawners} spawners set up ({queued} left queued), {alerted} walkers alerted, \
          {destroyed} objects streamed out ({homeless} checkpoints left roomless), \
          {} functions called with no behaviour yet{}",
         resources.len(),
