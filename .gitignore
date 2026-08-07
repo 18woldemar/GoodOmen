@@ -1,4 +1,4 @@
-# Ассеты и бинарники игры не попадают в репозиторий НИКОГДА
+# Game assets and binaries NEVER enter this repository
 *.exe
 *.dll
 *.mdl
@@ -18,10 +18,10 @@ testdata/*
 !testdata/*.json
 !testdata/README.md
 
-# Локальные пути к префиксам
+# Local paths to the Wine prefixes
 .env.local
 
-# Трейсы и дампы
+# Traces and dumps
 *.log
 *.trace
 *.bin
@@ -37,7 +37,7 @@ __pycache__/
 *.pyc
 .venv/
 
-# распакованные ассеты
+# unpacked assets
 extracted/
 *.tex
 *.mod
