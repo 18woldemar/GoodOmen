@@ -49,6 +49,9 @@ CORPUS = [
      "base/stars.sta"),
     ("recorded demo parses", ["omn.py", "extracted/base/demo1_5.omn"],
      "base/demo1_5.omn"),
+    ("checkpoints stand in open space",
+     ["spawn.py", "extracted", "--all", "--expect", "126"],
+     "scripts/level1.lua"),
 ]
 
 # needs the game executable and unicorn, so it is opt-in

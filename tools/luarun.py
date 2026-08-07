@@ -270,6 +270,41 @@ def prepare(roots: list[Path], out: Path, defines: set[str]) -> int:
     return n
 
 
+DUMP = """
+local function enc(v, out)
+  local t = type(v)
+  if t == "table" then
+    local n, first = table.getn(v), true
+    out[table.getn(out)+1] = "{"
+    for k, x in pairs(v) do
+      if not first then out[table.getn(out)+1] = "," end
+      first = false
+      out[table.getn(out)+1] = string.format("%q", tostring(k)) .. ":"
+      enc(x, out)
+    end
+    out[table.getn(out)+1] = "}"
+  elseif t == "number" then
+    out[table.getn(out)+1] = string.format("%.9g", v)
+  elseif t == "string" then
+    out[table.getn(out)+1] = string.format("%q", v)
+  elseif t == "boolean" then
+    out[table.getn(out)+1] = tostring(v)
+  else
+    out[table.getn(out)+1] = "null"
+  end
+end
+function DUMP(path)
+  local v = _G
+  for part in string.gfind(path, "[^.]+") do
+    if type(v) ~= "table" then v = nil break end
+    v = v[part]
+  end
+  local out = {}
+  enc(v, out)
+  io.write("---\\n" .. table.concat(out) .. "\\n")
+end
+"""
+
 TRACE = """
 local chunk = assert(loadstring(SOURCE, "=script"))
 local ok, err = pcall(chunk)
@@ -402,6 +437,9 @@ def main(argv: list[str] | None = None) -> int:
                     metavar="NAME=VALUE",
                     help="what an engine function should return, e.g. "
                          "chGetLanguageIsEnglish=1")
+    ap.add_argument("--dump", metavar="PATH",
+                    help="after running, print this global as JSON, e.g. "
+                         "--dump Level.scenegraph.checkpoints")
     ap.add_argument("--trace", action="store_true",
                     help="report the engine calls made, and where it stopped")
     ap.add_argument("--tree", type=Path,
@@ -452,6 +490,21 @@ def main(argv: list[str] | None = None) -> int:
         try:
             if args.compile:
                 run("", f"local f = assert(loadstring([==[\n{source}\n]==]))")
+                ok += 1
+            elif args.dump:
+                boot = ""
+                if args.boot:
+                    boot = (f"dofile('{args.boot[0]}')\n"
+                            "local _pre = PreInitLevel\n"
+                            "function PreInitLevel()\n"
+                            "  if Level and Level.file then"
+                            " dofile(Level.file) end\n"
+                            "  return _pre()\nend\n")
+                    boot += "".join(f"dofile('{b}')\n"
+                                    for b in args.boot[1:])
+                out = run(boot + source + f"\nDUMP('{args.dump}')\n",
+                          stubs + DUMP)
+                sys.stdout.write(out.split("---\n", 1)[-1])
                 ok += 1
             elif args.trace:
                 # the engine loads the scene graph named by Level.file while

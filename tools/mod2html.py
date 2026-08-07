@@ -113,6 +113,8 @@ for (const [name, uri] of Object.entries(TEX)) {
 // COLL.trees[i] = {first, count, box} -- box is the world AABB, only there
 // to skip trees the point is nowhere near.
 const COLL = __COLL__;
+// the level's own restart points, from Level.scenegraph.checkpoints
+const SPAWNS = __SPAWNS__;
 let CF = null, CU = null;
 if (COLL) {
   const buf = bytes(COLL.data).buffer;
@@ -144,7 +146,13 @@ function solid(x, y, z){
 // step height blocks movement: anything lower is a kerb to walk up, and
 // including the feet made a standing body think it was obstructed and step
 // two units into the air every frame.
-const EYE = 4.0, STEP = 2.0, GRAVITY = 60.0, JUMP = 22.0;
+// Sized from the game rather than guessed. Kurt's model is 1.86 units from
+// sole to scalp and Max's 1.72, so a unit is about a metre and the eye sits
+// at 1.7. The level agrees: over the 127 checkpoints the game spawns players
+// at, the smallest headroom is 2.9 units, and a 4-unit body -- what this was
+// before anyone measured -- did not fit five of them.
+const EYE = 1.7, STEP = 0.6, GRAVITY = 20.0, JUMP = 7.0;
+const WALK = 4.0, SPRINT = 9.0;               // units a second
 function blocked(x, y, z){
   for (let h = STEP; h <= EYE; h += (EYE - STEP) / 2)
     if (solid(x, y, z - EYE + h)) return true;
@@ -157,6 +165,14 @@ let walking = false, vz = 0, onGround = false;
 const keys = {};
 addEventListener('keydown', e => {
   keys[e.code] = true;
+  const n = e.code.match(/^Digit([1-9])$/);
+  if (n && SPAWNS && SPAWNS[n[1] - 1]){
+    const s = SPAWNS[n[1] - 1];
+    pos = [s.position[0], s.position[1], s.position[2] + EYE];
+    yaw = s.facing || 0; vz = 0; onGround = false;
+    document.getElementById('mode').textContent =
+      (walking ? 'walking' : 'flying') + ' \u00b7 ' + s.label;
+  }
   if (e.code === 'KeyG' && COLL){
     walking = !walking; vz = 0;
     document.getElementById('mode').textContent =
@@ -194,7 +210,8 @@ function frame(){
   const right = [-Math.sin(yaw), Math.cos(yaw), 0];
   const v = speed * (keys.ShiftLeft || keys.ShiftRight ? 4 : 1);
   if (walking){
-    const dt = 1/60, run = speed * (keys.ShiftLeft||keys.ShiftRight ? 2.2 : 1);
+    const dt = 1/60;
+    const run = (keys.ShiftLeft || keys.ShiftRight ? SPRINT : WALK) * dt;
     let dx = 0, dy = 0;
     if (keys.KeyW){ dx += fwd[0]; dy += fwd[1]; }
     if (keys.KeyS){ dx -= fwd[0]; dy -= fwd[1]; }
@@ -265,6 +282,9 @@ function frame(){
 }
 if (COLL) document.getElementById('walkhelp').textContent =
   ' \u00b7 G to walk \u00b7 space to jump';
+if (SPAWNS && SPAWNS.length)
+  document.getElementById('walkhelp').textContent +=
+    ' \u00b7 1-9 for checkpoints';
 frame();
 </script>
 """
@@ -388,6 +408,24 @@ def scene_collision(path: Path, resources: Path) -> dict | None:
     return {"data": base64.b64encode(bytes(blob)).decode(), "trees": trees}
 
 
+def _spawns(graph: Path, resources: Path) -> list[dict] | None:
+    """The checkpoints of whichever level script names this scene graph."""
+    import spawn as sp
+    for n in range(0, 14):
+        script = resources / "scripts" / f"level{n}.lua"
+        if not script.is_file():
+            continue
+        try:
+            named, points = sp.checkpoints(resources, n)
+        except Exception:
+            continue
+        if named and named.lower() == graph.stem.lower():
+            return [{"label": f"{n}-{c['index']} {c['label']}",
+                     "position": c["position"],
+                     "facing": c["facing"]} for c in points]
+    return None
+
+
 def _model_box(path: Path) -> list[float] | None:
     """The model's world bounds, padded, used only to skip distant trees."""
     verts, _tris = Model(path.read_bytes()).posed()
@@ -461,11 +499,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.src is None or args.out is None:
         ap.error("src and -o are required")
 
-    coll = None
+    coll, spawns = None, None
     if args.scene:
         verts, tris, placed = scene_geometry(args.src, args.resources)
         what = f"{placed} objects"
         if args.walk:
+            spawns = _spawns(args.src, args.resources)
             coll = scene_collision(args.src, args.resources)
             if coll:
                 what += (f" &middot; {len(coll['trees'])} collision trees, "
@@ -482,7 +521,8 @@ def main(argv: list[str] | None = None) -> int:
                 .replace("__STATS__", stats)
                 .replace("__MESH__", json.dumps(mesh))
                 .replace("__TEX__", json.dumps(textures))
-                .replace("__COLL__", json.dumps(coll)))
+                .replace("__COLL__", json.dumps(coll))
+                .replace("__SPAWNS__", json.dumps(spawns)))
     args.out.write_text(page)
     print(f"{args.out}: {stats.replace('&middot;', '|')}, "
           f"{len(page)/2**20:.1f} MiB", file=sys.stderr)
