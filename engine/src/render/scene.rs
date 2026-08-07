@@ -87,6 +87,9 @@ pub struct Scene {
     blank: Option<glow::Texture>,
     /// `(model name, its transform)`, in the order the scene graph gave them.
     draws: Vec<(String, Mat4)>,
+    /// The room each draw belongs to, or `None` for an object in no room at
+    /// all — which is **never culled**, as the original does not cull it.
+    rooms: Vec<Option<usize>>,
     pub missing: usize,
 }
 
@@ -236,9 +239,10 @@ impl Scene {
             .unwrap_or(false)
     }
 
-    /// Put a loaded model into the draw list at a transform.
-    pub fn place(&mut self, name: &str, transform: Mat4) {
+    /// Put a loaded model into the draw list at a transform, in a room.
+    pub fn place(&mut self, name: &str, transform: Mat4, room: Option<usize>) {
         self.draws.push((name.to_ascii_lowercase(), transform));
+        self.rooms.push(room);
     }
 
     pub fn draw_count(&self) -> usize {
@@ -282,7 +286,8 @@ impl Scene {
         gl: &glow::Context,
         view_projection: &Mat4,
         fade: f32,
-    ) -> Result<(), String> {
+        visible: Option<&std::collections::BTreeSet<usize>>,
+    ) -> Result<usize, String> {
         let shader = program(gl, VERTEX, FRAGMENT)?;
         if self.blank.is_none() {
             let white = gl.create_texture()?;
@@ -318,8 +323,17 @@ impl Scene {
         gl.active_texture(glow::TEXTURE0);
         gl.uniform_1_i32(gl.get_uniform_location(shader, "albedo").as_ref(), 0);
 
-        for (name, transform) in &self.draws {
+        let mut drawn = 0usize;
+        for (i, (name, transform)) in self.draws.iter().enumerate() {
+            // the authored cull list: a room draws the rooms it names, and
+            // an object in no room is always drawn
+            if let (Some(visible), Some(room)) = (visible, self.rooms[i]) {
+                if !visible.contains(&room) {
+                    continue;
+                }
+            }
             let Some(model) = self.models.get(name) else { continue };
+            drawn += model.triangles;
             gl.uniform_matrix_4_f32_slice(model_at.as_ref(), false, &transform.0);
             gl.bind_vertex_array(Some(model.vao));
             for part in &model.parts {
@@ -341,7 +355,7 @@ impl Scene {
             }
         }
         gl.delete_program(shader);
-        Ok(())
+        Ok(drawn)
     }
 
     /// # Safety

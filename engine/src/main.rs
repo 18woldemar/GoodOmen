@@ -119,6 +119,30 @@ fn main() {
         return;
     }
 
+    // `--play N [CP]` starts level N at checkpoint CP and draws it from
+    // there, culled by the room the camera stands in.
+    if let Some(i) = args.iter().position(|a| a == "--play") {
+        let n: u32 = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(1);
+        let cp: u32 = args.get(i + 2).and_then(|v| v.parse().ok()).unwrap_or(1);
+        let root = args
+            .iter()
+            .zip(std::iter::once(&String::new()).chain(args.iter()))
+            .find(|(a, before)| {
+                !a.starts_with("--") && a.parse::<u32>().is_err() && *before != "--expect"
+            })
+            .map(|(a, _)| std::path::PathBuf::from(a))
+            .unwrap_or_else(Install::beside_the_binary);
+        match play(&root, n, cp, args.iter().any(|a| a == "--window")) {
+            Ok(line) => println!("{line}"),
+            Err(e) if e.starts_with(goodomen::render::NO_VIDEO) => println!("skip: {e}"),
+            Err(e) => {
+                eprintln!("goodomen: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     // `--level l1` renders a level; with `--window` it is shown, without it
     // the pixels are checked offscreen the way `--triangle` is
     if let Some(i) = args.iter().position(|a| a == "--level") {
@@ -528,6 +552,178 @@ fn replay(
     ))
 }
 
+/// Start a level at a checkpoint and draw it from there, with the authored
+/// room visibility doing the culling.
+///
+/// The camera stands where the game would put the player, which is what
+/// makes the culling figure mean anything: a room's `visible` list is
+/// authored for the places a player can be.
+fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Result<String, String> {
+    use goodomen::game::body::EYE;
+    use goodomen::render::{scene::Scene, Offscreen};
+
+    let mut install = Install::open(root).map_err(|e| e.to_string())?;
+    let mut sources = std::collections::BTreeMap::new();
+    for (name, i, j) in entries_named(&install, ".lua") {
+        if let Ok(bytes) = install.containers[i].read_at(j) {
+            sources.insert(name, bytes.iter().map(|&b| b as char).collect::<String>());
+        }
+    }
+    if let Some(dir) = install.override_dir.clone() {
+        if let Ok(read) = std::fs::read_dir(&dir) {
+            for e in read.flatten() {
+                let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+                if name.ends_with(".lua") {
+                    if let Ok(bytes) = std::fs::read(e.path()) {
+                        sources.insert(name, bytes.iter().map(|&b| b as char).collect());
+                    }
+                }
+            }
+        }
+    }
+
+    let mut video = Video::open("goodomen", 1024, 768, show)?;
+    let version = video.version();
+    let mut scene = Scene::default();
+    // SAFETY: the context Video::open made is current on this thread.
+    let (loaded, rooms, checkpoints) = unsafe {
+        goodomen::game::level::start(
+            &video.gl,
+            &mut install,
+            &mut scene,
+            &sources,
+            number,
+            checkpoint,
+        )
+        .map_err(|e| e.to_string())?
+    };
+
+    let spawn = checkpoints
+        .iter()
+        .find(|c| c.index as u32 == checkpoint)
+        .ok_or_else(|| format!("level {number} has no checkpoint {checkpoint}"))?;
+    let eye = [
+        spawn.position[0] as f32,
+        spawn.position[1] as f32,
+        (spawn.position[2] + EYE) as f32,
+    ];
+    let here = rooms.at([eye[0] as f64, eye[1] as f64, eye[2] as f64]);
+    let visible = here.first().map(|&i| rooms.visible[i].clone());
+    let where_ = here
+        .iter()
+        .map(|&i| rooms.names[i].as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut yaw = spawn.facing;
+    let mut pitch = 0.0f64;
+    let summary = format!(
+        "l{number} cp{checkpoint}: {} objects, {} placed, {} triangles, in {} \
+         ({} rooms visible from it)",
+        loaded.objects,
+        loaded.placed,
+        loaded.triangles,
+        if where_.is_empty() { "no room".into() } else { where_ },
+        visible.as_ref().map(|v| v.len()).unwrap_or(0)
+    );
+
+    if show {
+        use sdl2::event::Event;
+        use sdl2::keyboard::{Keycode, Scancode};
+        println!("OpenGL {version}\n{summary}");
+        println!("W A S D to move, mouse to look, shift to run, C to turn culling off, escape to leave");
+        video.sdl.mouse().set_relative_mouse_mode(true);
+        let mut at = [eye[0] as f64, eye[1] as f64, eye[2] as f64];
+        let mut cull = true;
+        let mut last = std::time::Instant::now();
+        loop {
+            for event in video.events.poll_iter() {
+                match event {
+                    Event::Quit { .. }
+                    | Event::KeyDown { keycode: Some(Keycode::Escape), .. } => {
+                        unsafe { scene.delete(&video.gl) };
+                        return Ok(summary);
+                    }
+                    Event::KeyDown { keycode: Some(Keycode::C), .. } => cull = !cull,
+                    Event::MouseMotion { xrel, yrel, .. } => {
+                        yaw -= xrel as f64 * 0.0025;
+                        pitch = (pitch - yrel as f64 * 0.0025).clamp(-1.5, 1.5);
+                    }
+                    _ => {}
+                }
+            }
+            let dt = last.elapsed().as_secs_f64().min(0.1);
+            last = std::time::Instant::now();
+            let keys: std::collections::HashSet<Scancode> =
+                video.events.keyboard_state().pressed_scancodes().collect();
+            let held = |s: Scancode| keys.contains(&s);
+            let speed = if held(Scancode::LShift) { 40.0 } else { 12.0 };
+            let (fx, fy) = (yaw.cos(), yaw.sin());
+            if held(Scancode::W) { at = [at[0] + fx * speed * dt, at[1] + fy * speed * dt, at[2]]; }
+            if held(Scancode::S) { at = [at[0] - fx * speed * dt, at[1] - fy * speed * dt, at[2]]; }
+            if held(Scancode::D) { at = [at[0] - fy * speed * dt, at[1] + fx * speed * dt, at[2]]; }
+            if held(Scancode::A) { at = [at[0] + fy * speed * dt, at[1] - fx * speed * dt, at[2]]; }
+            if held(Scancode::Space) { at[2] += speed * dt; }
+            if held(Scancode::LCtrl) { at[2] -= speed * dt; }
+
+            // the room under the camera decides what is drawn, every frame
+            let here = rooms.at(at);
+            let visible = here.first().map(|&i| rooms.visible[i].clone());
+            let from = [at[0] as f32, at[1] as f32, at[2] as f32];
+            let ahead = [
+                from[0] + (yaw.cos() * pitch.cos()) as f32,
+                from[1] + (yaw.sin() * pitch.cos()) as f32,
+                from[2] + pitch.sin() as f32,
+            ];
+            let view = Mat4::look_at(from, ahead, [0.0, 0.0, 1.0]);
+            let (w, h) = video.window.drawable_size();
+            let projection = Mat4::perspective(1.1, w as f32 / h.max(1) as f32, 0.05, 4000.0);
+            unsafe {
+                video.gl.viewport(0, 0, w as i32, h as i32);
+                video.gl.clear_color(0.05, 0.06, 0.09, 1.0);
+                video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+                scene.draw(
+                    &video.gl,
+                    &projection.times(&view),
+                    600.0,
+                    if cull { visible.as_ref() } else { None },
+                )?;
+            }
+            video.window.gl_swap_window();
+        }
+    }
+
+    // offscreen: draw once culled and once not, and report the difference,
+    // which is what the authored visibility is worth
+    let (width, height) = (512i32, 512i32);
+    unsafe {
+        let target = Offscreen::new(&video.gl, width, height)?;
+        let ahead = [
+            eye[0] + yaw.cos() as f32,
+            eye[1] + yaw.sin() as f32,
+            eye[2] + pitch.sin() as f32,
+        ];
+        let view = Mat4::look_at(eye, ahead, [0.0, 0.0, 1.0]);
+        let projection = Mat4::perspective(1.1, 1.0, 0.05, 4000.0);
+        video.gl.clear_color(0.05, 0.06, 0.09, 1.0);
+        video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+        let culled = scene.draw(&video.gl, &projection.times(&view), 600.0, visible.as_ref())?;
+        let all = scene.draw(&video.gl, &projection.times(&view), 600.0, None)?;
+        video.gl.finish();
+        target.delete(&video.gl);
+        scene.delete(&video.gl);
+        if let Some(want) = expect_flag("--expect-drawn") {
+            if culled != want {
+                return Err(format!("drew {culled} triangles, expected {want}"));
+            }
+        }
+        Ok(format!(
+            "OpenGL {version}: {summary}, drew {culled} of {all} triangles ({:.1}%)",
+            100.0 * culled as f64 / all.max(1) as f64
+        ))
+    }
+}
+
 /// Load a level and draw it — into a window if `show`, otherwise offscreen
 /// with the pixels checked.
 ///
@@ -693,7 +889,7 @@ fn level(
                 video.gl.viewport(0, 0, w as i32, h as i32);
                 video.gl.clear_color(0.05, 0.06, 0.09, 1.0);
                 video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
-                scene.draw(&video.gl, &projection.times(&view), span * 2.0)?;
+                scene.draw(&video.gl, &projection.times(&view), span * 2.0, None)?;
             }
             video.window.gl_swap_window();
             let _ = EYE;
@@ -707,7 +903,7 @@ fn level(
         let projection = Mat4::perspective(1.1, 1.0, span * 0.002, span * 4.0);
         video.gl.clear_color(0.05, 0.06, 0.09, 1.0);
         video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
-        scene.draw(&video.gl, &projection.times(&view), span * 2.0)?;
+        scene.draw(&video.gl, &projection.times(&view), span * 2.0, None)?;
         video.gl.finish();
 
         let mut pixels = vec![0u8; (width * height * 4) as usize];
