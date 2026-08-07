@@ -238,13 +238,23 @@ pub fn install(lua: &Lua) -> Result<(), Error> {
                 number(&arg(15)),
                 number(&arg(16)),
             ],
-            // **Where the starting hitpoints come from is still open.** The
-            // scene graph does not carry them -- the payload is type-specific
-            // and none of the 5633 objects spends a slot on health -- so the
-            // original's per-type constructor sets them, below 0x42ac60.
-            // Zero is the honest default until that is read: it means
-            // `mdkAddHitpoints` does nothing, which is exactly what the
-            // original does to something already at zero.
+            // The scene graph carries none of this -- no object spends a
+            // payload slot on health -- and the original's **six** type
+            // constructors set it (0x424f41, 0x42594d, 0x42650e, 0x426cc8,
+            // 0x42f382, 0x42f63c). Each writes the maximum and then
+            // `hitpoints = maximum`, so a thing starts whole; the first also
+            // sets the damage filter to a literal **9**, which is
+            // `DAMAGE_GOODGUY | DAMAGE_SNIPER`.
+            //
+            // The maximum is **not a constant**: 0x42d020 computes
+            // `(int)(2 * difficulty * base)` from a global float the game
+            // sets at run time (0x4bb71c, uninitialised in the file), and
+            // rounds a positive base up to 1 rather than down to 0. So
+            // health is per-type *and* per-difficulty, and the base per type
+            // is the number still to be read.
+            //
+            // Zero until then, which makes `mdkAddHitpoints` do nothing --
+            // exactly what the original does to something already at zero.
             hitpoints: 0,
             max_hitpoints: 0,
             damage_filter: 0,
