@@ -26,15 +26,33 @@ sole to scalp, so a unit is about a metre, the eye sits at 1.7 and a step is
 
 Over all ten levels, 2557 spawn points, two seconds of held-forwards each:
 
-    standing   2556 of 2557 still standing,    2 ever inside,    0 met a wall
-    walking    1897 of 2557,                  24 ever inside,  305 met a wall
-    running    1431 of 2557,                  30 ever inside,  562 met a wall
+    standing   2556 of 2557 still standing,    0 ever inside,    0 met a wall
+    walking    1897 of 2557,                   2 ever inside,  303 met a wall
+    running    1430 of 2557,                   4 ever inside,  559 met a wall
 
-Standing is as near exact as it gets. The bodies that stop standing walk off
-ledges, and the ones that end up inside geometry are wedged under overhangs
-rather than passing through the world -- the body is a vertical segment with
-no head clearance, so falling into a gap drives its head into the slab above.
-A capsule sweep is the fix, and it is engine work.
+The bodies that stop standing walk off ledges, which is what walking forwards
+with your eyes shut does in a game made largely of shafts.
+
+**Inside geometry went from 56 runs to 6**, and the two fixes are both about
+checking the *whole* frame rather than a piece of it:
+
+  * the lift out of the surface you land on now stops at the ceiling. Rising
+    until the feet are clear is right in the open and wrong under an overhang,
+    where it drove the head into the slab -- the two level 5 spawn points that
+    stood inside geometry without moving at all are in a gap 1.7 units tall,
+    exactly the body's height, so there was nowhere to lift them to. Refusing
+    leaves the feet slightly in the floor, which is the lesser wrong.
+  * the sideways move is checked against the height the body had *before* it
+    settled, so walking fast under a lowering ceiling could pass a check that
+    the finished position fails. Validating the finished position and giving
+    the sideways move back when it fails is a cheap stand-in for a swept
+    solve.
+
+What is left is six *transient* clips of one to ten frames in runs of a
+hundred and twenty, all of them ending with the body standing in a clear
+column -- brushing through a tight spot rather than stuck in it. The body is
+still a vertical segment; a capsule sweep is the real fix and it is engine
+work.
 
 ## Replaying the demo
 
@@ -146,12 +164,59 @@ class World:
         return self.solid(x, y, z - EYE + 0.05)
 
 
+def _settle(w: World, x: float, y: float, z: float, ground: bool,
+            vz: float) -> tuple[float, bool, float]:
+    """Rise out of the surface landed on, or stay glued over a kerb.
+
+    The lift **stops at the ceiling**. Rising until the feet are clear is
+    right in the open and wrong under an overhang, where it drives the head
+    into the slab: the two level 5 spawn points that stood inside geometry
+    without moving are in a gap 1.7 units tall, which is exactly the body's
+    height, so the lift had nowhere to put it that was not solid. Refusing to
+    lift into a ceiling leaves the feet a little in the floor, which is the
+    lesser wrong and the one a player cannot see.
+    """
+    if w.footed(x, y, z):
+        lift = 0.0
+        while (lift < EYE and w.footed(x, y, z + lift)
+               and not w.blocked(x, y, z + lift + 0.05)):
+            lift += 0.05
+        return z + lift, True, 0.0
+    if ground and vz < 0:
+        drop = 0.0
+        while drop < STEP and not w.footed(x, y, z - drop):
+            drop += 0.05
+        if drop < STEP:
+            return z - (drop - 0.05), True, 0.0
+        return z, False, vz
+    return z, False, vz
+
+
+def _land(w: World, was, x: float, y: float, z: float, ground: bool,
+          vz: float):
+    """Take the frame back if the settled position is inside the world.
+
+    A frame moves sideways and then vertically, and only the sideways part is
+    checked -- against the height the body had *before* it settled. Walk fast
+    under a lowering ceiling and the two disagree. Validating the finished
+    position and giving up the sideways move when it fails is what a swept
+    solve would do, cheaply, and it takes the wedges from 9 runs to 6.
+    """
+    if not w.blocked(x, y, z):
+        return x, y, z
+    back = _settle(w, was[0], was[1], z, ground, vz)[0]
+    if w.blocked(was[0], was[1], back):
+        return x, y, z                 # no better there; do not trade a wedge
+    return was[0], was[1], back
+
+
 def walk(w: World, start, yaw: float, frames: int, speed: float) -> dict:
     pos = list(start)
     vz, ground, hits, inside = 0.0, False, 0, 0
     fwd = (math.cos(yaw), math.sin(yaw))
     run = speed * DT
     for _ in range(frames):
+        was = (pos[0], pos[1])
         if run > 0:
             dx, dy = fwd[0] * run, fwd[1] * run
             if w.blocked(pos[0] + dx, pos[1] + dy, pos[2]):
@@ -170,24 +235,8 @@ def walk(w: World, start, yaw: float, frames: int, speed: float) -> dict:
             bit = max(-0.5, min(0.5, left))
             nz += bit
             left -= bit
-        if w.footed(pos[0], pos[1], nz):
-            lift = 0.0
-            while lift < EYE and w.footed(pos[0], pos[1], nz + lift):
-                lift += 0.05
-            nz += lift
-            ground, vz = True, 0.0
-        elif ground and vz < 0:
-            drop = 0.0
-            while drop < STEP and not w.footed(pos[0], pos[1], nz - drop):
-                drop += 0.05
-            if drop < STEP:
-                nz -= drop - 0.05
-                vz = 0.0
-            else:
-                ground = False
-        else:
-            ground = False
-        pos[2] = nz
+        nz, ground, vz = _settle(w, pos[0], pos[1], nz, ground, vz)
+        pos[0], pos[1], pos[2] = _land(w, was, pos[0], pos[1], nz, ground, vz)
         if w.blocked(pos[0], pos[1], pos[2]):
             inside += 1
     return {"end": pos, "ground": ground, "hits": hits, "inside": inside}
@@ -246,6 +295,7 @@ def replay(w: World, start, yaw: float, frames: list, mouse: float = 1.0,
     vz, ground, hits, inside = 0.0, False, 0, 0
     path = [tuple(pos)]
     for f in frames:
+        was = (pos[0], pos[1])
         dt = max(1e-4, min(0.2, f["dt"]))
         held = {}
         for cmd, v in f["input"]:
@@ -288,24 +338,8 @@ def replay(w: World, start, yaw: float, frames: list, mouse: float = 1.0,
             bit = max(-0.5, min(0.5, left))
             nz += bit
             left -= bit
-        if w.footed(pos[0], pos[1], nz):
-            lift = 0.0
-            while lift < EYE and w.footed(pos[0], pos[1], nz + lift):
-                lift += 0.05
-            nz += lift
-            ground, vz = True, 0.0
-        elif ground and vz < 0:
-            drop = 0.0
-            while drop < STEP and not w.footed(pos[0], pos[1], nz - drop):
-                drop += 0.05
-            if drop < STEP:
-                nz -= drop - 0.05
-                vz = 0.0
-            else:
-                ground = False
-        else:
-            ground = False
-        pos[2] = nz
+        nz, ground, vz = _settle(w, pos[0], pos[1], nz, ground, vz)
+        pos[0], pos[1], pos[2] = _land(w, was, pos[0], pos[1], nz, ground, vz)
         if w.blocked(pos[0], pos[1], pos[2]):
             inside += 1
         path.append(tuple(pos))
@@ -397,6 +431,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--expect-standing", type=int, metavar="N",
                     help="succeed only if exactly N bodies are still standing "
                          "after the standing-still pass; pins the survey")
+    ap.add_argument("--expect-inside", type=int, metavar="N",
+                    help="succeed only if exactly N runs ever end up inside "
+                         "geometry; the number that must not creep up")
     ap.add_argument("--keys", action="store_true",
                     help="check the key bindings against DirectInput")
     ap.add_argument("--demo", type=Path, metavar="OMN",
@@ -440,8 +477,12 @@ def main(argv: list[str] | None = None) -> int:
         upright += r["standing"]["standing"]
     print(f"{len(files)} levels, {upright} standing bodies stay up, "
           f"{bad} runs ever inside geometry", file=sys.stderr)
-    if args.expect_standing is not None:
-        return 0 if upright == args.expect_standing else 1
+    if args.expect_standing is not None and upright != args.expect_standing:
+        print(f"expected {args.expect_standing} standing", file=sys.stderr)
+        return 1
+    if args.expect_inside is not None and bad != args.expect_inside:
+        print(f"expected {args.expect_inside} runs inside", file=sys.stderr)
+        return 1
     return 0
 
 

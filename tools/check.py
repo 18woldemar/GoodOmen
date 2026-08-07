@@ -84,7 +84,7 @@ SLOW = [
      ["texdec.py", "extracted/base", "--check"], "base"),
     ("the controller walks every level",
      ["walksim.py", "extracted/base", "--resources", "extracted", "--all",
-      "--expect-standing", "2556"], "base"),
+      "--expect-standing", "2556", "--expect-inside", "6"], "base"),
 ]
 
 

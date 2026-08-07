@@ -248,6 +248,7 @@ function frame(){
   const fwd = [Math.cos(yaw)*cp, Math.sin(yaw)*cp, sp];
   const right = [-Math.sin(yaw), Math.cos(yaw), 0];
   const v = speed * (keys.ShiftLeft || keys.ShiftRight ? 4 : 1);
+  const wasX = pos[0], wasY = pos[1];
   if (walking){
     const dt = 1/60;
     const run = (keys.ShiftLeft || keys.ShiftRight ? SPRINT : WALK) * dt;
@@ -280,15 +281,24 @@ function frame(){
       const bit = Math.max(-0.5, Math.min(0.5, left));
       nz += bit; left -= bit;
     }
+    // rise out of the surface landed on, but stop at the ceiling: lifting
+    // until the feet are clear is right in the open and wrong under an
+    // overhang, where it drives the head into the slab
     if (footed(pos[0], pos[1], nz)){
-      let lift = 0;                       // rise out of the surface landed on
-      while (lift < EYE && footed(pos[0], pos[1], nz + lift)) lift += 0.05;
+      let lift = 0;
+      while (lift < EYE && footed(pos[0], pos[1], nz + lift)
+             && !blocked(pos[0], pos[1], nz + lift + 0.05)) lift += 0.05;
       nz += lift; onGround = true; vz = 0;
     } else if (onGround && vz < 0){
       let drop = 0;                       // stay glued over kerbs and stairs
       while (drop < STEP && !footed(pos[0], pos[1], nz - drop)) drop += 0.05;
       if (drop < STEP){ nz -= drop - 0.05; vz = 0; } else onGround = false;
     } else onGround = false;
+    // the sideways move was checked at the height the body had before it
+    // settled; if the finished position is inside the world, give it back
+    if (blocked(pos[0], pos[1], nz) && !blocked(wasX, wasY, nz)){
+      pos[0] = wasX; pos[1] = wasY;
+    }
     pos[2] = nz;
   } else {
     const step = (d, s) => { for (let i=0;i<3;i++) pos[i] += d[i]*s; };
