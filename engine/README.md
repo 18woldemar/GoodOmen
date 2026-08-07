@@ -14,11 +14,20 @@ to install, nothing to configure. Pass a path to read a game somewhere else:
 
 ## What it reads so far
 
-The containers (PKWARE DCL Implode, every CRC32 checked) and the textures:
-all 761 of them, all 6701 mip levels, decoded through the game's own six-layout
-block codec. `--tex` prints one CRC32 per texture and `../tools/texcheck.sh`
-diffs those against `../tools/texdec.py`, which is byte-exact against the
-original routine under emulation.
+The containers (PKWARE DCL Implode, every CRC32 checked), the textures and
+the models.
+
+**Textures**: all 761, all 6701 mip levels, through the game's own
+six-layout block codec. `--tex` prints one CRC32 per texture and
+`../tools/texcheck.sh` diffs those against `../tools/texdec.py`, which is
+byte-exact against the original routine under emulation.
+
+**Models**: all 2207, geometry and animation — strip groups, the node
+hierarchy, quaternion channels with slerp. `--mod` prints eleven numbers per
+model and `../tools/modcheck.py` compares them against `../tools/mod2obj.py`:
+six counts exactly and five sums within tolerance, because the arithmetic
+crosses a slerp and two implementations of `acos` need not agree in the last
+bit.
 
 ## Platforms
 
