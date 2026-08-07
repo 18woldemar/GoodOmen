@@ -70,15 +70,16 @@ gl.attachShader(prog, sh(gl.VERTEX_SHADER, `
   uniform mat4 uMVP; varying vec2 vUV; varying float vZ;
   void main(){ gl_Position = uMVP * vec4(aPos,1.0); vUV = aUV; vZ = gl_Position.w; }`));
 gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, `
-  precision mediump float; uniform sampler2D uTex;
+  precision mediump float; uniform sampler2D uTex; uniform float uCut;
   varying vec2 vUV; varying float vZ;
   void main(){
     vec4 c = texture2D(uTex, vec2(vUV.x, 1.0 - vUV.y));
-    if (c.a < 0.35) discard;
+    if (c.a < uCut) discard;
     float fog = clamp(vZ / 4000.0, 0.0, 0.75);
-    gl_FragColor = vec4(mix(c.rgb, vec3(0.05,0.06,0.07), fog), 1.0);
+    gl_FragColor = vec4(mix(c.rgb, vec3(0.05,0.06,0.07), fog), c.a);
   }`));
 gl.linkProgram(prog); gl.useProgram(prog);
+const uCut = gl.getUniformLocation(prog, 'uCut');
 
 const bytes = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 const verts = new Float32Array(bytes(MESH.data).buffer);
@@ -274,10 +275,26 @@ function frame(){
     0,0,(far+near)/(near-far),-1, 0,0,2*far*near/(near-far),0]);
   gl.uniformMatrix4fv(gl.getUniformLocation(prog,'uMVP'), false, mul(proj, view));
 
-  for (const d of MESH.draws){
-    gl.bindTexture(gl.TEXTURE_2D, textures[d.tex] || blank);
-    gl.drawArrays(gl.TRIANGLES, d.first, d.count);
-  }
+  // The .tex header says which textures carry alpha, so the opaque ones go
+  // down first with the depth buffer writing, and the translucent ones after
+  // with it read-only -- glass and gradients then show what is behind them
+  // instead of being punched out by an alpha test.
+  gl.disable(gl.BLEND); gl.depthMask(true);
+  for (const d of MESH.draws)
+    if (!d.blend){
+      gl.uniform1f(uCut, 0.35);
+      gl.bindTexture(gl.TEXTURE_2D, textures[d.tex] || blank);
+      gl.drawArrays(gl.TRIANGLES, d.first, d.count);
+    }
+  gl.enable(gl.BLEND); gl.depthMask(false);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  for (const d of MESH.draws)
+    if (d.blend){
+      gl.uniform1f(uCut, 0.02);
+      gl.bindTexture(gl.TEXTURE_2D, textures[d.tex] || blank);
+      gl.drawArrays(gl.TRIANGLES, d.first, d.count);
+    }
+  gl.depthMask(true); gl.disable(gl.BLEND);
   requestAnimationFrame(frame);
 }
 if (COLL) document.getElementById('walkhelp').textContent =
@@ -436,7 +453,26 @@ def _model_box(path: Path) -> list[float] | None:
            [max(v[0][c] for v in verts) + pad for c in range(3)]
 
 
-def build(verts: list, tris: list, png_dir: Path | None) -> tuple[dict, dict]:
+def _blended(name: str, resources: Path | None) -> bool:
+    """Does this texture need blending rather than an alpha test?
+
+    The `.tex` header says so outright, at offset 0x10: 3 for RGB and 4 for
+    RGBA. It is exact over the whole set -- all 517 textures that say 3 are
+    fully opaque, and all 238 that say 4 carry alpha, 190 of them partial
+    rather than cutout. No guessing at the pixels required.
+    """
+    if not resources or not name:
+        return False
+    found = sg._find(resources, Path(name).stem + ".tex")
+    if found is None:
+        return False
+    with found.open("rb") as fh:
+        head = fh.read(0x14)
+    return len(head) >= 0x14 and struct.unpack_from("<I", head, 0x10)[0] == 4
+
+
+def build(verts: list, tris: list, png_dir: Path | None,
+          resources: Path | None = None) -> tuple[dict, dict]:
     by_tex: dict[str | None, list[int]] = {}
     for a, b, c in tris:
         by_tex.setdefault(verts[a][2], []).extend((a, b, c))
@@ -448,7 +484,8 @@ def build(verts: list, tris: list, png_dir: Path | None) -> tuple[dict, dict]:
         for i in idx:
             pos, uv, _ = verts[i]
             data += struct.pack("<5f", *pos, *uv)
-        draws.append({"tex": tex or "", "first": first, "count": len(idx)})
+        draws.append({"tex": tex or "", "first": first, "count": len(idx),
+                      "blend": _blended(tex or "", resources)})
 
     pts = [v[0] for v in verts]
     lo = [min(p[c] for p in pts) for c in range(3)]
@@ -513,7 +550,9 @@ def main(argv: list[str] | None = None) -> int:
         m = Model(args.src.read_bytes())
         verts, tris = m.posed()
         what = f"{len(m.nodes)} nodes"
-    mesh, textures = build(verts, tris, args.png if args.png.is_dir() else None)
+    mesh, textures = build(verts, tris,
+                           args.png if args.png.is_dir() else None,
+                           args.resources if args.scene else None)
     stats = (f"{what} &middot; "
              f"{sum(d['count'] for d in mesh['draws']) // 3} triangles &middot; "
              f"{len(textures)} textures")
