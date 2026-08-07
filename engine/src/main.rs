@@ -20,6 +20,7 @@ fn main() {
     let models = args.iter().any(|a| a == "--mod");
     let trees = args.iter().any(|a| a == "--bsp");
     let scripts = args.iter().any(|a| a == "--lua");
+    let graphs = args.iter().any(|a| a == "--scene");
 
     // the renderer needs no game files, so it is answered before the
     // installation is looked for
@@ -63,7 +64,7 @@ fn main() {
         }
     };
 
-    if tex || models || trees || scripts {
+    if tex || models || trees || scripts || graphs {
         // `--expect N`, the same convention the Python tools use: a check
         // that silently found nothing is the failure mode worth guarding
         let expect = args
@@ -79,8 +80,10 @@ fn main() {
             ("models", meshes(&mut install, expect.is_none()))
         } else if trees {
             ("trees", collision(&mut install, expect.is_none()))
-        } else {
+        } else if scripts {
             ("scripts", compile_scripts(&mut install, expect.is_none()))
+        } else {
+            ("objects", scene_graphs(&mut install, expect.is_none()))
         };
         if let Some(n) = expect {
             if found != n {
@@ -356,6 +359,75 @@ fn compile_scripts(install: &mut Install, list: bool) -> usize {
         names.len()
     );
     names.len()
+}
+
+/// **Run** every scene graph, rather than parse it, and print each object the
+/// way `tools/scene.py` describes it.
+///
+/// This is the check that the whole Lua side works: the file is Lua 3, the
+/// preprocessor and the prelude have to carry it, `mdkRegisterObject` has to
+/// take twenty arguments in the right order, the `OBJ_*` constants have to
+/// have the values the binary gives them, and each object's parent has to be
+/// reachable as the global the previous registration made. Any one of those
+/// wrong and the objects come out different.
+///
+/// -> the number of objects registered, not of files.
+fn scene_graphs(install: &mut Install, list: bool) -> usize {
+    let mut total = 0usize;
+    let mut files = 0usize;
+    for (name, i, j) in entries_named(install, ".lua") {
+        let data = match install.containers[i].read_at(j) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("goodomen: {name}: {e}");
+                std::process::exit(1);
+            }
+        };
+        let source: String = data.iter().map(|&b| b as char).collect();
+        if !source.contains("mdkRegisterObject(") {
+            continue;
+        }
+        files += 1;
+
+        // a fresh state each time: a scene graph names its parents as
+        // globals, and two levels reuse names
+        let engine = Scripts::new().and_then(|s| {
+            goodomen::game::world::install(&s.lua)?;
+            Ok(s)
+        });
+        let engine = match engine {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("goodomen: {name}: {e}");
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = engine.run(&name, &source) {
+            eprintln!("goodomen: {name}: {e}");
+            std::process::exit(1);
+        }
+        let world = goodomen::game::world::world(&engine.lua).expect("a world");
+        for (_id, gob) in world.iter() {
+            total += 1;
+            if list {
+                let parent = gob
+                    .parent
+                    .and_then(|p| world.get(p))
+                    .map(|g| g.name.as_str())
+                    .unwrap_or("");
+                println!(
+                    "{name}\t{}\t{}\t{parent}\t{} {} {}\t{} {} {} {}\t{}",
+                    gob.name,
+                    gob.kind,
+                    gob.position[0], gob.position[1], gob.position[2],
+                    gob.rotation[0], gob.rotation[1], gob.rotation[2], gob.rotation[3],
+                    gob.resource.as_deref().unwrap_or("")
+                );
+            }
+        }
+    }
+    eprintln!("{files} scene graphs run, {total} objects registered");
+    total
 }
 
 /// Every container member with this extension, lowercased and sorted, so that

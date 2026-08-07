@@ -255,6 +255,78 @@ mdkRegisterObject('lt', OBJ_STATICLIGHT, scene, r1, -1, 1,2,3, 1,0,0,0, nil,1590
 """
 
 
+def compare_engine(root: Path, gamedir: str, override: Path | None) -> int:
+    """Run the engine over `gamedir` and require the same objects, field for
+    field.
+
+    This is the strongest check the Lua side has. `tools/scene.py` reads the
+    registrations out of the *text*; the engine gets them by **running** the
+    file on its own Lua. For the two to agree, the preprocessor and the
+    prelude have to carry Lua 3, `mdkRegisterObject` has to take its twenty
+    arguments in the right order, the `OBJ_*` constants have to have the
+    values `tools/luaconst.py` read out of the binary, and each parent has to
+    be reachable as the global the previous registration made.
+    """
+    import subprocess
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import luaconst
+    here = Path(__file__).resolve().parent.parent
+    values = luaconst.constants(luaconst.Image(
+        (Path(gamedir) / "mdk2Main.exe").read_bytes()))
+
+    out = subprocess.run(
+        ["cargo", "run", "--quiet", "--release", "--manifest-path",
+         str(here / "engine/Cargo.toml"), "--", gamedir, "--scene"],
+        capture_output=True, text=True, check=True).stdout
+    theirs: dict[str, list] = {}
+    for line in out.splitlines():
+        f = line.split("\t")
+        if len(f) != 7:
+            continue
+        theirs.setdefault(f[0], []).append(
+            (f[1], float(f[2]), f[3],
+             *(round(float(v), 6) for v in f[4].split()),
+             *(round(float(v), 6) for v in f[5].split()), f[6]))
+
+    patch = {}
+    if override and override.is_dir():
+        patch = {f.name.lower(): f for f in override.rglob("*.lua")}
+    files = {f.name.lower(): f for f in sorted(root.rglob("*.lua"))}
+    files.update(patch)
+
+    bad, objects, graphs = [], 0, 0
+    for name in sorted(files):
+        text = files[name].read_text(errors="replace")
+        if "mdkRegisterObject(" not in text:
+            continue
+        graphs += 1
+        mine = []
+        for o in parse(text)["objects"]:
+            kind = values.get(o["type"])
+            if kind is None:
+                bad.append(f"{name}: {o['type']} is not a constant the binary defines")
+                kind = -1.0
+            mine.append((o["name"], kind, o["parent"] or "",
+                         *(round(float(v), 6) for v in o["position"]),
+                         *(round(float(v), 6) for v in o["rotation"]),
+                         o["resource"] or ""))
+        objects += len(mine)
+        got = theirs.get(name, [])
+        if len(got) != len(mine):
+            bad.append(f"{name}: {len(mine)} objects parsed, {len(got)} run")
+            continue
+        for a, b in zip(mine, got):
+            if a != b:
+                bad.append(f"{name}: {a} != {b}")
+                break
+
+    for line in bad[:20]:
+        print(f"MISMATCH {line}", file=sys.stderr)
+    print(f"{graphs} scene graphs, {objects} objects, {len(bad)} disagree "
+          f"between parsing them and the engine running them", file=sys.stderr)
+    return 1 if bad else 0
+
+
 def selftest() -> None:
     """The parser's corner cases, without needing the game installed."""
     s = parse(SAMPLE)
@@ -282,12 +354,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--resources", type=Path,
                     help="extraction root, to resolve resource names")
     ap.add_argument("--json", action="store_true", help="dump the scene")
+    ap.add_argument("--engine", metavar="GAMEDIR",
+                    help="run the engine over this installation and require "
+                         "the same objects, field for field")
+    ap.add_argument("--override", type=Path,
+                    help="the game's override/ directory, a shipped patch")
     args = ap.parse_args(argv)
     if args.selftest:
         selftest()
         return 0
     if args.src is None:
         ap.error("a scene .lua file or a directory is required")
+
+    if args.engine:
+        return compare_engine(args.src, args.engine, args.override)
 
     if args.src.is_dir():
         files = [p for p in sorted(args.src.glob("*.lua"))

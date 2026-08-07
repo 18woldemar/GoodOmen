@@ -101,6 +101,8 @@ ENGINE = [
     ("the engine compiles every shipped script",
      ["luarun.py", "extracted", "--engine", "$MDK2_GOG",
       "--override", "$MDK2_GOG/override"], "scripts"),
+    ("the engine runs every scene graph",
+     ["scene.py", "extracted/base", "--engine", "$MDK2_GOG"], "base"),
     ("the renderer draws its first triangle",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "--triangle"], None),
