@@ -178,6 +178,9 @@ pub struct Scene {
     blank: Option<glow::Texture>,
     /// Every `OBJ_STATICLIGHT` the level placed.
     pub lights: Vec<Light>,
+    /// Compiled once. It had been compiled and deleted **every frame**,
+    /// which is two shader compiles and a link per frame for nothing.
+    shader: Option<glow::Program>,
     /// `(model name, its transform)`, in the order the scene graph gave them.
     draws: Vec<(String, Mat4)>,
     /// The room each draw belongs to, or `None` for an object in no room at
@@ -454,7 +457,14 @@ impl Scene {
         clock: f64,
         eye: [f32; 3],
     ) -> Result<usize, String> {
-        let shader = program(gl, VERTEX, FRAGMENT)?;
+        let shader = match self.shader {
+            Some(s) => s,
+            None => {
+                let s = program(gl, VERTEX, FRAGMENT)?;
+                self.shader = Some(s);
+                s
+            }
+        };
         if self.blank.is_none() {
             let white = gl.create_texture()?;
             gl.bind_texture(glow::TEXTURE_2D, Some(white));
@@ -529,6 +539,7 @@ impl Scene {
         gl.uniform_1_i32(gl.get_uniform_location(shader, "albedo").as_ref(), 0);
 
         let mut drawn = 0usize;
+        let mut unposed = false;
         for (i, (name, transform)) in self.draws.iter().enumerate() {
             // the authored cull list: a room draws the rooms it names, and
             // an object in no room is always drawn
@@ -540,16 +551,21 @@ impl Scene {
             let Some(model) = self.models.get(name) else { continue };
             drawn += model.triangles;
             gl.uniform_matrix_4_f32_slice(model_at.as_ref(), false, &transform.0);
+            // 512 floats of uniform per draw is worth not repeating: most
+            // models are static and want the same identity every time
             match &model.posed_here {
                 Some(source) => {
                     let (rotation, offset) = node_pose(source, clock);
                     gl.uniform_4_f32_slice(rotation_at.as_ref(), &rotation);
                     gl.uniform_4_f32_slice(offset_at.as_ref(), &offset);
+                    unposed = false;
                 }
-                None => {
+                None if !unposed => {
                     gl.uniform_4_f32_slice(rotation_at.as_ref(), &identity);
                     gl.uniform_4_f32_slice(offset_at.as_ref(), &zero);
+                    unposed = true;
                 }
+                None => {}
             }
             gl.bind_vertex_array(Some(model.vao));
             for part in &model.parts {
@@ -570,7 +586,6 @@ impl Scene {
                 gl.draw_arrays(glow::TRIANGLES, part.first, part.count);
             }
         }
-        gl.delete_program(shader);
         Ok(drawn)
     }
 
@@ -586,6 +601,9 @@ impl Scene {
         }
         if let Some(t) = self.blank {
             gl.delete_texture(t);
+        }
+        if let Some(s) = self.shader {
+            gl.delete_program(s);
         }
     }
 }
