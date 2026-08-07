@@ -550,6 +550,8 @@ fn boot(
     let mut faults: std::collections::BTreeSet<u32> = Default::default();
     let mut resources = std::collections::BTreeSet::new();
     let mut sounds = std::collections::BTreeSet::new();
+    let mut attached = std::collections::BTreeSet::new();
+    let mut plays = 0usize;
     let mut work: std::collections::BTreeMap<String, usize> = Default::default();
     let mut failures = Vec::new();
 
@@ -590,6 +592,11 @@ fn boot(
                     started += 1;
                     resources.extend(b.resources.iter().cloned());
                     sounds.extend(b.sounds.iter().cloned());
+                    // the sounds the handlers hang on objects, which are a
+                    // different loader from the hard-coded ones and are named
+                    // without an extension like every other resource slot
+                    attached.extend(b.gob_sounds.iter().map(|g| g.sound.clone()));
+                    plays += b.gob_sounds.iter().map(|g| g.played).sum::<usize>();
                     moves += b.moves;
                     playing += b.playing.len();
                     for (name, count) in &b.unimplemented {
@@ -602,7 +609,7 @@ fn boot(
     }
 
     let mut missing = 0usize;
-    for name in resources.iter().chain(sounds.iter()) {
+    for name in resources.iter().chain(sounds.iter()).chain(attached.iter()) {
         if install.read(name).is_err()
             && install.read(&format!("{name}.mod")).is_err()
             && install.read(&format!("{name}.tex")).is_err()
@@ -639,6 +646,7 @@ fn boot(
         ("bindings", bindings, expect_flag("--expect-bindings")),
         ("handler calls", fired, expect_flag("--expect-events")),
         ("handlers ran to the end", survived, expect_flag("--expect-survived")),
+        ("sounds played", plays, expect_flag("--expect-plays")),
     ] {
         if let Some(want) = want {
             if got != want {
@@ -666,7 +674,9 @@ fn boot(
         if events {
             format!(
                 ", {survived} of {fired} handler calls ran to the end, \
-                 {moves} object moves and {playing} animations chosen"
+                 {moves} object moves, {playing} animations chosen and \
+                 {} sounds hung on objects and played {plays} times",
+                attached.len()
             )
         } else {
             String::new()
@@ -918,7 +928,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     }
 
     // what the scripts actually did to the world while it ran
-    let (moved, playing, what) = {
+    let (moved, playing, what, fired_sounds) = {
         let w = world::world(&scripts.lua).expect("a world");
         let boot = scripts.lua.app_data_ref::<api::Boot>().expect("boot state");
         let what: Vec<String> = boot
@@ -926,7 +936,10 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
             .iter()
             .map(|(n, id)| format!("{n}:{id}"))
             .collect();
-        (w.generation(), boot.playing.len(), what)
+        // what the run asked to be heard: `omGobGSPlay` calls that reached a
+        // sound the scripts had hung on an object
+        let sounds: usize = boot.gob_sounds.iter().map(|g| g.played).sum();
+        (w.generation(), boot.playing.len(), what, sounds)
     };
     let (fired, survived) = state.total();
     let mut slots: Vec<String> = state
@@ -941,6 +954,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         ("handlers ran to the end", survived, expect_flag("--expect-survived")),
         ("animations chosen", playing, expect_flag("--expect-playing")),
         ("object moves", moved as usize, expect_flag("--expect-moves")),
+        ("sounds fired", fired_sounds, expect_flag("--expect-sounds")),
     ] {
         if let Some(want) = want {
             if got != want {
@@ -952,7 +966,8 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         "l{number} cp{checkpoint}: {steps} ticks of {seconds:.0}s on {} input, \
          travelled {:.0} units, met a wall on {} frames, inside geometry on {}, \
          {} rooms entered, {survived} of {fired} handler calls ran to the end, \
-         {moved} object moves, {playing} animations chosen{} [{}]",
+         {moved} object moves, {playing} animations chosen, \
+         {fired_sounds} sounds fired{} [{}]",
         if recorded { "the game's own recorded" } else { "held-forwards" },
         body.travelled,
         body.hits,
@@ -1246,8 +1261,15 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 a.audio.environment(env);
                 listening = env;
             }
-            // and its music. 0 and -1 stop it; anything else is Music/TrackNN
-            let want = here.first().and_then(|&i| rooms.music[i]).unwrap_or(0.0) as i32;
+            // and its music. 0 and -1 stop it; anything else is Music/TrackNN.
+            // `chSndSwitchMusic` wins over the room, since that is the whole
+            // point of a script calling it — 148 times over the corpus.
+            let want = level_scripts
+                .lua
+                .app_data_ref::<goodomen::game::api::Boot>()
+                .and_then(|b| b.music)
+                .or_else(|| here.first().and_then(|&i| rooms.music[i]))
+                .unwrap_or(0.0) as i32;
             if let (Some(a), true) = (&mut heard, want != playing_track) {
                 playing_track = want;
                 if let Some(t) = track.take() {
@@ -1268,6 +1290,38 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
             if let (Some(a), Some(t)) = (&mut heard, &mut track) {
                 if let Err(e) = a.audio.pump(t) {
                     eprintln!("goodomen: {e}");
+                }
+            }
+            // the sounds the scripts asked for this tick, at the objects they
+            // were hung on. The queue is drained whether or not there is a
+            // device, so a silent run does not grow it without bound.
+            let asked: Vec<(String, [f32; 3])> = {
+                let mut out = Vec::new();
+                if let Some(mut boot) =
+                    level_scripts.lua.app_data_mut::<goodomen::game::api::Boot>()
+                {
+                    let queue = std::mem::take(&mut boot.to_play);
+                    if let Some(w) = goodomen::game::world::world(&level_scripts.lua) {
+                        for i in queue {
+                            let Some(s) = boot.gob_sounds.get(i) else { continue };
+                            let p = w
+                                .find(&s.gob)
+                                .and_then(|id| w.get(id))
+                                .map(|g| g.position)
+                                .unwrap_or(at);
+                            out.push((
+                                s.sound.clone(),
+                                [p[0] as f32, p[1] as f32, p[2] as f32],
+                            ));
+                        }
+                    }
+                }
+                out
+            };
+            if let Some(a) = &mut heard {
+                for (name, place) in asked {
+                    let mut read = |n: &str| install.read(n).ok();
+                    a.fire(&name, place, &mut read);
                 }
             }
             // Third person when walking: the player has a body now, so the

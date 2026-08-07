@@ -63,7 +63,9 @@ It reads the game out of its own directory — `data/*.zip` first and then
   second after the sound stops. **All 76 ambient sounds the ten levels place
   decode**, and the **music streams** — 27 tracks, 1h 23m, decoded a block at
   a time into a queue rather than held in memory, and looping the way the
-  `.mus` playlists say.
+  `.mus` playlists say. The scripts make their own noise too: over all 129
+  boots the handlers hang **32 sounds on objects and fire them 584 times**,
+  every name resolving to a file.
 
 **Linux and Windows are both tested**, and the Windows build is
 cross-compiled and run under Wine inside a real installation as part of the

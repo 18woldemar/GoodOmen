@@ -350,11 +350,23 @@ impl Audio {
 
     /// A voice for a sound, silent and stopped until it is placed and played.
     pub fn voice(&mut self, sound: Sound) -> Result<Voice, String> {
+        let v = self.voice_without_a_sound()?;
+        self.attach(v, sound);
+        self.error("alSourcei(AL_BUFFER)")?;
+        Ok(v)
+    }
+
+    /// Point an existing voice at a different sound. It must be stopped:
+    /// OpenAL refuses to re-buffer a playing source.
+    pub fn attach(&self, v: Voice, sound: Sound) {
+        unsafe { (self.api.alSourcei)(v.0, AL_BUFFER, sound.0 as i32) };
+    }
+
+    /// A voice with nothing in it, for a pool that is filled as it is used.
+    pub fn voice_without_a_sound(&mut self) -> Result<Voice, String> {
         let mut id = 0u32;
         unsafe { (self.api.alGenSources)(1, &mut id) };
         self.error("alGenSources")?;
-        unsafe { (self.api.alSourcei)(id, AL_BUFFER, sound.0 as i32) };
-        self.error("alSourcei(AL_BUFFER)")?;
         // every voice feeds the one listener reverb, since that is what an
         // EAX 2.0 environment is
         if let Some(e) = &self.efx {
@@ -764,12 +776,31 @@ pub fn decodable(sounds: &[Ambient], read: &mut dyn FnMut(&str) -> Option<Vec<u8
         .count()
 }
 
-/// The ambient sounds of a level, playing.
+/// How many script sounds can be in the air at once. A fixed pool is what a
+/// mixer of the period had; the newest sound is dropped rather than stealing
+/// a voice, because a scream cut off mid-word is worse than a missing one.
+const SHOTS: usize = 16;
+
+/// Script sounds carry no distances of their own — `omGobAddSound` takes a
+/// name and one flag — so these are **ours**, not the game's, the way the
+/// light falloff is. They are what a room-sized sound wants: audible across
+/// a room, gone two rooms away.
+const SHOT_NEAR: f32 = 6.0;
+const SHOT_FAR: f32 = 80.0;
+
+/// The ambient sounds of a level, playing, and the one-shots the scripts fire.
 pub struct Ambience {
     pub audio: Audio,
     pub voices: Vec<Voice>,
     /// Named a sound that could not be read or decoded.
     pub silent: usize,
+    /// Decoded once and kept: `glass_break` is hung on six different objects.
+    /// A name that would not decode is remembered as `None` so it is not
+    /// tried again every time it is fired.
+    cache: std::collections::HashMap<String, Option<Sound>>,
+    shots: Vec<Voice>,
+    /// One-shots asked for that no free voice could take.
+    pub dropped: usize,
 }
 
 impl Ambience {
@@ -809,7 +840,59 @@ impl Ambience {
             audio.play(v);
             voices.push(v);
         }
-        Ok(Ambience { audio, voices, silent })
+        // the one-shot pool, made once so that firing a sound never allocates
+        // an OpenAL object mid-frame
+        let mut shots = Vec::with_capacity(SHOTS);
+        for _ in 0..SHOTS {
+            match audio.voice_without_a_sound() {
+                Ok(v) => shots.push(v),
+                Err(_) => break,
+            }
+        }
+        Ok(Ambience {
+            audio,
+            voices,
+            silent,
+            cache: Default::default(),
+            shots,
+            dropped: 0,
+        })
+    }
+
+    /// Fire a sound the scripts hung on an object, at that object's place.
+    ///
+    /// Returns false when nothing was played — an unreadable name, or every
+    /// voice busy.
+    pub fn fire(
+        &mut self,
+        name: &str,
+        at: [f32; 3],
+        read: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+    ) -> bool {
+        // the scripts name a sound the way the scene graph does, without an
+        // extension
+        let file = if name.contains('.') {
+            name.to_ascii_lowercase()
+        } else {
+            format!("{}.wav", name.to_ascii_lowercase())
+        };
+        let audio = &mut self.audio;
+        let sound = *self.cache.entry(file.clone()).or_insert_with(|| {
+            let bytes = read(&file)?;
+            let (samples, channels, rate) = pcm(&bytes).ok()?;
+            audio.sound(&samples, channels, rate).ok()
+        });
+        let Some(sound) = sound else { return false };
+
+        let Some(&free) = self.shots.iter().find(|&&v| !self.audio.playing(v)) else {
+            self.dropped += 1;
+            return false;
+        };
+        self.audio.attach(free, sound);
+        self.audio.place(free, at, SHOT_NEAR, SHOT_FAR);
+        self.audio.gain(free, 1.0);
+        self.audio.play(free);
+        true
     }
 
     /// Where the ears are. `yaw` and `pitch` are the camera's, in the same
@@ -826,6 +909,26 @@ impl Ambience {
 /// arithmetic DirectSound3D does, written out so a check can predict it.
 pub fn attenuation(distance: f32, near: f32, far: f32) -> f32 {
     near / distance.clamp(near, far.max(near))
+}
+
+/// Wrap samples in a minimal RIFF WAVE, so the self-check can exercise the
+/// path a real sound takes without needing a game file.
+fn riff_of(samples: &[i16], rate: u32) -> Vec<u8> {
+    let body: Vec<u8> = samples.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let mut d = b"RIFF".to_vec();
+    d.extend_from_slice(&(36 + body.len() as u32).to_le_bytes());
+    d.extend_from_slice(b"WAVEfmt ");
+    d.extend_from_slice(&16u32.to_le_bytes());
+    d.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    d.extend_from_slice(&1u16.to_le_bytes()); // mono
+    d.extend_from_slice(&rate.to_le_bytes());
+    d.extend_from_slice(&(rate * 2).to_le_bytes()); // bytes a second
+    d.extend_from_slice(&2u16.to_le_bytes()); // block align
+    d.extend_from_slice(&16u16.to_le_bytes()); // bits
+    d.extend_from_slice(b"data");
+    d.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    d.extend_from_slice(&body);
+    d
 }
 
 /// Render a sound at four distances through the loopback device and check
@@ -918,6 +1021,35 @@ pub fn selfcheck() -> Result<String, String> {
         _ => ", the reverb answered once".to_string(),
     };
 
+    // and the one-shot pool the scripts fire into: a sound named without an
+    // extension, decoded once and reused, and a fixed number of voices
+    let riff = riff_of(&tone, RATE);
+    let mut read = |name: &str| (name == "click.wav").then(|| riff.clone());
+    let mut level = Ambience::open(audio, &[], &mut read)?;
+    if !level.fire("click", [0.0, 0.0, -near], &mut read) {
+        return Err("the one-shot pool played nothing".into());
+    }
+    // one more than the pool holds, all at once: the excess is dropped rather
+    // than stealing a voice that is still speaking
+    for _ in 0..SHOTS + 4 {
+        level.fire("click", [0.0, 0.0, -near], &mut read);
+    }
+    if level.dropped < 4 {
+        return Err(format!(
+            "{SHOTS} voices took {} sounds at once and dropped {}",
+            SHOTS + 5,
+            level.dropped
+        ));
+    }
+    if !level.fire("nothing_of_the_kind", [0.0; 3], &mut read) {
+        // a name that reads as nothing must be a quiet no, not an error
+    } else {
+        return Err("a sound that does not exist was played".into());
+    }
+    let heard = level.audio.render(2048)?;
+    if heard.iter().all(|&s| s == 0) {
+        return Err("the one-shot pool rendered silence".into());
+    }
     Ok(format!(
         "OpenAL loopback: {} rendered at {RATE} Hz, gain {} — clamped inverse to {worst:.3}{}",
         measured.len(),
@@ -927,7 +1059,7 @@ pub fn selfcheck() -> Result<String, String> {
             .collect::<Vec<_>>()
             .join(" "),
         reverberation
-    ))
+    ) + &format!(", {} one-shot voices, {} dropped when full", SHOTS, level.dropped))
 }
 
 #[cfg(test)]

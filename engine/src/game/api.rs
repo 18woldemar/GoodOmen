@@ -107,6 +107,24 @@ pub const OBJ_ROOM: f64 = 803.0;
 /// model, and whose payload is (near distance, far distance, ?, volume).
 pub const OBJ_AMBIENTSOUND: f64 = 1101.0;
 
+/// A sound the scripts hung on an object: `omGobAddSound(gob, name, flag)`
+/// hands back a handle, and `omGobGSPlay(handle, a, b, c, d)` fires it.
+///
+/// The binding at 0x41fbb0 reads a gob, a string and a number, and 0x41fa50
+/// reads a handle and **four** numbers. What those four mean is not settled:
+/// 93 of the 100 calls pass `0,0,0,0`, four pass `0,1,0,0`, and three pass
+/// `0,0,0.5,1` — all of them doors. The third argument here is 0 on 59 of the
+/// 62 `omGobAddSound` calls and 1 on three (`teleport` twice,
+/// `sniper_shot`), and is likewise unexplained.
+#[derive(Clone, Debug)]
+pub struct GobSound {
+    pub gob: String,
+    /// Named without an extension, like every other resource slot.
+    pub sound: String,
+    pub flag: f64,
+    pub played: usize,
+}
+
 /// The last scancode DirectInput defines.
 const DIK_MAX: u32 = 0xED;
 /// Not scancodes: the two mouse buttons and the four half-axes.
@@ -154,6 +172,15 @@ pub struct Boot {
     /// `name -> the id of the animation the object is playing`, from
     /// `omAnimPlay`. An object that has not been told plays animation 0.
     pub playing: BTreeMap<String, f64>,
+    /// Sounds the scripts hung on objects with `omGobAddSound`. The index is
+    /// the handle they hold, which is why these are never removed.
+    pub gob_sounds: Vec<GobSound>,
+    /// Handles asked to play since the driver last looked. Drained by
+    /// whoever owns a sound device, so a boot with no audio just accumulates
+    /// nothing.
+    pub to_play: Vec<usize>,
+    /// The track `chSndSwitchMusic` last asked for. 0 and -1 stop the music.
+    pub music: Option<f64>,
     /// How many times an object was moved while this level ran.
     pub moves: u64,
     /// `object -> the slot names it has asked about`, in the order asked;
@@ -666,6 +693,51 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                     slots.len() as i64 - 1
                 }
             })
+        })?,
+    )?;
+    // `omGobAddSound(gob, "glass_break", 0)` attaches a sound to an object and
+    // hands back the handle the script keeps -- `l1_r2.shattersound` -- and
+    // `omGobGSPlay(handle, 0,0,0,0)` fires it. 62 attachments and 100 plays
+    // over the shipped scripts, which is most of what a level's noise is.
+    globals.set(
+        "omGobAddSound",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let (Some(gob), Some(sound)) =
+                (args.first().and_then(gob_name), args.get(1).and_then(text))
+            else {
+                return Ok(-1i64);
+            };
+            let flag = args.get(2).map(number).unwrap_or(0.0);
+            let mut boot = boot_mut(lua)?;
+            boot.gob_sounds.push(GobSound { gob, sound, flag, played: 0 });
+            Ok(boot.gob_sounds.len() as i64 - 1)
+        })?,
+    )?;
+    globals.set(
+        "omGobGSPlay",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let handle = args.first().map(number).unwrap_or(-1.0);
+            if handle < 0.0 {
+                return Ok(());
+            }
+            let mut boot = boot_mut(lua)?;
+            let i = handle as usize;
+            if let Some(s) = boot.gob_sounds.get_mut(i) {
+                s.played += 1;
+                boot.to_play.push(i);
+            }
+            Ok(())
+        })?,
+    )?;
+    // `chSndSwitchMusic(N)` is the same numbering as a room's `music`:
+    // `Music/TrackNN`, with 0 and -1 stopping it. 148 calls, more than any
+    // other sound function in the scripts.
+    globals.set(
+        "chSndSwitchMusic",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let n = args.first().map(number).unwrap_or(0.0);
+            boot_mut(lua)?.music = Some(n);
+            Ok(())
         })?,
     )?;
     for name in ["omGobGMSetSltVisible", "omGobGMSetSolid"] {

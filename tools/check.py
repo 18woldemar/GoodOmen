@@ -127,7 +127,7 @@ ENGINE = [
       "--expect", "129", "--expect-resources", "2093",
       "--expect-rooms", "677", "--expect-bindings", "59",
       "--events", "--expect-events", "11958",
-      "--expect-survived", "11501"], None),
+      "--expect-survived", "11501", "--expect-plays", "584"], None),
     ("the engine's controller replays the demo like walksim.py",
      ["walksim.py", "extracted/base/l1.lua", "--resources", "extracted",
       "--demo", "extracted/base/demo1_5.omn", "--engine", "$MDK2_GOG"],
