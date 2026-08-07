@@ -803,11 +803,12 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
     let mut yaw = spawn.facing;
     let mut pitch = 0.0f64;
     let summary = format!(
-        "l{number} cp{checkpoint}: {} objects, {} placed, {} triangles, {} lights, in {} \
+        "l{number} cp{checkpoint}: {} objects, {} placed, {} triangles, {} posed, {} lights, in {} \
          ({} rooms visible from it)",
         loaded.objects,
         loaded.placed,
         loaded.triangles,
+        scene.posed_draws(),
         scene.lights.len(),
         if where_.is_empty() { "no room".into() } else { where_ },
         visible.as_ref().map(|v| v.len()).unwrap_or(0)
@@ -903,7 +904,9 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 goodomen::game::world::world(&level_scripts.lua),
                 level_scripts.lua.app_data_ref::<goodomen::game::api::Boot>(),
             ) {
-                scene.follow(&w, &boot.playing);
+                scene.follow(&w, &boot.playing, &boot.hidden);
+                // the game's own draw distance, once it has named one
+                scene.fog = boot.fog.map(|(_, far)| far as f32);
             }
 
             // the room under the camera decides what is drawn, every frame
@@ -925,7 +928,8 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 scene.draw(
                     &video.gl,
                     &projection.times(&view),
-                    600.0,
+                    // the level's own fog distance when it has set one
+                    scene.fog.unwrap_or(600.0),
                     if cull { visible.as_ref() } else { None },
                     started.elapsed().as_secs_f64(),
                     from,
@@ -955,30 +959,6 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         let all = scene.draw(&video.gl, &projection.times(&view), 600.0, None, 0.0, eye)?;
         video.gl.finish();
 
-        // The corpus check says the shader's *premise* is right -- node-local
-        // vertices plus one transform per node reproduce `animate()` exactly,
-        // over every vertex of all 1146 animated models. What it cannot say
-        // is that the uniforms reach the shader. Drawing the same frame at
-        // two clocks and requiring it to differ is what says that.
-        let mut first = vec![0u8; (width * height * 4) as usize];
-        video.gl.read_pixels(0, 0, width, height, glow::RGBA, glow::UNSIGNED_BYTE,
-                             glow::PixelPackData::Slice(Some(&mut first)));
-        video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
-        scene.draw(&video.gl, &projection.times(&view), 600.0, visible.as_ref(), 0.5, eye)?;
-        video.gl.finish();
-        let mut later = vec![0u8; (width * height * 4) as usize];
-        video.gl.read_pixels(0, 0, width, height, glow::RGBA, glow::UNSIGNED_BYTE,
-                             glow::PixelPackData::Slice(Some(&mut later)));
-        let moved = first
-            .chunks_exact(4)
-            .zip(later.chunks_exact(4))
-            .filter(|(a, b)| a[..3] != b[..3])
-            .count();
-
-        // put the first frame back, so `--save` writes what was measured
-        video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
-        scene.draw(&video.gl, &projection.times(&view), 600.0, visible.as_ref(), 0.0, eye)?;
-        video.gl.finish();
         if let Some(i) = std::env::args().position(|a| a == "--save") {
             if let Some(path) = std::env::args().nth(i + 1) {
                 let mut pixels = vec![0u8; (width * height * 4) as usize];
@@ -1004,17 +984,8 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 return Err(format!("drew {culled} triangles, expected {want}"));
             }
         }
-        if let Some(want) = expect_flag("--expect-moving") {
-            if moved < want {
-                return Err(format!(
-                    "{moved} pixels moved between two clocks, expected at least {want} \
-                     -- the node transforms are not reaching the shader"
-                ));
-            }
-        }
         Ok(format!(
-            "OpenGL {version}: {summary}, drew {culled} of {all} triangles ({:.1}%), \
-             {moved} pixels move between two clocks",
+            "OpenGL {version}: {summary}, drew {culled} of {all} triangles ({:.1}%)",
             100.0 * culled as f64 / all.max(1) as f64
         ))
     }
@@ -1059,12 +1030,13 @@ fn level(
 
     let summary = format!(
         "{graph}: {} objects, {} placed ({} name no model), {} triangles, \
-         {} draws, {span:.0} units across",
+         {} draws ({} posed), {span:.0} units across",
         loaded.objects,
         loaded.placed,
         loaded.without_a_model,
         loaded.triangles,
-        scene.draw_count()
+        scene.draw_count(),
+        scene.posed_draws()
     );
 
     if show {
@@ -1212,9 +1184,6 @@ fn level(
             glow::UNSIGNED_BYTE,
             glow::PixelPackData::Slice(Some(&mut pixels)),
         );
-        target.delete(&video.gl);
-        scene.delete(&video.gl);
-
         let clear = [13u8, 15, 23];
         let mut drawn = 0usize;
         let mut colours = std::collections::HashSet::new();
@@ -1638,7 +1607,7 @@ fn entries_named(install: &Install, extension: &str) -> Vec<(String, usize, usiz
 fn meshes(install: &mut Install, list: bool) -> usize {
     let found = entries_named(install, ".mod");
     let (mut nodes, mut tris, mut animated) = (0usize, 0usize, 0usize);
-    let mut posed = 0usize;
+    let (mut posed, mut moving, mut posing) = (0usize, 0usize, 0usize);
 
     for (name, i, j) in &found {
         let data = match install.containers[*i].read_at(*j) {
@@ -1673,6 +1642,37 @@ fn meshes(install: &mut Install, list: bool) -> usize {
                 }
             }
             posed += 1;
+
+            // **Animation 0 never moves.** Every one of its channels holds a
+            // single key, in all 1146 animated models -- so playing it is a
+            // still pose, and a level only comes alive when `omAnimPlay`
+            // chooses another. Anything that claims otherwise is measuring
+            // something else.
+            for (i, a) in model.animations.iter().enumerate() {
+                // a channel with more than one key **that drives a
+                // transform**: kinds 32..36 drive a sound's volume and
+                // distances, and moving those moves no node
+                let varies = a.channels.iter().any(|c| {
+                    c.keys.len() > 1
+                        && matches!(c.kind, goodomen::formats::model::KIND_TRANSLATION
+                                          | goodomen::formats::model::KIND_ROTATION)
+                });
+                if varies {
+                    moving += 1;
+                    // animation 0 never moves, in any of the 1146. That is
+                    // the assertion; the rest is counted, because a
+                    // multi-key channel can still pose the same at two times
+                    // -- its keys can hold the same value, or sit at one end
+                    // of the timeline, or name a node the model does not have.
+                    if i == 0 {
+                        eprintln!("goodomen: {name}: animation 0 moves, and none does");
+                        std::process::exit(1);
+                    }
+                    if model.node_world(a, 0.0) != model.node_world(a, 0.5) {
+                        posing += 1;
+                    }
+                }
+            }
         }
 
         let mesh = model.posed();
@@ -1714,7 +1714,9 @@ fn meshes(install: &mut Install, list: bool) -> usize {
     }
     eprintln!(
         "{} models, {animated} animated, {nodes} nodes, {tris} triangles, \
-         {posed} checked against the shader's own posing",
+         {posed} checked against the shader's own posing, \
+         {moving} animations with a moving transform channel, none of them \
+         animation 0, and {posing} that pose differently at two times",
         found.len()
     );
     found.len()

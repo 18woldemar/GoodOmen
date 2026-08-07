@@ -40,7 +40,10 @@ It reads the game out of its own directory — `data/*.zip` first and then
   to make `l6_kermit` start an animation on its own;
 - **draws it**: OpenGL 3.3 core, textured, animated in the vertex shader, lit
   by the level's own `OBJ_STATICLIGHT` objects, and culled by the authored
-  room visibility — a median of 15.7% of a level's triangles.
+  room visibility — a median of 15.7% of a level's triangles. **Animation 0
+  never moves** — in all 1146 animated models every one of its channels holds
+  a single key — so a level only comes alive when `omAnimPlay` chooses
+  another, which the driver now does.
 
 **Linux and Windows are both tested**, and the Windows build is
 cross-compiled and run under Wine inside a real installation as part of the

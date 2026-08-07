@@ -146,6 +146,15 @@ pub struct Boot {
     pub playing: BTreeMap<String, f64>,
     /// How many times an object was moved while this level ran.
     pub moves: u64,
+    /// `object -> the slot names it has asked about`, in the order asked;
+    /// the index the scripts hold is a position in this list.
+    pub slots: BTreeMap<String, Vec<String>>,
+    /// `(object, slot)` pairs the scripts have hidden.
+    pub hidden: BTreeSet<(String, String)>,
+    /// The same, for collision rather than drawing (`omGobGMSetSolid`).
+    pub intangible: BTreeSet<(String, String)>,
+    /// `(near, far)` from `chFogStartEnd` — the game's own draw distance.
+    pub fog: Option<(f64, f64)>,
     /// Objects frozen until the player arrives — a level holds its encounters
     /// this way, and a boot of all ten puts hundreds there.
     pub stasis: BTreeSet<String>,
@@ -618,6 +627,76 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         lua.create_function(|lua, args: Variadic<Value>| {
             let Some(name) = args.first().and_then(gob_name) else { return Ok(0) };
             Ok(boot_ref(lua)?.playing.contains_key(&name) as i32)
+        })?,
+    )?;
+
+    // --- parts of a model -----------------------------------------------
+    // `omGobGMGetSltIndexByName(animgob, "EL_CENTER")` asks for a **named
+    // node** of the object's model -- `EL_CENTER`, `ZIZZY_BEAM`,
+    // `ZIZS2_HIT` are all node names out of the `.mod` node table -- and
+    // `omGobGMSetSltVisible(gob, slot, 0)` then hides it.
+    //
+    // The index handed back is a **handle**, not the model's own node index:
+    // resolving the real one needs the model loaded, and the boot does not
+    // load models. The name is interned per object and the renderer resolves
+    // it when it has the model in front of it.
+    globals.set(
+        "omGobGMGetSltIndexByName",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let (Some(gob), Some(slot)) = (args.first().and_then(gob_name), args.get(1).and_then(text))
+            else {
+                return Ok(-1i64);
+            };
+            let mut boot = boot_mut(lua)?;
+            let slots = boot.slots.entry(gob).or_default();
+            Ok(match slots.iter().position(|s| *s == slot) {
+                Some(i) => i as i64,
+                None => {
+                    slots.push(slot);
+                    slots.len() as i64 - 1
+                }
+            })
+        })?,
+    )?;
+    for name in ["omGobGMSetSltVisible", "omGobGMSetSolid"] {
+        let drawing = name == "omGobGMSetSltVisible";
+        globals.set(
+            name,
+            lua.create_function(move |lua, args: Variadic<Value>| {
+                let Some(gob) = args.first().and_then(gob_name) else { return Ok(()) };
+                let handle = args.get(1).map(number).unwrap_or(-1.0);
+                let on = args.get(2).map(number).unwrap_or(1.0) != 0.0;
+                let mut boot = boot_mut(lua)?;
+                let Some(slot) = boot
+                    .slots
+                    .get(&gob)
+                    .and_then(|s| s.get(handle as usize))
+                    .cloned()
+                else {
+                    return Ok(());
+                };
+                let set = if drawing { &mut boot.hidden } else { &mut boot.intangible };
+                if on {
+                    set.remove(&(gob, slot));
+                } else {
+                    set.insert((gob, slot));
+                }
+                Ok(())
+            })?,
+        )?;
+    }
+
+    // `chFogStartEnd(50, 400)` is the game's own draw distance, and it is
+    // what the renderer should fade to rather than a number invented here.
+    globals.set(
+        "chFogStartEnd",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let mut boot = boot_mut(lua)?;
+            boot.fog = Some((
+                args.first().map(number).unwrap_or(0.0),
+                args.get(1).map(number).unwrap_or(0.0),
+            ));
+            Ok(())
         })?,
     )?;
 

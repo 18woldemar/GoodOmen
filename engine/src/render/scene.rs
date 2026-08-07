@@ -153,6 +153,10 @@ pub struct GpuTexture {
 /// One run of vertices drawn with one texture.
 struct Part {
     texture: Option<String>,
+    /// The node these triangles belong to. Parts break on a node change as
+    /// well as a texture change, because the scripts hide **nodes**:
+    /// `omGobGMSetSltVisible(gob, omGobGMGetSltIndexByName(gob, "EL_CENTER"), 0)`.
+    node: u32,
     first: i32,
     count: i32,
 }
@@ -188,6 +192,10 @@ pub struct Scene {
     /// The animation each draw is playing, chosen by `omAnimPlay`. `None`
     /// means animation 0, which is the game's own default.
     playing: Vec<Option<f64>>,
+    /// Node indices the scripts have hidden, per draw.
+    hidden: Vec<Vec<u32>>,
+    /// The game's own draw distance, from `chFogStartEnd`.
+    pub fog: Option<f32>,
     /// The room each draw belongs to, or `None` for an object in no room at
     /// all — which is **never culled**, as the original does not cull it.
     rooms: Vec<Option<usize>>,
@@ -230,8 +238,7 @@ fn node_pose(model: &Model, chosen: Option<f64>, clock: f64) -> (Vec<f32>, Vec<f
         .and_then(|id| model.animations.iter().find(|a| a.id as f64 == id))
         .or_else(|| model.animations.first());
     let Some(anim) = anim else { return (rotation, offset) };
-    let rate = anim.rate.abs() as f64;
-    let t = if rate > 0.0 { (clock * rate).fract() } else { 0.0 };
+    let t = (clock * anim.loop_rate() as f64).fract();
     for (i, (q, o)) in model.node_world(anim, t).into_iter().enumerate().take(MAX_NODES) {
         for c in 0..4 {
             rotation[i * 4 + c] = q[c] as f32;
@@ -313,11 +320,13 @@ impl Scene {
                 .flatten()
                 .filter(|n| n.to_ascii_lowercase().ends_with(".tex"))
                 .map(|n| n.to_ascii_lowercase());
+            let node = mesh.node[tri[0] as usize];
             match parts.last_mut() {
-                Some(p) if p.texture == texture => p.count += 3,
+                Some(p) if p.texture == texture && p.node == node => p.count += 3,
                 _ => parts.push(Part {
                     texture,
-                    first: (data.len() / 5) as i32,
+                    node,
+                    first: (data.len() / 9) as i32,
                     count: 3,
                 }),
             }
@@ -426,6 +435,7 @@ impl Scene {
         self.rooms.push(room);
         self.owners.push(owner);
         self.playing.push(None);
+        self.hidden.push(Vec::new());
     }
 
     /// Follow the world: an object the scripts moved moves on screen, and one
@@ -438,11 +448,26 @@ impl Scene {
         &mut self,
         world: &crate::game::world::World,
         playing: &std::collections::BTreeMap<String, f64>,
+        hidden: &std::collections::BTreeSet<(String, String)>,
     ) {
         for i in 0..self.draws.len() {
             let Some(id) = self.owners[i] else { continue };
             let Some(gob) = world.get(id) else { continue };
             self.playing[i] = playing.get(&gob.name).copied();
+            // the slot names are the model's node names, resolved here
+            // because this is where the model is
+            self.hidden[i].clear();
+            if hidden.iter().any(|(g, _)| *g == gob.name) {
+                if let Some(model) = self.models.get(&self.draws[i].0) {
+                    if let Some(source) = &model.posed_here {
+                        for (n, node) in source.nodes.iter().enumerate() {
+                            if hidden.contains(&(gob.name.clone(), node.name.clone())) {
+                                self.hidden[i].push(n as u32);
+                            }
+                        }
+                    }
+                }
+            }
             if self
                 .models
                 .get(&self.draws[i].0)
@@ -465,6 +490,29 @@ impl Scene {
 
     pub fn draw_count(&self) -> usize {
         self.draws.len()
+    }
+
+    /// How far the shader-posed models move between two clocks, on the CPU.
+    /// If this is zero the uniforms are not the problem.
+    pub fn pose_delta(&self, a: f64, b: f64) -> f64 {
+        let mut total = 0.0;
+        for (name, _) in &self.draws {
+            let Some(m) = self.models.get(name) else { continue };
+            let Some(source) = &m.posed_here else { continue };
+            let (ra, oa) = node_pose(source, None, a);
+            let (rb, ob) = node_pose(source, None, b);
+            total += ra.iter().zip(&rb).map(|(x, y)| (x - y).abs() as f64).sum::<f64>();
+            total += oa.iter().zip(&ob).map(|(x, y)| (x - y).abs() as f64).sum::<f64>();
+        }
+        total
+    }
+
+    /// How many draws pose in the shader — the ones that can move at all.
+    pub fn posed_draws(&self) -> usize {
+        self.draws
+            .iter()
+            .filter(|(n, _)| self.models.get(n).is_some_and(|m| m.posed_here.is_some()))
+            .count()
     }
 
     pub fn triangle_count(&self) -> usize {
@@ -622,6 +670,9 @@ impl Scene {
             }
             gl.bind_vertex_array(Some(model.vao));
             for part in &model.parts {
+                if self.hidden[i].contains(&part.node) {
+                    continue;
+                }
                 let bound = part
                     .texture
                     .as_ref()

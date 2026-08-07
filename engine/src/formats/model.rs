@@ -122,16 +122,41 @@ pub struct Channel {
     pub keys: Vec<(f32, u32)>,
 }
 
+/// The rate used when the record's own is not believable. It is the
+/// **median of the 5457 plausible ones**, 0.6818, a loop of 1.467 seconds —
+/// measured, not chosen.
+pub const MEDIAN_RATE: f32 = 0.6818;
+
 #[derive(Clone, Debug)]
 pub struct Animation {
     pub id: u32,
-    /// The float at +8 is a **signed playback rate**, so a loop lasts
-    /// `1 / |rate|`. 99 of 5165 records are negative and that is the
-    /// argument: a negative length is meaningless, and
-    /// `omAnimSetSpeed(door, ANIM_OPEN, -1)` is how `elevators.lua` shuts a
-    /// door it opened.
+    /// The float at +8, read as a **signed playback rate** so that a loop
+    /// lasts `1 / |rate|`. The sign is the argument for that reading: 201 of
+    /// the 6311 records are negative, a negative *length* is meaningless,
+    /// and `omAnimSetSpeed(door, ANIM_OPEN, -1)` is how `elevators.lua`
+    /// shuts a door it opened.
+    ///
+    /// **It does not always hold.** Over the corpus 5457 of 6311 are in a
+    /// plausible range and **854 are not**: 186 exactly zero, 141 above 1e6,
+    /// 521 below 1e-3. Level 1's animated models are unusually full of them,
+    /// which is how this was noticed at all — every one of them posed to a
+    /// standstill. Use [`Animation::loop_rate`], which says when the field
+    /// can be believed.
     pub rate: f32,
     pub channels: Vec<Channel>,
+}
+
+impl Animation {
+    /// The rate to play this at: the record's own where it is believable, and
+    /// the corpus median where it is not.
+    pub fn loop_rate(&self) -> f32 {
+        let r = self.rate.abs();
+        if (1e-3..=1e6).contains(&r) {
+            r
+        } else {
+            MEDIAN_RATE
+        }
+    }
 }
 
 #[derive(Clone)]
