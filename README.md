@@ -24,7 +24,7 @@ scratch. The model is OpenMW and devilutionX.
 | `tools/spawn.py` | The checkpoints a level starts you at, pulled by running its script, and whether each one stands in open space. **127 checkpoints, 126 clear.** |
 | `tools/luarun.py` | Runs the shipped Lua on a stock `lua5.1`. **All 31 scripts run to the end**, and the scene graphs they register match `scene.py` exactly — 5633 objects, no disagreement. |
 | `tools/luaapi.py` | Catalogues the engine functions the shipped Lua calls — **438 of them**, which is the specification the engine has to meet. See [`docs/lua-api.md`](docs/lua-api.md). |
-| `tools/strfile.py` | Reads `.str` — every line of text and the `.wav` that speaks it. **686 entries, 348 voiced, byte-exact.** |
+| `tools/strfile.py` | Reads `.str` — every line of text and the `.wav` that speaks it. **686 entries, 348 voiced, byte-exact**, and the same for all five shipped languages. |
 | `tools/stars.py` | Reads `.sta`, the sky. **3141 real stars**, and the shipped southern declinations are wrong; `--fix` corrects them. |
 | `tools/omn.py` | Reads `.omn`, the recorded attract-mode demo: 1348 frames of controller input at 30 fps. |
 | `tools/refdec.py` | Reference decoder: runs the original's block codec under emulation. A research oracle, kept only to check `texdec.py` against. |
@@ -82,7 +82,7 @@ traces, apitrace on the GL stream — is in
 ## Checking it
 
 ```bash
-python3 tools/check.py            # 15 checks, about 10 seconds
+python3 tools/check.py            # 18 checks, about 10 seconds
 python3 tools/check.py --quick    # the 6 that need no game files
 python3 tools/check.py --slow     # plus the texture codec, 4205514 blocks
 ```

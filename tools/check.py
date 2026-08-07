@@ -51,6 +51,12 @@ CORPUS = [
      "base/demo1_5.omn"),
     ("sound headers are WAVC over Interplay ACM",
      ["wavc.py", "extracted", "--validate"], "sounds"),
+    ("five language tables parse",
+     ["strfile.py", "$MDK2_GOG/override/english/mdk2.str", "--compare",
+      "$MDK2_GOG/override/french/mdk2.str",
+      "$MDK2_GOG/override/german/mdk2.str",
+      "$MDK2_GOG/override/italian/mdk2.str",
+      "$MDK2_GOG/override/spanish/mdk2.str"], None),
     ("music playlists parse", ["wavc.py", "$MDK2_GOG/Music", "--playlists"],
      None),
     ("checkpoints stand in open space",
@@ -120,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
             cmd = [c.replace("$MDK2_GOG", env.get("MDK2_GOG", ""))
                    for c in cmd]
             if needs is None:                       # a path in the game dir
-                if not Path(cmd[1]).is_dir():
+                if not Path(cmd[1]).exists():
                     print(f"skip  {label} -- no {cmd[1]}")
                     skipped += 1
                     continue

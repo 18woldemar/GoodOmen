@@ -2,9 +2,10 @@
 """
 strfile.py -- read `.str`: every line of text in the game, and its voice-over.
 
-`override/<language>/mdk2.str` is where the translations live, which is why an
-edition diff was never needed -- the German and Russian releases replace this
-one file rather than patching the executable.
+`override/<language>/mdk2.str` is where the translations live, and the GOG
+release ships five of them, so no second edition is needed to find out what
+localising this game touches. See below: it touches this file and nothing
+else.
 
     0x00  u32   2003        resource type tag: .tex 2001, .mod 2002, .str 2003
     0x04  u32   2           version
@@ -31,6 +32,27 @@ offset in range and decoding as UTF-16LE, the strings tiling the character
 data with no byte unaccounted for, and the 348 sound offsets landing exactly
 on the 348 slots of a 5568-byte table -- 5568 = 348 x 16, and 16 bytes is the
 whole remainder of the file.
+
+**Five languages confirm the reading.** The GOG release ships
+`override/{english,french,german,italian,spanish}/mdk2.str`, and all five
+parse byte-exactly -- strings tiling the character data with nothing left
+over, sound offsets landing on exactly the slots that exist. A format that
+survives five independent files of different sizes is understood.
+
+They also settle what localising this game means, which the journal had been
+carrying as an open question needing a second edition installed. It does not:
+**this one file is the whole of it.** 678 ids are common to all five; the
+eight the English build has on top are entries with no text at all,
+placeholders the translators dropped. Between 547 and 635 of the 678 strings
+are genuinely translated -- "Black Hole Grenade" becomes "Grenade a Trou
+Noir", "Black Hole Granate", "Granada aguj. negro".
+
+The **voice-over is not translated with them**. The sound each line names is
+the same in 672 of 678 for French and 671 for German; where they differ it is
+almost always a line that has a recording in one language and none in
+another, not a different recording. Only one entry in the whole set points at
+a genuinely different file: Italian id 84 says `ml4z_shwang1a` where English
+says `ml4z_shwang2`.
 
 Usage:
     python3 tools/strfile.py extracted/local/mdk2.str
@@ -107,6 +129,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("src", type=Path)
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--grep", help="print only strings containing this")
+    ap.add_argument("--compare", nargs="+", type=Path, metavar="STR",
+                    help="compare other language tables against this one")
     args = ap.parse_args(argv)
 
     data = args.src.read_bytes()
@@ -117,6 +141,23 @@ def main(argv: list[str] | None = None) -> int:
         json.dump({str(k): {"text": v["text"], "sound": v["sound"]}
                    for k, v in sorted(entries.items())},
                   sys.stdout, indent=1, ensure_ascii=False)
+        return 0
+
+    if args.compare:
+        others = {p.parent.name or p.stem: parse(p.read_bytes())["entries"]
+                  for p in args.compare}
+        common = set(entries)
+        for t in others.values():
+            common &= set(t)
+        print(f"{len(common)} ids common to all "
+              f"{len(others) + 1} tables; this one has {len(entries)}")
+        for name, t in others.items():
+            same_sound = sum(1 for k in common
+                             if t[k]["sound"] == entries[k]["sound"])
+            translated = sum(1 for k in common
+                             if t[k]["text"] != entries[k]["text"])
+            print(f"  {name:10s} {translated:4d} strings translated, "
+                  f"{same_sound}/{len(common)} name the same sound")
         return 0
 
     needle = (args.grep or "").lower()
