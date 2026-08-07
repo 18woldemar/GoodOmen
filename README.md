@@ -95,6 +95,10 @@ pip install pefile pillow            # or: pacman -S python-pefile python-pillow
 export MDK2_GOG="/path/to/GOG Games/MDK 2"
 python3 tools/unpack.py  "$MDK2_GOG/data/base.zip" -o extracted/base
 python3 tools/tex2png.py extracted/base -o png/
+
+# a walkable page per level: drag to look, WASD, G to walk, 1-9 for checkpoints
+python3 tools/mod2html.py --scene extracted/base/l1.lua -o l1.html \
+        --resources extracted --png png/ --walk
 ```
 
 ## Legal
