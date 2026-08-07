@@ -373,21 +373,31 @@ pub fn install(lua: &Lua) -> Result<(), Error> {
             world.register(gob)
         };
 
-        // the Lua side is a table the scripts can hang handlers and fields
-        // on, carrying its id in the arena
-        let handle = lua.create_table()?;
-        handle.set("name", name.clone())?;
-        handle.set("__gob", id)?;
-        let position = lua.create_table()?;
-        position.set("x", number(&arg(5)))?;
-        position.set("y", number(&arg(6)))?;
-        position.set("z", number(&arg(7)))?;
-        handle.set("position", position)?;
-        lua.globals().set(name, &handle)?;
-        Ok(handle)
+        handle(lua, &name, id, [number(&arg(5)), number(&arg(6)), number(&arg(7))])
     })?;
     globals.set("mdkRegisterObject", register)?;
     Ok(())
+}
+
+/// The Lua side of a gob: a table the scripts can hang handlers and fields
+/// on, carrying its id in the arena, and installed as a global under its own
+/// name because that is what `mdkRegisterObject` does. Everything that makes
+/// an object goes through here — the scene graphs, `mdkCreateObjectLua` and
+/// the spawners — so they all produce the same shape.
+///
+/// `position` is a *table* with `x`, `y` and `z`, not an array: the scripts
+/// read `gob.position.x` and nothing reads `gob.position[1]`.
+pub fn handle(lua: &Lua, name: &str, id: Id, at: [f64; 3]) -> mlua::Result<Table> {
+    let handle = lua.create_table()?;
+    handle.set("name", name)?;
+    handle.set("__gob", id)?;
+    let position = lua.create_table()?;
+    position.set("x", at[0])?;
+    position.set("y", at[1])?;
+    position.set("z", at[2])?;
+    handle.set("position", position)?;
+    lua.globals().set(name, &handle)?;
+    Ok(handle)
 }
 
 /// Read the world back out of a Lua state.

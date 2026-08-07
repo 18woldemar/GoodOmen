@@ -33,6 +33,7 @@ use mlua::{Lua, Value, Variadic};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A room, with the box a camera is tested against and the rooms it draws.
+#[derive(Default)]
 pub struct Visibility {
     pub names: Vec<String>,
     pub boxes: Vec<Option<[f64; 6]>>,
@@ -215,6 +216,13 @@ pub struct Boot {
     /// Registered names with no behaviour here yet, and how often the boot
     /// called each.
     pub unimplemented: BTreeMap<String, usize>,
+    /// `spawner name -> what it makes and when`. See [`Spawner`].
+    pub spawners: BTreeMap<String, Spawner>,
+    /// Every object a spawner has put in the world, in the order it did, and
+    /// the hitpoints it arrived with. A spawner reuses one name, so this is
+    /// longer than the arena grows; and the second number is what says the
+    /// type table in [`crate::game::world`] reached something real.
+    pub spawned: Vec<(String, i16)>,
     /// Every `.lua` in the installation, by lowercased file name, so that
     /// `dofile` can resolve a bare resource name without the file system.
     sources: BTreeMap<String, String>,
@@ -232,6 +240,38 @@ impl Boot {
         out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
         out
     }
+}
+
+/// What one spawner makes, and when.
+///
+/// The original keeps this on the spawner's own `omgob` at +0x40, and the
+/// nine arguments of `mdkSpawnerSetSpawnedObject` land in it at 0x4259f0:
+/// the type at +0, the waypoint string at +4, the four numbers at 0x14, 0x18,
+/// 0x1c and 0x20, the **interval** at 0x28 and the room at 0x24. The queue is
+/// 0x2c, the countdown 0x30 and the shut-off flag 0x44.
+///
+/// The four numbers are not the spawner's — they are handed straight to the
+/// object it makes, into the same four slots a scene graph fills, and their
+/// meaning is set by the type. Only the interval belongs to the spawner.
+#[derive(Clone, Debug, Default)]
+pub struct Spawner {
+    /// The `OBJ_*` of the thing it makes.
+    pub kind: f64,
+    /// A waypoint name, which is what a character wears in `resource`.
+    /// The original stores an **empty string**, not a null, when the script
+    /// passes `nil`, and then passes null on — so empty means none.
+    pub waypoint: Option<String>,
+    pub payload: [f64; 4],
+    /// Seconds between one and the next, from the eighth argument.
+    pub interval: f64,
+    pub room: Option<String>,
+    /// How many are still owed. `mdkSpawnerQueue` adds to it.
+    pub queue: i64,
+    /// Counts down by the frame time; at or below zero the next one comes.
+    pub timer: f64,
+    /// `mdkSpawnerShutOff` sets this and nothing clears it — a spawner that
+    /// has been shut off stays off, and further `Queue` calls do nothing.
+    pub off: bool,
 }
 
 fn number(v: &Value) -> f64 {
@@ -291,12 +331,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                     ..Gob::default()
                 })
             };
-            let handle = lua.create_table()?;
-            handle.set("name", name.clone())?;
-            handle.set("__gob", id)?;
-            handle.set("position", lua.create_table()?)?;
-            lua.globals().set(name, &handle)?;
-            Ok(handle)
+            world::handle(lua, &name, id, [0.0; 3])
         })?,
     )?;
 
@@ -835,6 +870,73 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         })?,
     )?;
 
+    // --- the spawners ---------------------------------------------------
+    // Between them the four are 2246 calls in a boot of all ten levels, and
+    // they are what puts an enemy in a room: nothing in a scene graph is one.
+    globals.set(
+        "mdkSpawnerSetSpawnedObject",
+        // 0x440e70 into 0x4259f0. Nine arguments:
+        //   (spawner, type, waypoint, p1, p2, p3, p4, interval, room)
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(name) = args.first().and_then(gob_name) else { return Ok(()) };
+            let mut boot = boot_mut(lua)?;
+            // 0x4259f0 writes the definition and **nothing else** -- it never
+            // touches 0x2c, 0x30 or 0x44 -- so redefining a spawner keeps
+            // its queue, its countdown and, above all, its shut-off flag.
+            // `level1.lua` shuts a generator off when it is destroyed and
+            // then runs its setup function again; clearing the flag here
+            // would bring the generator back.
+            let s = boot.spawners.entry(name).or_default();
+            s.kind = args.get(1).map(number).unwrap_or(0.0);
+            s.waypoint = args.get(2).and_then(text).filter(|w| !w.is_empty());
+            s.payload = [3, 4, 5, 6].map(|i| args.get(i).map(number).unwrap_or(0.0));
+            s.interval = args.get(7).map(number).unwrap_or(0.0);
+            s.room = args.get(8).and_then(gob_name);
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "mdkSpawnerQueue",
+        // 0x425c00. The reset of the countdown when the queue was empty is
+        // what makes the first of a batch arrive at once rather than one
+        // interval late.
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(name) = args.first().and_then(gob_name) else { return Ok(()) };
+            let n = args.get(1).map(number).unwrap_or(0.0) as i64;
+            if let Some(s) = boot_mut(lua)?.spawners.get_mut(&name) {
+                if !s.off {
+                    if s.queue == 0 {
+                        s.timer = 0.0;
+                    }
+                    s.queue += n;
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "mdkSpawnerShutOff",
+        // 0x425c50
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(name) = args.first().and_then(gob_name) else { return Ok(()) };
+            if let Some(s) = boot_mut(lua)?.spawners.get_mut(&name) {
+                s.queue = 0;
+                s.off = true;
+            }
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "mdkSpawnerSpawnObject",
+        // 0x441040 into 0x425a80, which bypasses the queue entirely: three
+        // calls in a row make three objects on the same frame, and
+        // `boss.lua` does exactly that.
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(name) = args.first().and_then(gob_name) else { return Ok(Value::Nil) };
+            Ok(spawn(lua, &name)?.map(Value::Table).unwrap_or(Value::Nil))
+        })?,
+    )?;
+
     // The difficulty, which is the other half of every hitpoint in the game.
     // `menu.lua` is the only caller of the setter, with 0.2, 0.35, 0.5 and
     // 1.0 -- Easy, Medium, Hard and "Jinkies!".
@@ -1096,6 +1198,57 @@ fn change_gob<T>(lua: &Lua, v: Option<&Value>, f: impl FnOnce(&mut world::World,
     let mut w = world::world_mut(lua)?;
     let id = w.find(&name)?;
     Some(f(&mut w, id))
+}
+
+/// Make one object from a spawner's definition, register it, and hand back
+/// its Lua table. `None` if the spawner has no definition — the original
+/// tests `sp[0] == 0` and returns null, which is what a script that queues a
+/// spawner it never set up gets.
+///
+/// From 0x425a80. The new object is **named after the spawner**: the format
+/// string at 0x4a6a54 is `"%s_spawn"`, one name per spawner, so the second
+/// one replaces the first as a global exactly as a repeated scene-graph name
+/// does. It stands where the spawner stands, faces where it faces, wears the
+/// waypoint as its resource and carries the spawner's four numbers — and
+/// since `World::register` reads the type, it arrives with its hitpoints.
+fn spawn(lua: &Lua, spawner: &str) -> mlua::Result<Option<mlua::Table>> {
+    let def = match boot_ref(lua)?.spawners.get(spawner) {
+        Some(s) if s.kind != 0.0 => s.clone(),
+        _ => return Ok(None),
+    };
+    let name = format!("{spawner}_spawn");
+    let (at, facing) = {
+        let w = world::world(lua).ok_or_else(|| mlua::Error::runtime("no world"))?;
+        match w.find(spawner).and_then(|id| w.get(id)) {
+            Some(g) => (g.position, g.rotation),
+            None => ([0.0; 3], [1.0, 0.0, 0.0, 0.0]),
+        }
+    };
+    let (id, hitpoints) = {
+        let mut w = world::world_mut(lua).ok_or_else(|| mlua::Error::runtime("no world"))?;
+        let id = w.register(Gob {
+            name: name.clone(),
+            kind: def.kind,
+            position: at,
+            rotation: facing,
+            resource: def.waypoint.clone(),
+            payload: def.payload,
+            ..Gob::default()
+        });
+        (id, w.get(id).map(|g| g.hitpoints).unwrap_or(0))
+    };
+    boot_mut(lua)?.spawned.push((name.clone(), hitpoints));
+    let made = world::handle(lua, &name, id, at)?;
+
+    // `OnSpawn(spawner, spawned)` — event 9 in the original's own table, and
+    // 0x425b4f asks the spawner for it before doing anything else with the
+    // new object. `level8.lua` uses it to point the thing at the player.
+    if let Ok(gob) = lua.globals().get::<mlua::Table>(spawner) {
+        if let Ok(handler) = gob.get::<mlua::Function>("OnSpawn") {
+            let _ = handler.call::<Value>((gob, made.clone()));
+        }
+    }
+    Ok(Some(made))
 }
 
 /// A gob's name, from the table the scripts hold it by.
@@ -1413,6 +1566,32 @@ pub fn tick_touching(
         }
     }
 
+    // the spawners, which are the only thing that puts an enemy in a room.
+    //
+    // The countdown runs **only while something is owed** — the original
+    // returns before touching it when the queue is empty (0x425e43) — so an
+    // idle spawner does not accumulate credit and then empty its whole queue
+    // at once when a script fills it.
+    let due: Vec<String> = {
+        let mut boot = boot_mut(&scripts.lua)?;
+        let mut ready = Vec::new();
+        for (name, s) in boot.spawners.iter_mut() {
+            if s.queue <= 0 {
+                continue;
+            }
+            s.timer -= dt;
+            if s.timer <= 0.0 {
+                s.queue -= 1;
+                s.timer = s.interval;
+                ready.push(name.clone());
+            }
+        }
+        ready
+    };
+    for name in due {
+        spawn(&scripts.lua, &name)?;
+    }
+
     // and OnUpdate, to everything awake.
     //
     // The names come from the **arena**, not from a walk of `_G`. Both hold
@@ -1462,6 +1641,140 @@ mod tests {
         assert_eq!(walk_animation(0.0, 0.0), "ANIM_DEFAULT");
         // a twitch is not a walk
         assert_eq!(walk_animation(0.01, -0.01), "ANIM_DEFAULT");
+    }
+
+    /// A spawner, driven the way `level1.lua` drives one: set it up, queue
+    /// one, and let the clock run. No level in the game puts the player in
+    /// front of a spawner within the seconds a driver check runs for, so
+    /// this is the only place the countdown is exercised at all.
+    #[test]
+    fn a_queued_spawner_makes_one_object_per_interval() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        // the shape `level1.lua` uses, with a 3-second interval
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('gen', OBJ_NONE, scene, nil, -1, 5,6,7, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkSpawnerSetSpawnedObject(gen, OBJ_DOGANBOY, 'wp', 60,0.7,0,0, 3, nil)\n\
+                 mdkSpawnerQueue(gen, 2)",
+            )
+            .exec()
+            .unwrap();
+
+        let rooms = Visibility::default();
+        let mut state = Ticking::default();
+        let step = |state: &mut Ticking| {
+            tick(&scripts, &rooms, [0.0; 3], 0.0, 1.0, state).unwrap()
+        };
+
+        // the queue was empty, so the countdown was reset and the first one
+        // arrives on the tick after the call rather than an interval later
+        step(&mut state);
+        let spawned = |lua: &mlua::Lua| lua.app_data_ref::<Boot>().unwrap().spawned.clone();
+        assert_eq!(spawned(&scripts.lua).len(), 1, "the first comes at once");
+        for _ in 0..2 {
+            step(&mut state);
+        }
+        assert_eq!(spawned(&scripts.lua).len(), 1, "and the next waits out the 3s");
+        step(&mut state);
+        let made = spawned(&scripts.lua);
+        assert_eq!(made.len(), 2);
+        assert_eq!(made[0].0, "gen_spawn", "named after the spawner, once");
+
+        // it stands where the spawner stands, wears the waypoint, carries
+        // the four numbers, and -- the point of all of it -- has hitpoints
+        let w = world::world(&scripts.lua).unwrap();
+        let g = w.get(w.find("gen_spawn").unwrap()).unwrap();
+        assert_eq!(g.position, [5.0, 6.0, 7.0]);
+        assert_eq!(g.resource.as_deref(), Some("wp"));
+        assert_eq!(g.payload, [60.0, 0.7, 0.0, 0.0]);
+        assert_eq!(g.hitpoints, 100, "OBJ_DOGANBOY, on Hard");
+        drop(w);
+
+        // nothing is owed now, so the clock may run without making any more
+        for _ in 0..10 {
+            step(&mut state);
+        }
+        assert_eq!(spawned(&scripts.lua).len(), 2);
+    }
+
+    /// Shutting one off empties the queue and is permanent — `level1.lua`
+    /// does it when the generator is destroyed, and nothing turns it back on,
+    /// **including setting it up again**, which that same script then does.
+    #[test]
+    fn a_spawner_that_has_been_shut_off_stays_off() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('gen', OBJ_NONE, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkSpawnerSetSpawnedObject(gen, OBJ_GRUNT, nil, 0,0,0,0, 1, nil)\n\
+                 mdkSpawnerQueue(gen, 5)\n\
+                 mdkSpawnerShutOff(gen)\n\
+                 mdkSpawnerQueue(gen, 5)\n\
+                 mdkSpawnerSetSpawnedObject(gen, OBJ_GRUNT, nil, 0,0,0,0, 1, nil)\n\
+                 mdkSpawnerQueue(gen, 5)",
+            )
+            .exec()
+            .unwrap();
+
+        let rooms = Visibility::default();
+        let mut state = Ticking::default();
+        for _ in 0..20 {
+            tick(&scripts, &rooms, [0.0; 3], 0.0, 1.0, &mut state).unwrap();
+        }
+        assert!(scripts.lua.app_data_ref::<Boot>().unwrap().spawned.is_empty());
+    }
+
+    /// `mdkSpawnerSpawnObject` goes round the queue entirely: `boss.lua`
+    /// calls it three times in a row and expects three.
+    #[test]
+    fn spawning_by_hand_ignores_the_queue_and_the_clock() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('gen', OBJ_NONE, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 seen = 0\n\
+                 gen.OnSpawn = function(g, made) seen = seen + 1 end\n\
+                 mdkSpawnerSetSpawnedObject(gen, OBJ_ZIZZY, nil, 0,0,0,0, 99, nil)\n\
+                 mdkSpawnerSpawnObject(gen)\n\
+                 mdkSpawnerSpawnObject(gen)\n\
+                 mdkSpawnerSpawnObject(gen)",
+            )
+            .exec()
+            .unwrap();
+
+        let made = scripts.lua.app_data_ref::<Boot>().unwrap().spawned.clone();
+        assert_eq!(made.len(), 3, "three calls, three objects");
+        assert!(made.iter().all(|(_, hp)| *hp == 2000), "zizzy on Hard");
+        assert_eq!(scripts.lua.globals().get::<i64>("seen").unwrap(), 3, "OnSpawn each time");
+    }
+
+    /// A spawner nobody set up makes nothing rather than an object of type
+    /// zero — the original tests its type field and returns null.
+    #[test]
+    fn an_unconfigured_spawner_makes_nothing() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('gen', OBJ_NONE, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 made = mdkSpawnerSpawnObject(gen)\n\
+                 mdkSpawnerQueue(gen, 3)",
+            )
+            .exec()
+            .unwrap();
+        assert_eq!(scripts.lua.globals().get::<Value>("made").unwrap(), Value::Nil);
+        assert!(scripts.lua.app_data_ref::<Boot>().unwrap().spawned.is_empty());
     }
 
     /// Every one of the eight has to exist in the table the binary

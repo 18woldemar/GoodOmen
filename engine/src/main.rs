@@ -582,6 +582,7 @@ fn boot(
     let (mut commands, mut bindings, mut stasis, mut timers) = (0usize, 0usize, 0usize, 0usize);
     let (mut fired, mut survived) = (0usize, 0usize);
     let (mut moves, mut playing) = (0u64, 0usize);
+    let (mut spawners, mut spawned, mut armed) = (0usize, 0usize, 0usize);
     let mut why: std::collections::BTreeMap<String, usize> = Default::default();
     let mut faults: std::collections::BTreeSet<u32> = Default::default();
     let mut resources = std::collections::BTreeSet::new();
@@ -635,6 +636,9 @@ fn boot(
                     plays += b.gob_sounds.iter().map(|g| g.played).sum::<usize>();
                     moves += b.moves;
                     playing += b.playing.len();
+                    spawners += b.spawners.len();
+                    spawned += b.spawned.len();
+                    armed += b.spawned.iter().filter(|(_, hp)| *hp > 0).count();
                     for (name, count) in &b.unimplemented {
                         *work.entry(name.clone()).or_insert(0) += count;
                     }
@@ -683,6 +687,10 @@ fn boot(
         ("handler calls", fired, expect_flag("--expect-events")),
         ("handlers ran to the end", survived, expect_flag("--expect-survived")),
         ("sounds played", plays, expect_flag("--expect-plays")),
+        ("objects spawned", spawned, expect_flag("--expect-spawned")),
+        // every spawned object is an enemy, so every one should arrive with
+        // hitpoints; a gap here means a type the table at 0x4ab2e8 misses
+        ("of them with hitpoints", armed, expect_flag("--expect-armed")),
     ] {
         if let Some(want) = want {
             if got != want {
@@ -703,6 +711,7 @@ fn boot(
          ({missing} missing), {rooms} rooms, {checkpoints} checkpoints, \
          {commands} commands over {bindings} bindings (0 faults), \
          {stasis} objects in stasis, {timers} timers, \
+         {spawners} spawners set up, \
          {} functions called with no behaviour yet{}",
         resources.len(),
         sounds.len(),
@@ -710,7 +719,8 @@ fn boot(
         if events {
             format!(
                 ", {survived} of {fired} handler calls ran to the end, \
-                 {moves} object moves, {playing} animations chosen and \
+                 {moves} object moves, {playing} animations chosen, \
+                 {spawned} objects spawned ({armed} with hitpoints) and \
                  {} sounds hung on objects and played {plays} times",
                 attached.len()
             )
@@ -979,7 +989,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     }
 
     // what the scripts actually did to the world while it ran
-    let (moved, playing, what, fired_sounds) = {
+    let (moved, playing, what, fired_sounds, spawned) = {
         let w = world::world(&scripts.lua).expect("a world");
         let boot = scripts.lua.app_data_ref::<api::Boot>().expect("boot state");
         let what: Vec<String> = boot
@@ -990,7 +1000,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         // what the run asked to be heard: `omGobGSPlay` calls that reached a
         // sound the scripts had hung on an object
         let sounds: usize = boot.gob_sounds.iter().map(|g| g.played).sum();
-        (w.generation(), boot.playing.len(), what, sounds)
+        (w.generation(), boot.playing.len(), what, sounds, boot.spawned.len())
     };
     let (fired, survived) = state.total();
     let mut slots: Vec<String> = state
@@ -1008,6 +1018,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         ("sounds fired", fired_sounds, expect_flag("--expect-sounds")),
         ("collisions", state.collisions, expect_flag("--expect-collisions")),
         ("objects touched", state.touched.len(), expect_flag("--expect-touched")),
+        ("objects spawned", spawned, expect_flag("--expect-spawned")),
     ] {
         if let Some(want) = want {
             if got != want {
@@ -1020,7 +1031,8 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
          travelled {:.0} units, met a wall on {} frames, inside geometry on {}, \
          {} rooms entered, {survived} of {fired} handler calls ran to the end, \
          {moved} object moves, {playing} animations chosen, \
-         {fired_sounds} sounds fired, {} objects touched and {} of them \
+         {fired_sounds} sounds fired, {spawned} objects spawned, \
+         {} objects touched and {} of them \
          scripted{}{} [{}]",
         if recorded { "the game's own recorded" } else { "held-forwards" },
         body.travelled,
