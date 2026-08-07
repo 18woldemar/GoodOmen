@@ -66,11 +66,13 @@ __pycache__/
 # the engine's build output
 engine/target/
 
-# Instructions and notes for AI coding agents. They are working files, not
-# part of the project: they describe how to drive the work, not what the work
-# found. What is worth keeping from them lives in docs/rules.md and
-# docs/journal.md instead.
+# Working files: the agent's instructions and the running notes it keeps
+# while it works. They describe how the work was driven, not what the work
+# found, and they are not part of the project. What a reader needs is in the
+# README, in docs/rules.md, and in the docstring of whichever tool settled a
+# question.
 CLAUDE.md
+docs/journal.md
 AGENTS.md
 GEMINI.md
 .claude/

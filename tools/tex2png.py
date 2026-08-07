@@ -51,7 +51,7 @@ BGRA, which is why the file ends with 16+4+1 = 21 pixels = 84 bytes.
 The 4 bpp coding is a multi-mode block codec: 8x4-pixel blocks, 16 bytes each,
 in **six layouts** chosen by bits 127, 126, 125 and 124. It is decoded from
 scratch in `tools/texdec.py`, byte-for-byte against the original.
-Those four modes are not decoded yet -- see docs/journal.md.
+Those modes are decoded in tools/texdec.py, whose docstring is the reference.
 
 That gives an exact size identity, asserted below, which holds for all 761
 textures in the corpus:
@@ -97,7 +97,7 @@ class TexError(ValueError):
 
 
 class CodecNotDecoded(TexError):
-    """The 4 bpp level codec is still unknown -- see docs/journal.md."""
+    """The 4 bpp level codec is still unknown -- see tools/texdec.py."""
 
 
 def levels(width: int, height: int) -> list[tuple[int, int]]:

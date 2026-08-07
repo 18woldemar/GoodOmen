@@ -39,7 +39,7 @@ parse byte-exactly -- strings tiling the character data with nothing left
 over, sound offsets landing on exactly the slots that exist. A format that
 survives five independent files of different sizes is understood.
 
-They also settle what localising this game means, which the journal had been
+They also settle what localising this game means, which had been
 carrying as an open question needing a second edition installed. It does not:
 **this one file is the whole of it.** 678 ids are common to all five; the
 eight the English build has on top are entries with no text at all,

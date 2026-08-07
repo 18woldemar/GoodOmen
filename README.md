@@ -122,9 +122,9 @@ The seven rules the project is held to are in [`docs/rules.md`](docs/rules.md)
 — assets are never committed, no decompiled code goes into the engine, and a
 format counts as solved only at 100%.
 
-Details, and the hypotheses that turned out to be wrong, live in
-[`docs/journal.md`](docs/journal.md). Reconnaissance through Wine — file
-traces, apitrace on the GL stream — is in
+Every format above is described where the code that reads it lives — the
+tool's module docstring, and the engine's matching module documentation.
+Reconnaissance through Wine — file traces, apitrace on the GL stream — is in
 [`docs/wine-recon.md`](docs/wine-recon.md).
 
 ## Milestones

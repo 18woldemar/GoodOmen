@@ -116,5 +116,5 @@ Ghidra needs a JDK, which Arch pulls in as a dependency.
 2. `exe_recon.py` on the GOG executable → APIs, toolchain, RTTI, extensions.
 3. `inventory.py` across all three installations.
 4. `diffsets.py` GOG vs 1C → where the strings live.
-5. Fold the results into `docs/journal.md`: which formats exist, which one to
+5. Write the results up where the code will live: which formats exist, which one to
    take first.

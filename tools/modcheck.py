@@ -57,7 +57,8 @@ def measure(path: Path) -> list:
 def close(a: float, b: float) -> bool:
     # NaN on both sides is agreement, not a disagreement that cannot be
     # spelled: six models carry an uninitialised translation on their root
-    # node and it propagates -- see docs/journal.md, 2026-08-07.
+    # node and it propagates: fishy, chuckles, flyer, l1_r7cloudspin,
+    # l3_slide and l7_dshwang, each a dummy root that draws nothing.
     if a != a and b != b:
         return True
     return abs(a - b) <= max(ABS_TOL, REL_TOL * max(abs(a), abs(b)))

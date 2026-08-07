@@ -103,8 +103,11 @@ pub struct Group {
 
 /// A vertex record is 32 bytes and only 20 of them are understood: the
 /// position and the UV. The remaining 12 are **not a normal**, and three
-/// readings were tested and refuted over the corpus — see `docs/journal.md`,
-/// 2026-08-07. A renderer that wants normals has to compute them.
+/// readings were tested and refuted over the corpus: as three floats only
+/// 722 of 19507 are unit vectors, as three signed bytes over 127 only 68 of
+/// 500, and the trailing 0..255 dword matches the owning node's index for 6
+/// of `kurt.mod`'s 1741 vertices. A renderer that wants normals has to
+/// compute them.
 #[derive(Clone, Copy, Debug)]
 pub struct Vertex {
     pub pos: [f32; 3],

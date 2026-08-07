@@ -20,19 +20,18 @@ describe something that never happened, which is noted in place.
    written before the code that reads it twice. In practice that is the
    tool's module docstring — `tools/texdec.py` is the reference for the
    texture codec, `tools/mod2obj.py` for models — and the engine's matching
-   module documentation, which must not disagree with it. `docs/journal.md`
-   carries the reasoning and the refutations. *An earlier version of this
+   module documentation, which must not disagree with it, and which carries
+   the reasoning and the refutations along with it. *An earlier version of this
    rule named `docs/formats/*.ksy` as the source of truth; no `.ksy` was
    ever written, and the descriptions went where the code is instead.*
 5. **No magic number without a comment** saying where it came from: the data,
    the disassembly, or a GL trace.
-6. **Record hypotheses together with their refutations.** `docs/journal.md`
-   is kept line by line: date, hypothesis, how it was tested, result. Dead
-   ends are valuable — they save the work being repeated.
-7. **Documents are written in English**, including the journal and the
-   code comments.
+6. **Record hypotheses together with their refutations**, beside the code
+   that settled them: what was tried, how it was tested, and what the result
+   was. Dead ends are valuable — they save the work being repeated, and the
+   docstrings here are full of them.
+7. **Documents are written in English**, including the code comments.
 
-Everything else — what has been decided, what is still open, and every
-hypothesis that turned out to be wrong — is in
-[`journal.md`](journal.md), kept line by line so that dead ends are not
-walked twice.
+What has been decided and what is still open is in the
+[README](../README.md); why, and what was refuted on the way, is in the
+docstring of whichever tool settled it.
