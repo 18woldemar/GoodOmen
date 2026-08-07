@@ -10,12 +10,40 @@ use goodomen::formats::container::crc32;
 use goodomen::formats::model::Model;
 use goodomen::formats::tex::Texture;
 use goodomen::game::install::Install;
+use goodomen::render::{triangle, Video};
+use glow::HasContext;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let tex = args.iter().any(|a| a == "--tex");
     let models = args.iter().any(|a| a == "--mod");
     let trees = args.iter().any(|a| a == "--bsp");
+
+    // the renderer needs no game files, so it is answered before the
+    // installation is looked for
+    if args.iter().any(|a| a == "--triangle") {
+        match goodomen::render::triangle::selfcheck() {
+            Ok(line) => println!("{line}"),
+            // no display is not a failed renderer, and a check that cannot
+            // run must say so rather than pass or fail
+            Err(e) if e.starts_with(goodomen::render::NO_VIDEO) => {
+                println!("skip: {e}");
+            }
+            Err(e) => {
+                eprintln!("goodomen: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if args.iter().any(|a| a == "--window") {
+        if let Err(e) = window() {
+            eprintln!("goodomen: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // the only positional argument is the game directory; `--expect N` takes
     // a value, so the token after it is not one
     let root = args
@@ -95,6 +123,34 @@ fn main() {
         install.entry_count(),
         bytes as f64 / (1024.0 * 1024.0)
     );
+}
+
+/// A window with the triangle in it, until it is closed or Escape is pressed.
+fn window() -> Result<(), String> {
+    use sdl2::event::Event;
+    use sdl2::keyboard::Keycode;
+
+    let mut video = Video::open("goodomen", 1024, 768, true)?;
+    println!("OpenGL {}", video.version());
+    loop {
+        for event in video.events.poll_iter() {
+            match event {
+                Event::Quit { .. }
+                | Event::KeyDown {
+                    keycode: Some(Keycode::Escape),
+                    ..
+                } => return Ok(()),
+                _ => {}
+            }
+        }
+        let (w, h) = video.window.drawable_size();
+        // SAFETY: the context is current on this thread for the whole loop.
+        unsafe {
+            video.gl.viewport(0, 0, w as i32, h as i32);
+            triangle::draw(&video.gl)?;
+        }
+        video.window.gl_swap_window();
+    }
 }
 
 /// Decode every `.tex` in the containers and print `name crc32` a line, sorted

@@ -6,6 +6,20 @@ description = "An open reimplementation of the MDK2 engine, run on your own copy
 license = "GPL-3.0-or-later"
 
 [dependencies]
+glow = "0.18.0"
+
+# On Linux SDL2 comes from the system: every desktop has it, distributions
+# want it that way, and the version there (2.32) is years ahead of the one
+# sdl2-sys bundles (2.26.4), which no longer compiles against current
+# PipeWire headers.
+[target.'cfg(unix)'.dependencies]
+sdl2 = "0.38.0"
+
+# On Windows there is no system SDL2, and requiring the player to drop an
+# SDL2.dll beside the binary would break the one promise the engine makes.
+# So it is built from source and linked in.
+[target.'cfg(windows)'.dependencies]
+sdl2 = { version = "0.38.0", features = ["bundled", "static-link"] }
 
 [profile.release]
 opt-level = 3

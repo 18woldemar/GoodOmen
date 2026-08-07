@@ -1,0 +1,10 @@
+# SDL2 is built from source and linked statically, so that the binary really
+# is the thing you drop into the game directory -- no SDL2.dll beside the
+# .exe, no libsdl2 package on the Linux side.
+#
+# The one wart: the bundled SDL 2.x CMakeLists declares compatibility with
+# CMake 2.x, and CMake 4 refuses to configure such a project without being
+# told to. This is that permission, and it can go the day sdl2-sys bundles a
+# newer SDL.
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"

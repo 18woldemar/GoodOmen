@@ -26,4 +26,15 @@ OUT=$(cd "$MDK2_GOG" && WINEDEBUG=-all "$WINE" goodomen-check.exe 2>/dev/null)
 
 echo "$OUT" | grep -q "4751/4751 files read" || {
   echo "the Windows build did not read the containers:"; echo "$OUT"; exit 1; }
+
+# and the renderer, which on Windows is a statically linked SDL2 rather than
+# the system one -- a different build of a different library, so it is worth
+# asking the same question of it
+TRI=$(cd "$MDK2_GOG" && WINEDEBUG=-all "$WINE" goodomen-check.exe --triangle 2>/dev/null)
+case "$TRI" in
+  *"triangle drawn offscreen"*|skip:*) ;;
+  *) echo "the Windows build did not draw the triangle:"; echo "$TRI"; exit 1 ;;
+esac
+
 echo "$OUT" | tail -1
+echo "$TRI" | tail -1

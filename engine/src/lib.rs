@@ -7,3 +7,4 @@
 
 pub mod formats;
 pub mod game;
+pub mod render;

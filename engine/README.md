@@ -29,6 +29,21 @@ six counts exactly and five sums within tolerance, because the arithmetic
 crosses a slerp and two implementations of `acos` need not agree in the last
 bit.
 
+**Collision trees**: all 692, validated and answering *inside* identically to
+`../tools/bsp.py` on points placed exactly on the planes, which is where the
+one thing that can be quietly wrong in that format would show.
+
+## What it draws
+
+    ./goodomen --window        # a window, and a triangle in it
+    ./goodomen --triangle      # the same triangle offscreen, and three pixels checked
+
+`--triangle` is the renderer's own check: it opens a hidden window, draws
+into a framebuffer object and reads three pixels back — the centre, a corner,
+and the green vertex — each of which fails for a different reason. On a
+machine with no display it says so and skips, because a check that cannot run
+must not pass.
+
 ## Platforms
 
 **Linux and Windows are the targets**, and both are tested rather than
@@ -46,18 +61,23 @@ it.
 
 **Android is not attempted.** Perhaps once the engine is finished.
 
-Cross-compiling for Windows needs the target and a linker:
+Cross-compiling for Windows needs the target, a linker and CMake:
 
     rustup target add x86_64-pc-windows-gnu
-    sudo pacman -S mingw-w64-gcc          # or your distribution's equivalent
+    sudo pacman -S mingw-w64-gcc cmake    # or your distribution's equivalent
     cargo build --release --target x86_64-pc-windows-gnu
 
-466 KiB, no runtime to install, 2 seconds to build.
+4.3 MiB, no runtime to install, 47 seconds the first time and 2 after — the
+difference is SDL2, which is **built from source and linked in** on Windows
+because there is no system copy there and an `SDL2.dll` beside the binary
+would break the whole point. On Linux SDL2 comes from the system instead:
+every desktop has it, and the version there is years ahead of the one
+`sdl2-sys` bundles.
 
 ## Stack, and why
 
-Rust, SDL2, OpenGL 3.3 core written to the subset GLES 3.0 also has, OpenAL
-Soft with EFX, and Lua 5.1 through `mlua`.
+Rust, SDL2, OpenGL 3.3 core written to the subset GLES 3.0 also has (through
+`glow`), OpenAL Soft with EFX, and Lua 5.1 through `mlua`.
 
 GL 3.3 core is simply the right level for Linux and Windows: old enough that
 every driver has it, new enough for the shader-side node posing the models
