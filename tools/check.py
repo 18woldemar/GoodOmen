@@ -106,10 +106,14 @@ ENGINE = [
     ("the renderer draws its first triangle",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "--triangle"], None),
-    ("the engine reads every sound wrapper",
+    ("the engine decodes every sound",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--wav", "--expect", "998"], None),
+    ("every sound decodes exactly like ffmpeg",
+     ["acmcheck.py", "extracted", "--run", "$MDK2_GOG"], "bin:ffmpeg"),
+    ("the music decodes exactly like ffmpeg",
+     ["acmcheck.py", "$MDK2_GOG/Music", "--music"], "bin:ffmpeg"),
     ("the engine starts every level at every checkpoint",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG", "--boot",
@@ -221,6 +225,13 @@ def main(argv: list[str] | None = None) -> int:
         for label, raw, needs in CORPUS + engine + (SLOW if args.slow else []):
             cmd = [c.replace("$MDK2_GOG", env.get("MDK2_GOG", ""))
                    for c in raw]
+            # a check that cannot run has not found anything wrong, so
+            # anything missing is a skip and never a failure
+            if "$MDK2_GOG" in " ".join(raw) and not exe.is_file():
+                print(f"skip  {label} -- MDK2_GOG is not set to an "
+                      "installation")
+                skipped += 1
+                continue
             if needs is None:
                 # a tool given a path in the game directory; a command that
                 # is not one of our tools brings its own inputs
@@ -228,13 +239,9 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"skip  {label} -- no {cmd[1]}")
                     skipped += 1
                     continue
-                # ...except the engine, which is handed the installation and
-                # cannot invent one. A fresh clone with no game must report
-                # these as skipped, not failed: a check that cannot run has
-                # not found anything wrong.
-                if "$MDK2_GOG" in " ".join(raw) and not exe.is_file():
-                    print(f"skip  {label} -- MDK2_GOG is not set to an "
-                          "installation")
+            elif needs.startswith("bin:"):
+                if not shutil.which(needs[4:]):
+                    print(f"skip  {label} -- {needs[4:]} is not installed")
                     skipped += 1
                     continue
             elif not (EXTRACTED / needs).exists():

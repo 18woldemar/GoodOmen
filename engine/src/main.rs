@@ -199,6 +199,36 @@ fn main() {
         }
         return;
     }
+    // `--pcm file.wav` writes one sound's samples to stdout as s16le, which
+    // is what `ffmpeg -f acm` writes too, so the two can be diffed directly.
+    if let Some(i) = args.iter().position(|a| a == "--pcm") {
+        let Some(path) = args.get(i + 1) else {
+            eprintln!("goodomen: --pcm needs a file");
+            std::process::exit(1);
+        };
+        let data = std::fs::read(path).unwrap_or_else(|e| {
+            eprintln!("goodomen: {path}: {e}");
+            std::process::exit(1);
+        });
+        // the music is a bare stream; everything else carries the wrapper
+        let acm = match goodomen::formats::wavc::parse(&data) {
+            Ok(s) => s.acm.to_vec(),
+            Err(_) => data.clone(),
+        };
+        match goodomen::formats::acm::decode(&acm) {
+            Ok(pcm) => {
+                use std::io::Write;
+                let bytes: Vec<u8> = pcm.iter().flat_map(|v| v.to_le_bytes()).collect();
+                std::io::stdout().write_all(&bytes).ok();
+            }
+            Err(e) => {
+                eprintln!("goodomen: {path}: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     if args.iter().any(|a| a == "--window") {
         if let Err(e) = window() {
             eprintln!("goodomen: {e}");
@@ -1258,7 +1288,8 @@ fn level(
     // offscreen, and then three questions of the pixels
     let (width, height) = (512i32, 512i32);
     unsafe {
-        let target = Offscreen::new(&video.gl, width, height)?;
+        // bound for as long as it is alive, which is this block
+        let _target = Offscreen::new(&video.gl, width, height)?;
         let projection = Mat4::perspective(1.1, 1.0, span * 0.002, span * 4.0);
         video.gl.clear_color(0.05, 0.06, 0.09, 1.0);
         video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
@@ -1627,7 +1658,7 @@ fn sounds(install: &mut Install, list: bool) -> usize {
     use goodomen::formats::wavc;
     let found = entries_named(install, ".wav");
     let (mut wrapped, mut riff, mut pcm_bytes) = (0usize, 0usize, 0u64);
-    let mut parameters: std::collections::BTreeSet<(u8, u8)> = Default::default();
+    let mut parameters: std::collections::BTreeSet<(u32, u32)> = Default::default();
     let mut rates: std::collections::BTreeMap<u16, usize> = Default::default();
 
     for (name, i, j) in &found {
@@ -1648,12 +1679,38 @@ fn sounds(install: &mut Install, list: bool) -> usize {
             Ok(s) => {
                 wrapped += 1;
                 pcm_bytes += s.decompressed as u64;
-                parameters.insert((s.levels, s.rows));
                 *rates.entry(s.rate).or_insert(0) += 1;
+                let (h, pcm) = match goodomen::formats::acm::header(s.acm)
+                    .and_then(|h| goodomen::formats::acm::decode(s.acm).map(|p| (h, p)))
+                {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("goodomen: {name}: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                parameters.insert((h.level, h.rows));
+                // the wrapper states the decoded size, so the decoder is held
+                // to it here rather than only against the oracle
+                if pcm.len() * 2 != s.decompressed as usize {
+                    eprintln!(
+                        "goodomen: {name}: decoded {} bytes, the header says {}",
+                        pcm.len() * 2,
+                        s.decompressed
+                    );
+                    std::process::exit(1);
+                }
                 if list {
+                    let bytes: Vec<u8> =
+                        pcm.iter().flat_map(|v| v.to_le_bytes()).collect();
                     println!(
-                        "{name} {} {} {} {} {}",
-                        s.decompressed, s.channels, s.rate, s.levels, s.rows
+                        "{name} {} {} {} {} {} {:08x}",
+                        s.decompressed,
+                        s.channels,
+                        s.rate,
+                        h.level,
+                        h.rows,
+                        crc32(&bytes)
                     );
                 }
             }

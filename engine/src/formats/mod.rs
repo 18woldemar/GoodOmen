@@ -2,6 +2,7 @@
 //! and checked against the Python tools in `../tools/`, which stay the
 //! reference.
 
+pub mod acm;
 pub mod blast;
 pub mod bsp;
 pub mod container;

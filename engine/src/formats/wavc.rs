@@ -22,13 +22,9 @@
 //! them was not worth it — and `Music/` holds 27 **bare** ACM streams with no
 //! WAVC wrapper at all.
 //!
-//! **The ACM payload is not decoded here yet**, and that is the engine's one
-//! remaining format debt. `../../tools/wavc.py` hands it to `ffmpeg`, which
-//! the engine cannot do. What is settled is everything around it, including
-//! one thing worth having before writing a decoder: **every stream the game
-//! ships uses the same two codec parameters**, 7 and 1 — all 992 wrapped and
-//! all 27 music tracks — so a decoder needs one configuration, not a family
-//! of them.
+//! The payload itself is `acm.rs`. **Every stream the game ships is level 7,
+//! rows 16** — all 992 wrapped and all 27 music tracks — so the decoder only
+//! ever sees blocks of 2048 values.
 
 pub const WAVC_MAGIC: &[u8; 8] = b"WAVCV1.0";
 pub const HEADER: usize = 28;
@@ -67,10 +63,8 @@ pub struct Sound<'a> {
     pub channels: u16,
     pub bits: u16,
     pub rate: u16,
-    /// The two ACM codec parameters. Every stream the game ships has (7, 1).
-    pub levels: u8,
-    pub rows: u8,
-    /// The undecoded ACM stream.
+    /// The payload, for `acm::decode`. Its own header carries the codec
+    /// parameters, so they are not repeated here.
     pub acm: &'a [u8],
 }
 
@@ -106,18 +100,8 @@ pub fn parse(data: &[u8]) -> Result<Sound<'_>, Error> {
         channels: u16le(data, 0x14)?,
         bits: u16le(data, 0x16)?,
         rate: u16le(data, 0x18)?,
-        // the two bytes after the ACM header's magic, samples, channels
-        // and rate
-        levels: *acm.get(12).ok_or(Error::Truncated)?,
-        rows: *acm.get(13).ok_or(Error::Truncated)?,
         acm,
     })
-}
-
-/// The sample count an ACM stream declares, **across all channels** — not
-/// frames. Getting that wrong halves or doubles a stereo track's length.
-pub fn acm_samples(acm: &[u8]) -> Result<u32, Error> {
-    u32le(acm, 4)
 }
 
 #[cfg(test)]
@@ -142,8 +126,7 @@ mod tests {
         a.extend_from_slice(&34801u32.to_le_bytes()); // samples
         a.extend_from_slice(&1u16.to_le_bytes()); // channels
         a.extend_from_slice(&22050u16.to_le_bytes()); // rate
-        a.push(7); // levels
-        a.push(1); // rows
+        a.extend_from_slice(&0x0107u16.to_le_bytes()); // level 7, rows 16
         a.extend_from_slice(&[0xaa; 16]);
         a
     }
@@ -153,8 +136,10 @@ mod tests {
         let d = wrapped(&acm_stream());
         let s = parse(&d).unwrap();
         assert_eq!((s.channels, s.bits, s.rate), (1, 16, 22050));
-        assert_eq!((s.levels, s.rows), (7, 1), "the only pair the game ships");
-        assert_eq!(acm_samples(s.acm).unwrap(), 34801);
+        // the wrapper repeats none of the codec's own parameters, so the
+        // payload has to be asked
+        let h = crate::formats::acm::header(s.acm).unwrap();
+        assert_eq!((h.samples, h.level, h.rows), (34801, 7, 16));
     }
 
     /// `28 + compressed == filesize` holds for all 992, so a file where it

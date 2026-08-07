@@ -33,6 +33,13 @@ bit.
 `../tools/bsp.py` on points placed exactly on the planes, which is where the
 one thing that can be quietly wrong in that format would show.
 
+**Sounds**: all 998 — 992 `WAVCV1.0` wrappers over **Interplay ACM** and six
+that really are RIFF — plus the 27 bare music streams. The ACM decoder is
+ours; `--wav` prints one CRC32 per decoded sound and `../tools/acmcheck.py`
+diffs those against `ffmpeg -f acm`. That reference is worth naming: it is the
+only one in this project that nobody here wrote, so it cannot agree with us by
+sharing our mistakes. **1019 streams, byte for byte.**
+
 **Scripts**: all 89 shipped `.lua`, which are Lua **3** run on a Lua 5.1 the
 engine carries itself (`mlua`, vendored — nothing to install). Three things
 make that work and there are only three: the `$if` pragma pass, a prelude for

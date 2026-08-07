@@ -57,9 +57,11 @@ cross-compiled and run under Wine inside a real installation as part of the
 checks. macOS is not claimed: there is no Apple hardware here, and an
 untested platform is not a supported one.
 
-The one format the engine cannot yet read is the **Interplay ACM** audio
-payload; the tools discharge it by handing the stream to `ffmpeg`, which the
-engine cannot do.
+**Every format the game ships is now read by the engine itself**, the last
+being the **Interplay ACM** audio payload. The decoder is ours, written from
+the routine `mdk2Main.exe` carries, and it is held to `ffmpeg -f acm` — a
+decoder nobody here wrote — over all 992 wrapped sounds and all 27 music
+tracks: **1019 streams, byte for byte, no exceptions**.
 
 ## The tools, which stay the reference
 
@@ -88,6 +90,7 @@ Where the engine and a tool can both do a thing, **they must agree**, and
 | `tools/boot.py` | Starts a level the way the game does — `mdk2.lua:level(n, cp, sec)`, whose call graph BioWare left in a comment above it. **All ten levels start at all 129 checkpoints**, and the 2093 resources they demand all exist. |
 | `tools/luaconst.py` | The engine's Lua surface, out of the binary: **507 constants with their values** and **461 registered functions with their addresses**. `OBJ_ROOM` is 803. |
 | `tools/modcheck.py` | Holds the engine's `.mod` reader to `mod2obj.py`: eleven numbers per model, **2207/2207 agree**. |
+| `tools/acmcheck.py` | Holds the engine's Interplay ACM decoder to `ffmpeg -f acm`, the one reference here that nobody in this project wrote: **1019 streams, byte for byte**. |
 | `tools/texcheck.sh` | Holds the engine's texture codec to `texdec.py`: one CRC32 per texture over every mip level, **761/761 identical**. |
 | `tools/winbuild.sh` | Cross-builds the Windows binary, drops it into a real installation and runs it there under Wine. |
 | `tools/refdec.py` | Reference decoder: runs the original's block codec under emulation. A research oracle, kept only to check `texdec.py` against. |
@@ -121,7 +124,7 @@ Hence the name: the engine is called Omen, so ours is a good one.
 | `.lua` | Plain text, and **Lua 3.x** — the `$if` / `$end` pragmas, and two lines of syntax 5.x cannot parse (`%upvalue`, `break` as a name). `base/l*.lua` are the level scene graphs: 5633 `mdkRegisterObject` calls placing every object in the game. |
 | `.str` | 686 entries of `{id, text, sound}`. Text is **UTF-16LE**, so one file per language is enough; `sound` names the `.wav` that speaks the line. |
 | `.sta` | 3141 records of `{ra, dec, magnitude}` in radians — an actual star catalogue, Sirius first. The southern declinations are off by up to a degree, in the shipped game. |
-| `.wav` | Mostly a lie: 992 of 998 are `WAVCV1.0`, a 28-byte header over an **Interplay ACM** stream — the same codec the Infinity Engine used. Mono 16-bit at 22050 or 11025 Hz. `ffmpeg` decodes the payload. **Every stream the game ships uses the same two codec parameters**, so a decoder needs one configuration and not a family. |
+| `.wav` | Mostly a lie: 992 of 998 are `WAVCV1.0`, a 28-byte header over an **Interplay ACM** stream — the same codec the Infinity Engine used. Mono 16-bit at 22050 or 11025 Hz. The payload is a bit stream: 14 bytes of header, then blocks of `rows × 2^level` values in which each **column** is coded by one of 32 routines named by a 5-bit code, and the block is put through an inverse transform of halving strides. **Every stream the game ships is level 7, rows 16.** Decoded from scratch in [`engine/src/formats/acm.rs`](engine/src/formats/acm.rs). |
 | `.acm`, `.mus` | The music: 27 bare Interplay ACM streams, stereo 22050 Hz, and the Infinity Engine's playlist format beside them — a name, a segment count, and where each segment loops back to. |
 | `.omn` | A recorded demo: `{command, value}` pairs, 0xFFFFFFFF ending each frame and carrying its delta time. 30 fps, controller input rather than positions. |
 
@@ -155,15 +158,16 @@ Reconnaissance through Wine — file traces, apitrace on the GL stream — is in
 ## Checking it
 
 ```bash
-python3 tools/check.py            # 41 checks, about a minute
+python3 tools/check.py            # 43 checks, about a minute
 python3 tools/check.py --quick    # the 7 that need no game files
 python3 tools/check.py --slow     # plus the texture codec, 4205514 blocks
 ```
 
-Fifteen of those hold the **Rust engine against the Python that defines
+Seventeen of those hold the **Rust engine against the Python that defines
 it** — the same texture bytes, the same model numbers, the same collision
-answers, the same scene graphs, the same boot. Anything whose inputs are
-missing is reported as skipped, never as passed.
+answers, the same scene graphs, the same boot — and two hold its audio
+decoder against `ffmpeg`, which is not our code at all. Anything whose inputs
+are missing is reported as skipped, never as passed.
 
 ## Running the tools
 
