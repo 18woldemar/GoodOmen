@@ -165,7 +165,8 @@ SLOW = [
     ("the engine's texture codec matches texdec.py",
      ["sh", "tools/texcheck.sh"], "base"),
     ("the random numbers are the original's",
-     ["rand.py", "--engine", "$MDK2_GOG", "--count", "2000"], None),
+     ["rand.py", "$MDK2_GOG/mdk2Main.exe", "--engine", "$MDK2_GOG",
+      "--count", "2000"], None),
     ("the controller walks every level",
      ["walksim.py", "extracted/base", "--resources", "extracted", "--all",
       "--expect-standing", "2556", "--expect-inside", "6"], "base"),
@@ -245,10 +246,21 @@ def main(argv: list[str] | None = None) -> int:
             if needs is None:
                 # a tool given a path in the game directory; a command that
                 # is not one of our tools brings its own inputs
-                if cmd[0].endswith(".py") and not Path(cmd[1]).exists():
-                    print(f"skip  {label} -- no {cmd[1]}")
-                    skipped += 1
-                    continue
+                if cmd[0].endswith(".py"):
+                    # This rule assumes the tool's first argument is that
+                    # path. When it is a flag instead, the check is
+                    # misconfigured and would skip for ever without anyone
+                    # noticing -- which is exactly what happened to
+                    # `rand.py` the first time it was added here.
+                    if cmd[1].startswith("-"):
+                        print(f"FAIL  {label} -- its first argument is "
+                              f"{cmd[1]}, not a path this can test for")
+                        failed += 1
+                        continue
+                    if not Path(cmd[1]).exists():
+                        print(f"skip  {label} -- no {cmd[1]}")
+                        skipped += 1
+                        continue
             elif needs.startswith("bin:"):
                 if not shutil.which(needs[4:]):
                     print(f"skip  {label} -- {needs[4:]} is not installed")

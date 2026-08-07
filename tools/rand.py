@@ -20,8 +20,8 @@ the PE and calling them is enough. What it produces is the sequence
 `engine/src/game/rand.rs` is checked against.
 
 Usage:
-    python3 tools/rand.py --seed 127 --count 8
-    python3 tools/rand.py --engine "$MDK2_GOG"     # against the engine's
+    python3 tools/rand.py "$MDK2_GOG/mdk2Main.exe" --seed 127 --count 8
+    python3 tools/rand.py "$MDK2_GOG/mdk2Main.exe" --engine "$MDK2_GOG"
 """
 
 from __future__ import annotations
@@ -84,8 +84,11 @@ def sequence(exe: Path, seed: int, count: int) -> list[int]:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
-    ap.add_argument("--exe", type=Path,
-                    default=Path(os.environ.get("MDK2_GOG", ".")) / "mdk2Main.exe")
+    # positional, because `check.py` decides whether a tool can run by
+    # asking whether its first argument is a path that exists
+    ap.add_argument("exe", type=Path, nargs="?",
+                    default=Path(os.environ.get("MDK2_GOG", ".")) / "mdk2Main.exe",
+                    help="mdk2Main.exe (GOG)")
     ap.add_argument("--seed", type=int, default=127,
                     help="127 is what every level start uses")
     ap.add_argument("--count", type=int, default=8)
