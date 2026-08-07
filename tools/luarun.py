@@ -445,6 +445,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tree", type=Path,
                     help="extraction root: makes dofile() work by preparing "
                          "every script in one flat directory first")
+    ap.add_argument("--override", type=Path,
+                    help="the game's override/ directory, which the engine "
+                         "reads in preference to the archives -- it is a "
+                         "shipped patch, and level1.lua differs by 60 lines")
     args = ap.parse_args(argv)
     if args.selftest:
         selftest()
@@ -478,15 +482,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.tree:
         import tempfile
         tmp = Path(tempfile.mkdtemp(prefix="goodomen-lua-"))
-        roots = [d for d in (args.tree / "scripts", args.tree / "base")
-                 if d.is_dir()]
+        roots = [d for d in (args.tree / "scripts", args.tree / "base",
+                             args.override) if d and d.is_dir()]
         count = prepare(roots, tmp, set(args.define))
         stubs = f"LUADIR = [[{tmp}]]\n" + stubs
         print(f"{count} scripts prepared in {tmp}", file=sys.stderr)
+        # the entry script has to come from the prepared tree too, or an
+        # override of it is silently ignored
+        files = [tmp / f.name.lower() if (tmp / f.name.lower()).is_file()
+                 else f for f in files]
 
     ok = bad = 0
     for f in files:
-        source = preprocess(f.read_text(errors="replace"), set(args.define))
+        text = f.read_text(errors="replace")
+        # a prepared file has already been through preprocess()
+        source = (text if args.tree and f.parent == locals().get("tmp")
+                  else preprocess(text, set(args.define)))
         try:
             if args.compile:
                 run("", f"local f = assert(loadstring([==[\n{source}\n]==]))")

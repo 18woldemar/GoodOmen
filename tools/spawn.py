@@ -18,8 +18,11 @@ scene graph places, which come from the scene graph the same script loads. If
 any one of those readings were wrong the checkpoints would hang in the air or
 sit inside a wall.
 
-They very nearly do neither: of the 127 checkpoints across the 10 numbered
-levels, **126 are in open space** and 108 have a floor under them. The
+They very nearly do neither: of the 129 checkpoints across the 10 numbered
+levels, **128 are in open space** and 109 have a floor under them. (129, not
+127: the game's `override/` directory is a shipped patch and its `level1.lua`
+adds two more. Anything that reads only the archives is reading the game as it
+was before the patch -- see `override_dir()`.) The
 exceptions are all explicable. `l7 cp3` is the one genuinely inside geometry.
 The 19 with no floor are cut-scene camera positions parked outside the world
 (`Intro Movie A` at y = -1000, `10-10 End Comic` at 10000, 10000, 10000),
@@ -29,7 +32,7 @@ down, and it has no collision because there is nothing to stand on -- and
 is reached.
 
 **These are also what sized the player.** A body 4 units tall did not fit five
-checkpoints; the smallest headroom over all 127 is 2.9 units. Kurt's model is
+checkpoints; the smallest headroom over all of them is 2.9 units. Kurt's model is
 1.86 units from sole to scalp and Max's 1.72, so a unit is about a metre and
 `mod2html`'s controller now stands 1.7 -- at which every checkpoint but that
 one fits.
@@ -65,9 +68,34 @@ STEP = 0.25        # how finely to march down looking for the floor
 REACH = 200.0      # how far down to look before calling it a shaft
 
 
+def override_dir() -> Path | None:
+    """The game's `override/`, which the engine reads before the archives.
+
+    It is a shipped patch, not a leftover: `level1.lua` there differs from the
+    packed copy by 60 lines, adding two checkpoints and the encounter behind
+    one of them. Anything that reads a script and ignores it is reading the
+    game as it was before the patch.
+    """
+    import os
+    root = os.environ.get("MDK2_GOG")
+    if not root:
+        local = Path(__file__).resolve().parent.parent / ".env.local"
+        if local.is_file():
+            import re
+            m = re.search(r'MDK2_GOG\s*=\s*"?([^"\n#]+)', local.read_text())
+            root = m.group(1).strip() if m else None
+    if not root:
+        return None
+    d = Path(root) / "override"
+    return d if d.is_dir() else None
+
+
 def _lua(root: Path, script: Path, dump: str) -> object:
     cmd = [sys.executable, str(Path(__file__).resolve().parent / "luarun.py"),
            str(script), "--tree", str(root), *BOOT, "--dump", dump]
+    over = override_dir()
+    if over:
+        cmd += ["--override", str(over)]
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode:
         raise RuntimeError(p.stderr.strip().splitlines()[-1])

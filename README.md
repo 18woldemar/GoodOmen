@@ -21,7 +21,7 @@ scratch. The model is OpenMW and devilutionX.
 | `tools/scene.py` | Reads the level scene graphs — every object's type, position, parent and resource. **54 files, 5633 objects, 0 complaints.** |
 | `tools/wavc.py` | The sounds and the music. **992 of the 998 `.wav` files are not RIFF** — they are `WAVCV1.0` over Interplay ACM, the Baldur's Gate codec — and `Music/` is 27 bare ACM streams, 2h 46m of it, with Infinity Engine `.mus` playlists. |
 | `tools/walksim.py` | The viewer's controller, in Python, over every level. **2557 spawn points: 2556 stay standing, 2 ever inside geometry.** |
-| `tools/spawn.py` | The checkpoints a level starts you at, pulled by running its script, and whether each one stands in open space. **127 checkpoints, 126 clear.** |
+| `tools/spawn.py` | The checkpoints a level starts you at, pulled by running its script, and whether each one stands in open space. **129 checkpoints, 128 clear.** |
 | `tools/luarun.py` | Runs the shipped Lua on a stock `lua5.1`. **All 31 scripts run to the end**, and the scene graphs they register match `scene.py` exactly — 5633 objects, no disagreement. |
 | `tools/luaapi.py` | Catalogues the engine functions the shipped Lua calls — **438 of them**, which is the specification the engine has to meet. See [`docs/lua-api.md`](docs/lua-api.md). |
 | `tools/strfile.py` | Reads `.str` — every line of text and the `.wav` that speaks it. **686 entries, 348 voiced, byte-exact**, and the same for all five shipped languages. |

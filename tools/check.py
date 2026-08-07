@@ -60,7 +60,7 @@ CORPUS = [
     ("music playlists parse", ["wavc.py", "$MDK2_GOG/Music", "--playlists"],
      None),
     ("checkpoints stand in open space",
-     ["spawn.py", "extracted", "--all", "--expect", "126"],
+     ["spawn.py", "extracted", "--all", "--expect", "128"],
      "scripts/level1.lua"),
 ]
 
