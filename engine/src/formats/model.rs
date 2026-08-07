@@ -127,6 +127,7 @@ pub struct Animation {
     pub channels: Vec<Channel>,
 }
 
+#[derive(Clone)]
 pub struct Model {
     data: Vec<u8>,
     pub counts: [u16; 12],
@@ -357,6 +358,12 @@ impl Model {
         })
     }
 
+    /// The geometry **as stored**, node-local and unposed, for a renderer
+    /// that will apply each node's transform itself.
+    pub fn local(&self) -> Mesh {
+        self.build(|_, p| [p[0] as f64, p[1] as f64, p[2] as f64])
+    }
+
     /// The same geometry with an animation applied at `t` in [0, 1].
     pub fn animate(&self, anim: &Animation, t: f64) -> Mesh {
         let world = self.node_world(anim, t);
@@ -382,6 +389,7 @@ impl Model {
                     mesh.positions.push(place(ni, v.pos));
                     mesh.uvs.push(v.uv);
                     mesh.resource.push(node.resource);
+                    mesh.node.push(ni as u32);
                 }
                 // a strip, so every odd triangle has its winding flipped
                 let made = mesh.positions.len() as u32 - base;
@@ -517,6 +525,9 @@ pub struct Mesh {
     pub uvs: Vec<[f32; 2]>,
     /// Per vertex, the node's index into [`Model::refs`].
     pub resource: Vec<u8>,
+    /// Per vertex, the node it belongs to. Posing is rigid — one node per
+    /// vertex, no weights — so this is all a shader needs to move it.
+    pub node: Vec<u32>,
     pub triangles: Vec<[u32; 3]>,
 }
 

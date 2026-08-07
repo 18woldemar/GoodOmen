@@ -586,7 +586,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
     let version = video.version();
     let mut scene = Scene::default();
     // SAFETY: the context Video::open made is current on this thread.
-    let (loaded, rooms, checkpoints) = unsafe {
+    let (loaded, rooms, checkpoints, collision) = unsafe {
         goodomen::game::level::start(
             &video.gl,
             &mut install,
@@ -631,10 +631,25 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         use sdl2::event::Event;
         use sdl2::keyboard::{Keycode, Scancode};
         println!("OpenGL {version}\n{summary}");
-        println!("W A S D to move, mouse to look, shift to run, C to turn culling off, escape to leave");
+        println!(
+            "{} -- W A S D, mouse to look, shift to run, C to turn culling off, escape to leave",
+            if std::env::args().any(|a| a == "--walk") {
+                format!("walking, {} trees under foot", collision.len())
+            } else {
+                "flying".to_string()
+            }
+        );
         video.sdl.mouse().set_relative_mouse_mode(true);
-        let mut at = [eye[0] as f64, eye[1] as f64, eye[2] as f64];
+        // `--walk` puts the body on the ground with the controller the demo
+        // replay checks; without it the camera flies.
+        let walk = std::env::args().any(|a| a == "--walk");
+        let mut body = goodomen::game::body::Body::new(
+            [eye[0] as f64, eye[1] as f64, eye[2] as f64],
+            yaw,
+        );
+        let mut at = body.position;
         let mut cull = true;
+        let started = std::time::Instant::now();
         let mut last = std::time::Instant::now();
         loop {
             for event in video.events.poll_iter() {
@@ -657,14 +672,29 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
             let keys: std::collections::HashSet<Scancode> =
                 video.events.keyboard_state().pressed_scancodes().collect();
             let held = |s: Scancode| keys.contains(&s);
-            let speed = if held(Scancode::LShift) { 40.0 } else { 12.0 };
+            let fast = held(Scancode::LShift);
             let (fx, fy) = (yaw.cos(), yaw.sin());
-            if held(Scancode::W) { at = [at[0] + fx * speed * dt, at[1] + fy * speed * dt, at[2]]; }
-            if held(Scancode::S) { at = [at[0] - fx * speed * dt, at[1] - fy * speed * dt, at[2]]; }
-            if held(Scancode::D) { at = [at[0] - fy * speed * dt, at[1] + fx * speed * dt, at[2]]; }
-            if held(Scancode::A) { at = [at[0] + fy * speed * dt, at[1] - fx * speed * dt, at[2]]; }
-            if held(Scancode::Space) { at[2] += speed * dt; }
-            if held(Scancode::LCtrl) { at[2] -= speed * dt; }
+            let mut d = [0.0f64, 0.0];
+            if held(Scancode::W) { d = [d[0] + fx, d[1] + fy]; }
+            if held(Scancode::S) { d = [d[0] - fx, d[1] - fy]; }
+            if held(Scancode::D) { d = [d[0] - fy, d[1] + fx]; }
+            if held(Scancode::A) { d = [d[0] + fy, d[1] - fx]; }
+            if walk {
+                body.step(
+                    &collision,
+                    d,
+                    held(Scancode::Space),
+                    if fast { goodomen::game::body::SPRINT } else { goodomen::game::body::WALK },
+                    dt,
+                );
+                at = body.position;
+            } else {
+                let speed = if fast { 40.0 } else { 12.0 };
+                let length = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1.0);
+                at = [at[0] + d[0] / length * speed * dt, at[1] + d[1] / length * speed * dt, at[2]];
+                if held(Scancode::Space) { at[2] += speed * dt; }
+                if held(Scancode::LCtrl) { at[2] -= speed * dt; }
+            }
 
             // the room under the camera decides what is drawn, every frame
             let here = rooms.at(at);
@@ -687,6 +717,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                     &projection.times(&view),
                     600.0,
                     if cull { visible.as_ref() } else { None },
+                    started.elapsed().as_secs_f64(),
                 )?;
             }
             video.window.gl_swap_window();
@@ -707,9 +738,54 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         let projection = Mat4::perspective(1.1, 1.0, 0.05, 4000.0);
         video.gl.clear_color(0.05, 0.06, 0.09, 1.0);
         video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
-        let culled = scene.draw(&video.gl, &projection.times(&view), 600.0, visible.as_ref())?;
-        let all = scene.draw(&video.gl, &projection.times(&view), 600.0, None)?;
+        // a fixed clock, so the frame the check looks at is the same one
+        // every run: the animations are deterministic in time
+        let culled = scene.draw(&video.gl, &projection.times(&view), 600.0, visible.as_ref(), 0.0)?;
+        let all = scene.draw(&video.gl, &projection.times(&view), 600.0, None, 0.0)?;
         video.gl.finish();
+
+        // The corpus check says the shader's *premise* is right -- node-local
+        // vertices plus one transform per node reproduce `animate()` exactly,
+        // over every vertex of all 1146 animated models. What it cannot say
+        // is that the uniforms reach the shader. Drawing the same frame at
+        // two clocks and requiring it to differ is what says that.
+        let mut first = vec![0u8; (width * height * 4) as usize];
+        video.gl.read_pixels(0, 0, width, height, glow::RGBA, glow::UNSIGNED_BYTE,
+                             glow::PixelPackData::Slice(Some(&mut first)));
+        video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+        scene.draw(&video.gl, &projection.times(&view), 600.0, visible.as_ref(), 0.5)?;
+        video.gl.finish();
+        let mut later = vec![0u8; (width * height * 4) as usize];
+        video.gl.read_pixels(0, 0, width, height, glow::RGBA, glow::UNSIGNED_BYTE,
+                             glow::PixelPackData::Slice(Some(&mut later)));
+        let moved = first
+            .chunks_exact(4)
+            .zip(later.chunks_exact(4))
+            .filter(|(a, b)| a[..3] != b[..3])
+            .count();
+
+        // put the first frame back, so `--save` writes what was measured
+        video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+        scene.draw(&video.gl, &projection.times(&view), 600.0, visible.as_ref(), 0.0)?;
+        video.gl.finish();
+        if let Some(i) = std::env::args().position(|a| a == "--save") {
+            if let Some(path) = std::env::args().nth(i + 1) {
+                let mut pixels = vec![0u8; (width * height * 4) as usize];
+                video.gl.read_pixels(
+                    0, 0, width, height,
+                    glow::RGBA, glow::UNSIGNED_BYTE,
+                    glow::PixelPackData::Slice(Some(&mut pixels)),
+                );
+                let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
+                for row in (0..height).rev() {
+                    for col in 0..width {
+                        let o = ((row * width + col) * 4) as usize;
+                        ppm.extend_from_slice(&pixels[o..o + 3]);
+                    }
+                }
+                std::fs::write(&path, ppm).map_err(|e| e.to_string())?;
+            }
+        }
         target.delete(&video.gl);
         scene.delete(&video.gl);
         if let Some(want) = expect_flag("--expect-drawn") {
@@ -717,8 +793,17 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 return Err(format!("drew {culled} triangles, expected {want}"));
             }
         }
+        if let Some(want) = expect_flag("--expect-moving") {
+            if moved < want {
+                return Err(format!(
+                    "{moved} pixels moved between two clocks, expected at least {want} \
+                     -- the node transforms are not reaching the shader"
+                ));
+            }
+        }
         Ok(format!(
-            "OpenGL {version}: {summary}, drew {culled} of {all} triangles ({:.1}%)",
+            "OpenGL {version}: {summary}, drew {culled} of {all} triangles ({:.1}%), \
+             {moved} pixels move between two clocks",
             100.0 * culled as f64 / all.max(1) as f64
         ))
     }
@@ -889,7 +974,7 @@ fn level(
                 video.gl.viewport(0, 0, w as i32, h as i32);
                 video.gl.clear_color(0.05, 0.06, 0.09, 1.0);
                 video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
-                scene.draw(&video.gl, &projection.times(&view), span * 2.0, None)?;
+                scene.draw(&video.gl, &projection.times(&view), span * 2.0, None, 0.0)?;
             }
             video.window.gl_swap_window();
             let _ = EYE;
@@ -903,7 +988,7 @@ fn level(
         let projection = Mat4::perspective(1.1, 1.0, span * 0.002, span * 4.0);
         video.gl.clear_color(0.05, 0.06, 0.09, 1.0);
         video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
-        scene.draw(&video.gl, &projection.times(&view), span * 2.0, None)?;
+        scene.draw(&video.gl, &projection.times(&view), span * 2.0, None, 0.0)?;
         video.gl.finish();
 
         let mut pixels = vec![0u8; (width * height * 4) as usize];
@@ -1286,6 +1371,7 @@ fn entries_named(install: &Install, extension: &str) -> Vec<(String, usize, usiz
 fn meshes(install: &mut Install, list: bool) -> usize {
     let found = entries_named(install, ".mod");
     let (mut nodes, mut tris, mut animated) = (0usize, 0usize, 0usize);
+    let mut posed = 0usize;
 
     for (name, i, j) in &found {
         let data = match install.containers[*i].read_at(*j) {
@@ -1302,6 +1388,26 @@ fn meshes(install: &mut Install, list: bool) -> usize {
                 std::process::exit(1);
             }
         };
+        // The shader poses a model from its **node-local** vertices and one
+        // transform per node. That is only right if it agrees with
+        // `animate()`, which does the same arithmetic on the CPU -- so ask,
+        // for every animated model, over every vertex.
+        if let Some(anim) = model.animations.first() {
+            let local = model.local();
+            let animated = model.animate(anim, 0.5);
+            let world = model.node_world(anim, 0.5);
+            for k in 0..local.positions.len() {
+                let (q, o) = world[local.node[k] as usize];
+                let r = goodomen::formats::model::rotate(q, local.positions[k]);
+                let want = animated.positions[k];
+                if (0..3).any(|c| (r[c] + o[c] - want[c]).abs() > 1e-6) {
+                    eprintln!("goodomen: {name}: the shader's pose and animate() disagree");
+                    std::process::exit(1);
+                }
+            }
+            posed += 1;
+        }
+
         let mesh = model.posed();
         let mut p = [0.0f64; 3];
         for v in &mesh.positions {
@@ -1340,7 +1446,8 @@ fn meshes(install: &mut Install, list: bool) -> usize {
         }
     }
     eprintln!(
-        "{} models, {animated} animated, {nodes} nodes, {tris} triangles",
+        "{} models, {animated} animated, {nodes} nodes, {tris} triangles, \
+         {posed} checked against the shader's own posing",
         found.len()
     );
     found.len()

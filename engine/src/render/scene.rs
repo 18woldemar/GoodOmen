@@ -22,20 +22,41 @@ use glow::HasContext;
 use std::collections::HashMap;
 
 /// `#version 330 core`, body in the GLES 3.0 subset.
+///
+/// **Posing is rigid**, not skinned: one node per vertex, no weights. So a
+/// vertex needs only its own node's quaternion and offset — two `vec4` of
+/// uniform per node — and the whole model poses here rather than on the CPU.
+/// That is what lets a level animate at all: half of every level moves.
 const VERTEX: &str = r#"#version 330 core
 layout (location = 0) in vec3 position;
 layout (location = 1) in vec2 uv;
+layout (location = 2) in float node;
 uniform mat4 view_projection;
 uniform mat4 model;
+uniform vec4 node_rotation[64];
+uniform vec4 node_offset[64];
 out vec2 vary_uv;
 out float vary_depth;
+
+// (w, x, y, z), the order the models store one in
+vec3 turn(vec4 q, vec3 p) {
+    vec3 v = q.yzw;
+    return p + 2.0 * cross(v, cross(v, p) + q.x * p);
+}
+
 void main() {
-    vec4 world = model * vec4(position, 1.0);
+    int i = int(node);
+    vec3 posed = turn(node_rotation[i], position) + node_offset[i].xyz;
+    vec4 world = model * vec4(posed, 1.0);
     vary_uv = uv;
     gl_Position = view_projection * world;
     vary_depth = gl_Position.w;
 }
 "#;
+
+/// How many nodes fit in the uniform block. A model with more stays in its
+/// bind pose, which is what `tools/mod2html.py` does for the same reason.
+pub const MAX_NODES: usize = 64;
 
 /// No lighting yet: the levels ship static lights as objects and nothing
 /// reads them. A little distance shading instead, so that shape is visible
@@ -77,6 +98,9 @@ pub struct GpuModel {
     /// An animated model's vertices are node-local and have to be placed at
     /// the object; a static one's are already in the world.
     pub animated: bool,
+    /// Kept so the node transforms can be sampled per frame. `None` when the
+    /// model is not posed here — static, or more than [`MAX_NODES`] nodes.
+    posed_here: Option<Model>,
 }
 
 #[derive(Default)]
@@ -91,6 +115,33 @@ pub struct Scene {
     /// all — which is **never culled**, as the original does not cull it.
     rooms: Vec<Option<usize>>,
     pub missing: usize,
+}
+
+/// Every node's transform for animation 0 at `clock`, packed for the shader.
+///
+/// The animation record's float at +8 is a **signed playback rate**, so a
+/// loop lasts `1 / |rate|` — median about 1.5 s — and the sign is the
+/// argument, not a length: 99 of 5165 records are negative and
+/// `omAnimSetSpeed(door, ANIM_OPEN, -1)` is how `elevators.lua` shuts a door
+/// it opened.
+fn node_pose(model: &Model, clock: f64) -> (Vec<f32>, Vec<f32>) {
+    let mut rotation = vec![0.0f32; MAX_NODES * 4];
+    let mut offset = vec![0.0f32; MAX_NODES * 4];
+    for i in 0..MAX_NODES {
+        rotation[i * 4] = 1.0;
+    }
+    let Some(anim) = model.animations.first() else { return (rotation, offset) };
+    let rate = anim.rate.abs() as f64;
+    let t = if rate > 0.0 { (clock * rate).fract() } else { 0.0 };
+    for (i, (q, o)) in model.node_world(anim, t).into_iter().enumerate().take(MAX_NODES) {
+        for c in 0..4 {
+            rotation[i * 4 + c] = q[c] as f32;
+        }
+        for c in 0..3 {
+            offset[i * 4 + c] = o[c] as f32;
+        }
+    }
+    (rotation, offset)
 }
 
 /// Turn a decoded BGRA level into the RGBA GL expects.
@@ -145,8 +196,14 @@ impl Scene {
     /// # Safety
     /// A GL context must be current on this thread.
     unsafe fn upload_model(&mut self, gl: &glow::Context, name: &str, model: &Model) {
-        let mesh = model.posed();
-        let mut data: Vec<f32> = Vec::with_capacity(mesh.triangles.len() * 3 * 5);
+        // A model that poses in the shader sends its vertices **node-local**
+        // and lets the uniforms move them; anything else sends them already
+        // posed and rides on node 0 being the identity.
+        let here = model.animated()
+            && model.nodes.len() <= MAX_NODES
+            && !model.animations.is_empty();
+        let mesh = if here { model.local() } else { model.posed() };
+        let mut data: Vec<f32> = Vec::with_capacity(mesh.triangles.len() * 3 * 6);
         let mut parts: Vec<Part> = Vec::new();
 
         for tri in &mesh.triangles {
@@ -168,7 +225,10 @@ impl Scene {
             for &v in tri {
                 let p = mesh.positions[v as usize];
                 let uv = mesh.uvs[v as usize];
-                data.extend_from_slice(&[p[0] as f32, p[1] as f32, p[2] as f32, uv[0], uv[1]]);
+                let node = if here { mesh.node[v as usize] as f32 } else { 0.0 };
+                data.extend_from_slice(&[
+                    p[0] as f32, p[1] as f32, p[2] as f32, uv[0], uv[1], node,
+                ]);
             }
         }
 
@@ -181,11 +241,13 @@ impl Scene {
             std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(&data[..])),
             glow::STATIC_DRAW,
         );
-        let stride = 5 * std::mem::size_of::<f32>() as i32;
+        let stride = 6 * std::mem::size_of::<f32>() as i32;
         gl.enable_vertex_attrib_array(0);
         gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, stride, 0);
         gl.enable_vertex_attrib_array(1);
         gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, stride, 12);
+        gl.enable_vertex_attrib_array(2);
+        gl.vertex_attrib_pointer_f32(2, 1, glow::FLOAT, false, stride, 20);
 
         self.models.insert(
             name.to_ascii_lowercase(),
@@ -195,6 +257,7 @@ impl Scene {
                 parts,
                 triangles: mesh.triangles.len(),
                 animated: model.animated(),
+                posed_here: here.then(|| model.clone()),
             },
         );
     }
@@ -280,13 +343,16 @@ impl Scene {
     /// A GL context must be current on this thread.
     /// `fade` is the distance at which the debug shading bottoms out; it has
     /// to be scaled to the scene, since a level spans 1558 units and a single
-    /// model two.
+    /// model two. `clock` is seconds since the level started: every animated
+    /// model plays its **animation 0** at its own rate, and the record's
+    /// float at +8 is a signed playback rate, so a loop lasts `1 / |rate|`.
     pub unsafe fn draw(
         &mut self,
         gl: &glow::Context,
         view_projection: &Mat4,
         fade: f32,
         visible: Option<&std::collections::BTreeSet<usize>>,
+        clock: f64,
     ) -> Result<usize, String> {
         let shader = program(gl, VERTEX, FRAGMENT)?;
         if self.blank.is_none() {
@@ -315,6 +381,14 @@ impl Scene {
         let vp = gl.get_uniform_location(shader, "view_projection");
         gl.uniform_matrix_4_f32_slice(vp.as_ref(), false, &view_projection.0);
         let model_at = gl.get_uniform_location(shader, "model");
+        let rotation_at = gl.get_uniform_location(shader, "node_rotation");
+        let offset_at = gl.get_uniform_location(shader, "node_offset");
+        // node 0 as the identity is what an unposed model rides on
+        let identity: Vec<f32> = std::iter::repeat([1.0f32, 0.0, 0.0, 0.0])
+            .take(MAX_NODES)
+            .flatten()
+            .collect();
+        let zero = vec![0.0f32; MAX_NODES * 4];
         let alpha_at = gl.get_uniform_location(shader, "alpha_test");
         gl.uniform_1_f32(
             gl.get_uniform_location(shader, "fade_distance").as_ref(),
@@ -335,6 +409,17 @@ impl Scene {
             let Some(model) = self.models.get(name) else { continue };
             drawn += model.triangles;
             gl.uniform_matrix_4_f32_slice(model_at.as_ref(), false, &transform.0);
+            match &model.posed_here {
+                Some(source) => {
+                    let (rotation, offset) = node_pose(source, clock);
+                    gl.uniform_4_f32_slice(rotation_at.as_ref(), &rotation);
+                    gl.uniform_4_f32_slice(offset_at.as_ref(), &offset);
+                }
+                None => {
+                    gl.uniform_4_f32_slice(rotation_at.as_ref(), &identity);
+                    gl.uniform_4_f32_slice(offset_at.as_ref(), &zero);
+                }
+            }
             gl.bind_vertex_array(Some(model.vao));
             for part in &model.parts {
                 let bound = part

@@ -42,7 +42,9 @@ requires the same answers.
 
 ## What it draws
 
-    ./goodomen --window --level l1.lua   # level 1, textured
+    ./goodomen --window --play 1 1       # level 1 started at checkpoint 1
+    ./goodomen --window --play 1 1 --walk  # ...on foot, with collision
+    ./goodomen --window --level l1.lua   # the scene graph alone, no rooms
     ./goodomen --level l1.lua            # the same frame offscreen, and its pixels checked
     ./goodomen --window                  # a window, and a triangle in it
     ./goodomen --triangle                # the same triangle offscreen, three pixels checked
