@@ -605,6 +605,84 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         })?,
     )?;
 
+    // `mdkGobOnMagicSpot(gob, point, radius, angle)` — 0x43c1a0 into
+    // **0x40f290**, and it is one of the few recorders whose real answer the
+    // engine already has everything for:
+    //
+    //     d = yaw(gob) - point.facing, wrapped into (-PI, PI]
+    //     return dist(gob, point) < radius and |d| < angle
+    //
+    // Both comparisons are strict, and the wrap is two conditional adds of
+    // 2*PI against the constants at 0x48f618 and 0x48f61c. `level3.lua` uses
+    // it to know Doc is standing at a washbasin facing it.
+    globals.set(
+        "mdkGobOnMagicSpot",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let point = args
+                .get(1)
+                .and_then(text)
+                .and_then(|n| lua.globals().get::<mlua::Table>("points").ok()?.get::<mlua::Table>(n).ok());
+            let (Some(name), Some(point)) = (args.first().and_then(gob_name), point) else {
+                return Ok(0.0);
+            };
+            let radius = args.get(2).map(number).unwrap_or(0.0);
+            let angle = args.get(3).map(number).unwrap_or(0.0);
+            let Some(w) = world::world(lua) else { return Ok(0.0) };
+            let Some(gob) = w.find(&name).and_then(|id| w.get(id)) else { return Ok(0.0) };
+            let at = [
+                point.get::<f64>("x").unwrap_or(0.0),
+                point.get::<f64>("y").unwrap_or(0.0),
+                point.get::<f64>("z").unwrap_or(0.0),
+            ];
+            let far = (0..3)
+                .map(|c| (gob.position[c] - at[c]).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            // the waypoint's `f` is degrees in the scene graphs, the gob's
+            // yaw comes out of its quaternion in radians
+            let facing = point.get::<f64>("f").unwrap_or(0.0).to_radians();
+            let q = gob.rotation;
+            let yaw = (2.0 * (q[0] * q[3] + q[1] * q[2]))
+                .atan2(1.0 - 2.0 * (q[2] * q[2] + q[3] * q[3]));
+            let mut d = yaw - facing;
+            if d > std::f64::consts::PI {
+                d -= std::f64::consts::TAU;
+            }
+            if d < -std::f64::consts::PI {
+                d += std::f64::consts::TAU;
+            }
+            Ok(if far < radius && d.abs() < angle { 1.0 } else { 0.0 })
+        })?,
+    )?;
+
+    // Four more getters the scripts compare against a *number*, which is the
+    // shape that makes a recorder's `nil` actively wrong rather than merely
+    // absent — see `omGobIsStasis`, which cost every cutscene in the game.
+    //
+    // `mdkIsCutSceneAllowed` (0x43dd50 into 0x42a9a0) switches on the play
+    // mode and **its default arm returns 1** (0x42a9f6); the four other arms
+    // ask the character's own routine, which is AI the engine does not have.
+    // 1 is therefore both the default and the truthful answer here: nothing
+    // is stopping a cutscene. 54 call sites, the most of any of them.
+    //
+    // `chIsLoadingResources` (0x450a50) counts a queue. Loading here is
+    // synchronous, so the queue is always empty.
+    //
+    // `mdkDialogIsDone` — nothing is speaking, so it is done.
+    //
+    // `mdkDocHasItem(gob, OBJ_*)` — Doc's inventory, which the engine does
+    // not hold. **0 is what a fresh game answers**, so this is right until
+    // there is an inventory and wrong only in the same place a real one
+    // would be.
+    for (name, answer) in [
+        ("mdkIsCutSceneAllowed", 1.0),
+        ("chIsLoadingResources", 0.0),
+        ("mdkDialogIsDone", 1.0),
+        ("mdkDocHasItem", 0.0),
+    ] {
+        globals.set(name, lua.create_function(move |_, _: Variadic<Value>| Ok(answer))?)?;
+    }
+
     // The three scalar getters. The recorder's rule -- a name with Get in
     // it hands back a handle -- is wrong for these, and the handlers do
     // arithmetic on what they return, which is the shape of nearly every
@@ -2088,6 +2166,45 @@ mod tests {
         assert_eq!(walk_animation(0.0, 0.0), "ANIM_DEFAULT");
         // a twitch is not a walk
         assert_eq!(walk_animation(0.01, -0.01), "ANIM_DEFAULT");
+    }
+
+    /// `mdkGobOnMagicSpot` is the one getter of the nine whose real answer
+    /// the engine already had everything for. Both comparisons are strict
+    /// and the angle wraps, so the four cases below are the whole of it.
+    #[test]
+    fn a_gob_is_on_a_magic_spot_only_when_close_and_facing_right() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                // the gob stands a metre from the spot, turned a tenth of
+                // a radian: quaternion (cos(t/2), 0, 0, sin(t/2)) about Z
+                "points.wash = {x = 10, y = 0, z = 0, f = 0}\n\
+                 points.deg  = {x = 10, y = 0, z = 0, f = 5.72958}\n\
+                 mdkRegisterObject('doc', OBJ_NONE, scene, nil, -1, 10,1,0, \
+                 0.99875, 0, 0, 0.04998, nil,0,0,0,0, nil, nil, 0)\n\
+                 near_and_facing = mdkGobOnMagicSpot(doc, 'wash', 3, 1)\n\
+                 too_far         = mdkGobOnMagicSpot(doc, 'wash', 0.5, 1)\n\
+                 turned_away     = mdkGobOnMagicSpot(doc, 'wash', 3, 0.01)\n\
+                 no_such_spot    = mdkGobOnMagicSpot(doc, 'nowhere', 3, 1)\n\
+                 -- 5.72958 degrees IS a tenth of a radian, so the gob is\n\
+                 -- exactly on this one and the tightest angle passes\n\
+                 spot_in_degrees = mdkGobOnMagicSpot(doc, 'deg', 3, 0.001)",
+            )
+            .exec()
+            .unwrap();
+        let g = scripts.lua.globals();
+        assert_eq!(g.get::<f64>("near_and_facing").unwrap(), 1.0);
+        assert_eq!(g.get::<f64>("too_far").unwrap(), 0.0, "distance is strict");
+        assert_eq!(g.get::<f64>("turned_away").unwrap(), 0.0, "so is the angle");
+        assert_eq!(g.get::<f64>("no_such_spot").unwrap(), 0.0);
+        assert_eq!(
+            g.get::<f64>("spot_in_degrees").unwrap(),
+            1.0,
+            "a waypoint's f is degrees -- the scene graphs write -180.091 and 90.0457 -- \
+             while the angle a script passes is radians (PI/8, 8*PI/4)"
+        );
     }
 
     /// The fog is three separate calls and a level uses all three — this is

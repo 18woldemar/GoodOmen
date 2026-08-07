@@ -186,6 +186,13 @@ ANSWERS = {"chGetGameWasReset": "0", "mdkLoadLevelIsInstant": "0",
            # `omGobIsStasis(self) == 0` before clearing the script flag
            "omGobIsStasis":
                "function(g) return (g and STASIS[g.name]) and 1 or 0 end",
+           # Four the scripts compare against a *number*, which is what
+           # makes a stub's nil actively wrong rather than merely absent.
+           # mdkIsCutSceneAllowed's default arm returns 1 (0x42a9f6);
+           # loading here is synchronous; nothing is speaking; and Doc's
+           # inventory starts empty. See engine/src/game/api.rs.
+           "mdkIsCutSceneAllowed": "1", "chIsLoadingResources": "0",
+           "mdkDialogIsDone": "1", "mdkDocHasItem": "0",
            "mdkGetDifficulty": "0.5",
            "mdkDiffScale": "function(n) return n end"}
 
