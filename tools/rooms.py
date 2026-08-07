@@ -152,6 +152,24 @@ def rooms(graph: dict, objects: dict, others: dict | None = None) -> dict:
     return out
 
 
+def track(music) -> str | None:
+    """The music a room asks for, as the file it names. -> "Track18" or None.
+
+    `mdkRoomSetMusic(room, 18)` and `chSndSwitchMusic(18)` both mean
+    `Music/Track18`, and the mapping is the identity rather than an offset:
+    **the highest index anything uses is 27, and Track27 is the last that
+    exists** -- there is no Track28 for an off-by-one to land on. 27 is also
+    `StartFunnyTrack()`, the joke that plays at the end of the game if the
+    language is English, which is where the last track belongs.
+
+    Rooms use 1-5, 8-20 and 22-25; the scripts add 7 and 27; 0 and -1 mean
+    stop. Only Track06, Track21 and Track26 are never named by either.
+    """
+    if music is None or music <= 0:
+        return None
+    return f"Track{int(music):02d}"
+
+
 HANDLER = re.compile(r"^\s*([A-Za-z_]\w*)\.(On\w+)\s*=\s*function", re.M)
 
 
@@ -283,7 +301,8 @@ def main(argv: list[str] | None = None) -> int:
                                  ("L", r["load"]), ("M", r["music"]),
                                  ("C", r["checkpoint"])) if on)
                 print(f"{name:24s} {flags:5s} sees {len(r['visible']):3d}"
-                      + (f"  music {r['music']}" if r["music"] else ""))
+                      + (f"  {track(r['music']) or 'music off'}"
+                         if r["music"] else ""))
         print(f"l{n}: {len(table)} rooms, {len(dead_here)} dead names, "
               f"{len(boxless)} live but boxless, "
               f"{sum(len(r['visible']) for r in table.values())} visibility links, "

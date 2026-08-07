@@ -495,6 +495,11 @@ function frame(){
       .filter(r => ROOMS[r] && ROOMS[r].on.length)
       .map(r => r + '.' + ROOMS[r].on.join(', ' + r + '.'));
     if (on.length) log.unshift('→ ' + on.join(' · '));
+    // the track the room asks for: mdkRoomSetMusic(room, 18) means
+    // Music/Track18, see rooms.track()
+    const mus = hereName.split(' + ')
+      .map(r => ROOMS[r] && ROOMS[r].music).filter(Boolean);
+    if (mus.length) log.unshift('♪ ' + mus.join(', '));
     lastRoom = hereName;
     document.getElementById('events').textContent = log.slice(0, 4).join('\n');
   }
@@ -612,7 +617,8 @@ def _rooms(graph_path: Path, resources: Path) -> dict | None:
         return None
     return {name: {"box": (r["box"][0] + r["box"][1]) if r["box"] else None,
                    "vis": rm.visible_from(table, name),
-                   "on": hooks.get(name, [])}
+                   "on": hooks.get(name, []),
+                   "music": rm.track(r["music"])}
             for name, r in table.items() if r["live"]}
 
 

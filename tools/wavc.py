@@ -146,6 +146,30 @@ def _data_chunk(wav: bytes) -> int:
     raise WavcError("no data chunk")
 
 
+def segment_file(root: Path, name: str, tag: str) -> Path | None:
+    """Where a playlist entry's audio actually is, or None.
+
+    `Music/Track01.mus` says `A   Track01 A`, and the stream is
+    `Music/Track01/track01a.acm` -- the directory and the tag concatenated,
+    under a directory of the same name. The case on disk is not consistent
+    (`track01a.acm` beside `Track18a.acm`), so the lookup has to be
+    case-insensitive.
+    """
+    want = (name + tag + ".acm").lower()
+    folder = root / name
+    if not folder.is_dir():
+        for d in root.iterdir():
+            if d.is_dir() and d.name.lower() == name.lower():
+                folder = d
+                break
+        else:
+            return None
+    for f in folder.iterdir():
+        if f.name.lower() == want:
+            return f
+    return None
+
+
 def playlist(path: Path) -> dict:
     """Read a `.mus`: a name, a segment count, then one line per segment."""
     lines = [l.strip() for l in path.read_text(errors="replace").splitlines()
@@ -178,15 +202,21 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.playlists:
         mus = sorted(args.src.rglob("*.mus"))
-        total = 0
+        total = found = 0
         for m in mus:
             pl = playlist(m)
             total += len(pl["segments"])
+            where = [segment_file(m.parent, s["directory"], s["tag"])
+                     for s in pl["segments"]]
+            found += sum(1 for w in where if w)
             print("  " + f"{pl['name']:12s} " + ", ".join(
-                f"{s['tag']} -> {s['directory']}, loops to {s['loops_to']}"
-                for s in pl["segments"]))
-        print(f"{total} segments in {len(mus)} playlists", file=sys.stderr)
-        return 0
+                f"{s['tag']} -> {w.name if w else 'MISSING'}"
+                f", loops to {s['loops_to']}"
+                for s, w in zip(pl["segments"], where)))
+        # parsing a playlist is not reading it: follow the names to the files
+        print(f"{total} segments in {len(mus)} playlists, "
+              f"{found} resolve to a stream", file=sys.stderr)
+        return 0 if found == total else 1
 
     if args.src.is_dir():
         files = (sorted(args.src.rglob("*.wav"))
