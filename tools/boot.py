@@ -196,7 +196,7 @@ end
 local function fire(gob, slot)
   local fn = type(gob) == "table" and gob[slot]
   if type(fn) ~= "function" then return end
-  local ok, err = pcall(fn, gob, gob, 1, "DAMAGE_NORMAL", 1)
+  local ok, err = pcall(fn, gob, gob, 1, DAMAGE_GOODGUY, 1)
   note(slot .. "|" .. (ok and "" or tostring(err)))
 end
 local function roomAt(x, y, z)
@@ -387,7 +387,7 @@ for _, job in ipairs(JOBS) do
         sort(slots)
         for j = 1, table.getn(slots) do
           local fine, ferr = pcall(gob[slots[j]], gob, gob, 1,
-                                   "DAMAGE_NORMAL", 1)
+                                   DAMAGE_GOODGUY, 1)
           local k = slots[j] .. "|" .. (fine and "" or tostring(ferr))
           FIRED[k] = (FIRED[k] or 0) + 1
         end

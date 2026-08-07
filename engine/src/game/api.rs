@@ -104,6 +104,13 @@ pub const OBJ_STATICLIGHT: f64 = 802.0;
 /// here because the renderer asks for it by meaning, not by number.
 pub const OBJ_ROOM: f64 = 803.0;
 
+/// `DAMAGE_GOODGUY`, out of the binary's own constant table — 1, the low bit
+/// of the 13 `DAMAGE_*` flags, and half of the filter of 9 every enemy is
+/// built with. It is what the driver hands an `OnDamage` handler as a probe:
+/// **there is no `DAMAGE_NORMAL`**, which is what stood here until the damage
+/// path became real and started reading the argument.
+pub const DAMAGE_GOODGUY: f64 = 1.0;
+
 /// `OBJ_AMBIENTSOUND`, whose `resource` slot names a `.wav` rather than a
 /// model, and whose payload is (near distance, far distance, ?, volume).
 pub const OBJ_AMBIENTSOUND: f64 = 1101.0;
@@ -216,6 +223,10 @@ pub struct Boot {
     /// Registered names with no behaviour here yet, and how often the boot
     /// called each.
     pub unimplemented: BTreeMap<String, usize>,
+    /// Everything that has been killed, in the order it died. A name can
+    /// appear only once: the built-in refuses to hit something already at
+    /// zero, so `OnDie` fires exactly once per object.
+    pub died: Vec<String>,
     /// `spawner name -> what it makes and when`. See [`Spawner`].
     pub spawners: BTreeMap<String, Spawner>,
     /// Every object a spawner has put in the world, in the order it did, and
@@ -870,6 +881,59 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         })?,
     )?;
 
+    // --- damage, and dying ----------------------------------------------
+    // `mdkDealDamage(source, victim, amount, type, part)` — 0x43bb20 into
+    // 0x40e660, and the argument order is the scripts' own: 48 call sites,
+    // all of them `mdkDealDamage(what did it, what took it, how much, a
+    // DAMAGE_ mask, -1)`.
+    globals.set(
+        "mdkDealDamage",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            deal_damage(
+                lua,
+                args.first().cloned(),
+                args.get(1).cloned().unwrap_or(Value::Nil),
+                args.get(2).map(number).unwrap_or(0.0) as i64,
+                args.get(3).map(number).unwrap_or(0.0) as i64,
+                args.get(4).map(number).unwrap_or(-1.0) as i64,
+                true,
+            )
+        })?,
+    )?;
+    // The built-in reaction, exposed so that a script's own `OnDamage` can
+    // hand the damage back to it — which is exactly what these three are
+    // for, and why they take the handler's own five arguments.
+    //
+    // **These are the walker's, the grunt's and the decoy's, and the engine
+    // gives all three the same behaviour**: the shared part, from the class
+    // handler at 0x424f60. The walker's real one (0x430a60) then adds AI —
+    // it refuses damage from its own kind's shots and picks a reaction per
+    // type — and none of that is here. The ceiling is stated rather than
+    // hidden: an enemy loses the right hitpoints and dies at the right time,
+    // and does not flinch or turn.
+    for name in [
+        "mdkWalkerDefaultOnDamage",
+        "mdkGruntOnDamage",
+        "mdkDecoyDefaultOnDamage",
+    ] {
+        globals.set(
+            name,
+            lua.create_function(|lua, args: Variadic<Value>| {
+                deal_damage(
+                    lua,
+                    args.get(1).cloned(),
+                    args.first().cloned().unwrap_or(Value::Nil),
+                    args.get(2).map(number).unwrap_or(0.0) as i64,
+                    args.get(3).map(number).unwrap_or(0.0) as i64,
+                    args.get(4).map(number).unwrap_or(-1.0) as i64,
+                    // it is being called *from* OnDamage, so asking the
+                    // victim for OnDamage again would recurse for ever
+                    false,
+                )
+            })?,
+        )?;
+    }
+
     // --- the spawners ---------------------------------------------------
     // Between them the four are 2246 calls in a boot of all ten levels, and
     // they are what puts an enemy in a room: nothing in a scene graph is one.
@@ -1200,6 +1264,93 @@ fn change_gob<T>(lua: &Lua, v: Option<&Value>, f: impl FnOnce(&mut world::World,
     Some(f(&mut w, id))
 }
 
+/// Deal damage, from 0x40e660.
+///
+/// The structure is the thing, and it is not what a reimplementation would
+/// invent: **if the victim has an `OnDamage` handler, the script gets the
+/// damage and the built-in never runs.** The engine's own reaction is the
+/// `else` branch, not a step the handler decorates — which is why the game
+/// exposes three `*OnDamage` functions for a handler to call back into.
+///
+/// Three more things are read rather than guessed. **Nothing happens at all
+/// for an amount of zero or less** (0x40e768), and that test comes *before*
+/// the handler, so a script's `OnDamage` never sees a harmless hit. The
+/// **filter is only consulted on the built-in path** (0x40e885) — a script
+/// handler is called whatever the object is vulnerable to. And `part`
+/// reaches Lua as the **name** of a model slot, or `nil` for -1 (0x40e7d8),
+/// not as a number: `level7.lua` compares it against `"SHWANG_PALML"`.
+/// Every one of the 48 call sites in the shipped scripts passes -1.
+fn deal_damage(
+    lua: &Lua,
+    source: Option<Value>,
+    victim: Value,
+    amount: i64,
+    kind: i64,
+    part: i64,
+    scripted: bool,
+) -> mlua::Result<()> {
+    if amount <= 0 {
+        return Ok(());
+    }
+    let Some(name) = gob_name(&victim) else { return Ok(()) };
+    let Ok(gob) = lua.globals().get::<mlua::Table>(name.as_str()) else { return Ok(()) };
+
+    if scripted {
+        if let Ok(handler) = gob.get::<mlua::Function>("OnDamage") {
+            let from = source.unwrap_or(Value::Nil);
+            let slot = match part_name(lua, &name, part)? {
+                Some(s) => Value::String(lua.create_string(&s)?),
+                None => Value::Nil,
+            };
+            let _ = handler.call::<Value>((gob, from, amount, kind, slot));
+            return Ok(());
+        }
+    }
+
+    let hit = {
+        let mut w = world::world_mut(lua).ok_or_else(|| mlua::Error::runtime("no world"))?;
+        let Some(id) = w.find(&name) else { return Ok(()) };
+        // the filter gates the built-in path and only that
+        match w.get(id) {
+            Some(g) if (g.damage_filter as i64 & kind) == 0 => world::Hit::Ignored,
+            Some(_) => w.take_damage(id, amount.min(i16::MAX as i64) as i16),
+            None => world::Hit::Ignored,
+        }
+    };
+    if hit == world::Hit::Died {
+        die(lua, &name)?;
+    }
+    Ok(())
+}
+
+/// `OnDie(gob, 1)`, from 0x40e1b0 — **two arguments**, the object and a
+/// literal 1.0 the original pushes as a number.
+fn die(lua: &Lua, name: &str) -> mlua::Result<()> {
+    boot_mut(lua)?.died.push(name.to_string());
+    if let Ok(gob) = lua.globals().get::<mlua::Table>(name) {
+        if let Ok(handler) = gob.get::<mlua::Function>("OnDie") {
+            let _ = handler.call::<Value>((gob, 1.0));
+        }
+    }
+    Ok(())
+}
+
+/// The name a model slot index stands for, which is what an `OnDamage`
+/// handler is given. The engine learns slot names from the scripts' own
+/// `omGobGMGetSltIndexByName` calls, so it can only answer for a slot some
+/// script has already asked about — and since every shipped call site passes
+/// -1, that has never yet been asked of it.
+fn part_name(lua: &Lua, gob: &str, part: i64) -> mlua::Result<Option<String>> {
+    if part < 0 {
+        return Ok(None);
+    }
+    Ok(boot_ref(lua)?
+        .slots
+        .get(gob)
+        .and_then(|names| names.get(part as usize))
+        .cloned())
+}
+
 /// Make one object from a spawner's definition, register it, and hand back
 /// its Lua table. `None` if the spawner has no definition — the original
 /// tests `sp[0] == 0` and returns null, which is what a script that queues a
@@ -1361,7 +1512,7 @@ pub fn fire_events(
             fired += 1;
             // the arguments the handlers between them expect: the object
             // twice, a number, a damage kind, and another number
-            match handler.call::<Value>((gob.clone(), gob.clone(), 1, "DAMAGE_NORMAL", 1)) {
+            match handler.call::<Value>((gob.clone(), gob.clone(), 1, DAMAGE_GOODGUY, 1)) {
                 Ok(_) => survived += 1,
                 Err(e) => {
                     // the message without its position, so the same fault in
@@ -1444,7 +1595,7 @@ impl Ticking {
         let entry = self.fired.entry(slot.to_string()).or_insert((0, 0));
         entry.0 += 1;
         if handler
-            .call::<Value>((gob.clone(), gob.clone(), 1, "DAMAGE_NORMAL", 1))
+            .call::<Value>((gob.clone(), gob.clone(), 1, DAMAGE_GOODGUY, 1))
             .is_ok()
         {
             entry.1 += 1;
@@ -1641,6 +1792,106 @@ mod tests {
         assert_eq!(walk_animation(0.0, 0.0), "ANIM_DEFAULT");
         // a twitch is not a walk
         assert_eq!(walk_animation(0.01, -0.01), "ANIM_DEFAULT");
+    }
+
+    /// A grunt is 40 hitpoints on Hard and `DAMAGE_GOODGUY` is 1, which is
+    /// in its filter of 9. Nothing in a boot reaches this path, because a
+    /// boot fires `OnDamage` with a probe rather than a real hit.
+    #[test]
+    fn damage_takes_hitpoints_and_the_last_of_them_kills() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('gen', OBJ_NONE, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkSpawnerSetSpawnedObject(gen, OBJ_GRUNT, nil, 0,0,0,0, 1, nil)\n\
+                 g = mdkSpawnerSpawnObject(gen)\n\
+                 dead = 0\n\
+                 g.OnDie = function(gob, n) dead = n end\n\
+                 mdkDealDamage(gen, g, 39, DAMAGE_GOODGUY, -1)\n\
+                 left = mdkGetHitpoints(g)\n\
+                 mdkDealDamage(gen, g, 1, DAMAGE_GOODGUY, -1)\n\
+                 after = mdkGetHitpoints(g)\n\
+                 mdkDealDamage(gen, g, 100, DAMAGE_GOODGUY, -1)",
+            )
+            .exec()
+            .unwrap();
+        let g = scripts.lua.globals();
+        assert_eq!(g.get::<f64>("left").unwrap(), 1.0, "40 - 39");
+        assert_eq!(g.get::<f64>("after").unwrap(), 0.0, "hitpoints clamp at zero");
+        assert_eq!(g.get::<f64>("dead").unwrap(), 1.0, "OnDie(gob, 1), not OnDie(gob)");
+        // the third hit found it already dead, so OnDie fired once
+        assert_eq!(scripts.lua.app_data_ref::<Boot>().unwrap().died, ["gen_spawn"]);
+    }
+
+    /// The filter gates the built-in path and only that: a kind the object
+    /// is not vulnerable to does nothing, and neither does an amount of zero.
+    #[test]
+    fn the_filter_and_the_amount_both_gate_the_built_in() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('gen', OBJ_NONE, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkSpawnerSetSpawnedObject(gen, OBJ_GRUNT, nil, 0,0,0,0, 1, nil)\n\
+                 g = mdkSpawnerSpawnObject(gen)\n\
+                 mdkDealDamage(gen, g, 10, DAMAGE_BADGUY, -1)\n\
+                 wrong_kind = mdkGetHitpoints(g)\n\
+                 mdkDealDamage(gen, g, 0, DAMAGE_GOODGUY, -1)\n\
+                 no_amount = mdkGetHitpoints(g)\n\
+                 mdkGobSetDamageFilter(g, 0)\n\
+                 mdkDealDamage(gen, g, 10, DAMAGE_GOODGUY, -1)\n\
+                 invulnerable = mdkGetHitpoints(g)",
+            )
+            .exec()
+            .unwrap();
+        let g = scripts.lua.globals();
+        for name in ["wrong_kind", "no_amount", "invulnerable"] {
+            assert_eq!(g.get::<f64>(name).unwrap(), 40.0, "{name} should have done nothing");
+        }
+    }
+
+    /// The one that would have been invented backwards: a script's own
+    /// `OnDamage` **replaces** the built-in rather than running beside it,
+    /// and it is called whatever the filter says.
+    #[test]
+    fn a_scripted_handler_takes_the_damage_instead_of_the_engine() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('gen', OBJ_NONE, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkSpawnerSetSpawnedObject(gen, OBJ_GRUNT, nil, 0,0,0,0, 1, nil)\n\
+                 g = mdkSpawnerSpawnObject(gen)\n\
+                 seen = 0\n\
+                 part_was = 'unset'\n\
+                 g.OnDamage = function(gob, from, n, kind, part)\n\
+                   seen = seen + n; part_was = part\n\
+                 end\n\
+                 mdkDealDamage(gen, g, 7, DAMAGE_BADGUY, -1)\n\
+                 left = mdkGetHitpoints(g)\n\
+                 mdkWalkerDefaultOnDamage(g, gen, 7, DAMAGE_GOODGUY, -1)\n\
+                 then_left = mdkGetHitpoints(g)",
+            )
+            .exec()
+            .unwrap();
+        let g = scripts.lua.globals();
+        assert_eq!(g.get::<f64>("seen").unwrap(), 7.0, "the handler ran");
+        assert_eq!(g.get::<f64>("left").unwrap(), 40.0, "and the engine did not");
+        assert_eq!(
+            g.get::<Value>("part_was").unwrap(),
+            Value::Nil,
+            "part -1 reaches Lua as nil, not as a number"
+        );
+        // and the default the handler can call back into does hit, without
+        // asking for OnDamage a second time and recursing
+        assert_eq!(g.get::<f64>("then_left").unwrap(), 33.0);
     }
 
     /// A spawner, driven the way `level1.lua` drives one: set it up, queue

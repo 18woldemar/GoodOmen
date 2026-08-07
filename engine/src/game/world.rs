@@ -143,6 +143,16 @@ pub fn diff_scale(difficulty: f32, base: i32) -> i32 {
 /// `DAMAGE_GOODGUY | DAMAGE_SNIPER`, the two kinds an enemy is hurt by.
 pub const FILTER_GOODGUY_SNIPER: i16 = 9;
 
+/// What [`World::take_damage`] did, which is what decides whether `OnDie`
+/// fires.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hit {
+    /// Invulnerable, or already dead. Nothing happened at all.
+    Ignored,
+    Hurt,
+    Died,
+}
+
 #[derive(Default)]
 pub struct World {
     gobs: Vec<Gob>,
@@ -250,6 +260,22 @@ impl World {
             return;
         }
         gob.hitpoints = gob.hitpoints.saturating_add(n).min(gob.max_hitpoints);
+    }
+
+    /// What a hit did.
+    ///
+    /// Read off the class damage handler at **0x424f60** — the shortest of
+    /// the eleven the class table at 0x49bc58 holds, and the shape they
+    /// share. Two guards come before the arithmetic and both matter: a
+    /// **filter of zero is invulnerable** and something **already at zero
+    /// hitpoints is not hit again**, so a corpse cannot be killed twice and
+    /// `OnDie` fires once.
+    pub fn take_damage(&mut self, id: Id, amount: i16) -> Hit {
+        let Some(gob) = self.gobs.get(id as usize) else { return Hit::Ignored };
+        if gob.damage_filter == 0 || gob.hitpoints <= 0 {
+            return Hit::Ignored;
+        }
+        if self.hurt(id, amount) { Hit::Died } else { Hit::Hurt }
     }
 
     pub fn generation(&self) -> u64 {

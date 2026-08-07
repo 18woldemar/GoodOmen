@@ -582,7 +582,7 @@ fn boot(
     let (mut commands, mut bindings, mut stasis, mut timers) = (0usize, 0usize, 0usize, 0usize);
     let (mut fired, mut survived) = (0usize, 0usize);
     let (mut moves, mut playing) = (0u64, 0usize);
-    let (mut spawners, mut spawned, mut armed) = (0usize, 0usize, 0usize);
+    let (mut spawners, mut spawned, mut armed, mut died) = (0usize, 0usize, 0usize, 0usize);
     let mut why: std::collections::BTreeMap<String, usize> = Default::default();
     let mut faults: std::collections::BTreeSet<u32> = Default::default();
     let mut resources = std::collections::BTreeSet::new();
@@ -639,6 +639,7 @@ fn boot(
                     spawners += b.spawners.len();
                     spawned += b.spawned.len();
                     armed += b.spawned.iter().filter(|(_, hp)| *hp > 0).count();
+                    died += b.died.len();
                     for (name, count) in &b.unimplemented {
                         *work.entry(name.clone()).or_insert(0) += count;
                     }
@@ -691,6 +692,7 @@ fn boot(
         // every spawned object is an enemy, so every one should arrive with
         // hitpoints; a gap here means a type the table at 0x4ab2e8 misses
         ("of them with hitpoints", armed, expect_flag("--expect-armed")),
+        ("objects killed", died, expect_flag("--expect-died")),
     ] {
         if let Some(want) = want {
             if got != want {
@@ -720,7 +722,7 @@ fn boot(
             format!(
                 ", {survived} of {fired} handler calls ran to the end, \
                  {moves} object moves, {playing} animations chosen, \
-                 {spawned} objects spawned ({armed} with hitpoints) and \
+                 {spawned} objects spawned ({armed} with hitpoints), {died} killed and \
                  {} sounds hung on objects and played {plays} times",
                 attached.len()
             )
