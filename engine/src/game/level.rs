@@ -122,7 +122,7 @@ pub unsafe fn start(
         .map(|(_, g)| crate::render::scene::Light::from_payload(g.position, g.payload))
         .collect();
 
-    let placements: Vec<(String, Mat4, Option<usize>)> = w
+    let placements: Vec<(String, Mat4, Option<usize>, world::Id)> = w
         .iter()
         .filter_map(|(id, gob)| {
             let resource = gob.resource.clone()?;
@@ -140,6 +140,7 @@ pub unsafe fn start(
                     gob.rotation[3] as f32,
                 ])),
                 room_of(id),
+                id,
             ))
         })
         .collect();
@@ -152,13 +153,18 @@ pub unsafe fn start(
 
     let mut placed = 0;
     let mut without_a_model = 0;
-    for (resource, transform, room) in placements {
+    for (resource, transform, room, id) in placements {
         if !scene.load(gl, install, &resource) {
             without_a_model += 1;
             continue;
         }
         let animated = scene.is_animated(&resource);
-        scene.place(&resource, if animated { transform } else { Mat4::IDENTITY }, room);
+        scene.place(
+            &resource,
+            if animated { transform } else { Mat4::IDENTITY },
+            room,
+            Some(id),
+        );
         placed += 1;
     }
 
@@ -227,7 +233,7 @@ pub unsafe fn load(
         }
         // static models are already in the world; only animated ones move
         let animated = scene.is_animated(&resource);
-        scene.place(&resource, if animated { transform } else { Mat4::IDENTITY }, None);
+        scene.place(&resource, if animated { transform } else { Mat4::IDENTITY }, None, None);
         placed += 1;
     }
     let _ = before;

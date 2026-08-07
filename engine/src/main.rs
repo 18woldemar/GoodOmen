@@ -334,6 +334,7 @@ fn boot(
     let (mut started, mut rooms, mut checkpoints) = (0usize, 0usize, 0usize);
     let (mut commands, mut bindings, mut stasis, mut timers) = (0usize, 0usize, 0usize, 0usize);
     let (mut fired, mut survived) = (0usize, 0usize);
+    let (mut moves, mut playing) = (0u64, 0usize);
     let mut why: std::collections::BTreeMap<String, usize> = Default::default();
     let mut faults: std::collections::BTreeSet<u32> = Default::default();
     let mut resources = std::collections::BTreeSet::new();
@@ -378,6 +379,8 @@ fn boot(
                     started += 1;
                     resources.extend(b.resources.iter().cloned());
                     sounds.extend(b.sounds.iter().cloned());
+                    moves += b.moves;
+                    playing += b.playing.len();
                     for (name, count) in &b.unimplemented {
                         *work.entry(name.clone()).or_insert(0) += count;
                     }
@@ -450,7 +453,10 @@ fn boot(
         sounds.len(),
         work.len(),
         if events {
-            format!(", {survived} of {fired} handler calls ran to the end")
+            format!(
+                ", {survived} of {fired} handler calls ran to the end, \
+                 {moves} object moves and {playing} animations chosen"
+            )
         } else {
             String::new()
         }
@@ -513,10 +519,14 @@ fn run_one_with(
     } else {
         (0, 0, Default::default())
     };
-    let boot = scripts
+    let moved = goodomen::game::world::world(&scripts.lua)
+        .map(|w| w.generation())
+        .unwrap_or(0);
+    let mut boot = scripts
         .lua
         .remove_app_data::<api::Boot>()
         .ok_or_else(|| "no boot state".to_string())?;
+    boot.moves = moved;
     Ok((boot, fired, survived, reasons))
 }
 
@@ -674,6 +684,12 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         api::tick(&scripts, &rooms, body.position, dt, &mut state).map_err(|e| e.to_string())?;
     }
 
+    // what the scripts actually did to the world while it ran
+    let (moved, playing) = {
+        let w = world::world(&scripts.lua).expect("a world");
+        let boot = scripts.lua.app_data_ref::<api::Boot>().expect("boot state");
+        (w.generation(), boot.playing.len())
+    };
     let (fired, survived) = state.total();
     let mut slots: Vec<String> = state
         .fired
@@ -695,7 +711,8 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     Ok(format!(
         "l{number} cp{checkpoint}: {steps} ticks of {seconds:.0}s on {} input, \
          travelled {:.0} units, met a wall on {} frames, inside geometry on {}, \
-         {} rooms entered, {survived} of {fired} handler calls ran to the end [{}]",
+         {} rooms entered, {survived} of {fired} handler calls ran to the end, \
+         {moved} object moves, {playing} animations chosen [{}]",
         if recorded { "the game's own recorded" } else { "held-forwards" },
         body.travelled,
         body.hits,
@@ -870,6 +887,15 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 goodomen::game::api::tick(&level_scripts, &rooms, at, dt, &mut ticking)
             {
                 eprintln!("goodomen: {e}");
+            }
+
+            // the drawn world follows the arena: an object the scripts moved
+            // moves on screen, and one told to play an animation plays it
+            if let (Some(w), Some(boot)) = (
+                goodomen::game::world::world(&level_scripts.lua),
+                level_scripts.lua.app_data_ref::<goodomen::game::api::Boot>(),
+            ) {
+                scene.follow(&w, &boot.playing);
             }
 
             // the room under the camera decides what is drawn, every frame

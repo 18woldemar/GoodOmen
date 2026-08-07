@@ -57,6 +57,8 @@ pub struct World {
     /// Name to id, **last registration winning**, because that is what
     /// `_G[name] = gob` does.
     by_name: std::collections::HashMap<String, Id>,
+    /// Bumped by every move, so nothing has to diff the world to notice one.
+    generation: u64,
 }
 
 impl World {
@@ -69,6 +71,24 @@ impl World {
         self.by_name.insert(gob.name.clone(), id);
         self.gobs.push(gob);
         id
+    }
+
+    /// Move an object. The scripts do this through `mdkGobSetPosition` and
+    /// `mdkGobSetPositionXYZ`, and it is what makes a door a door.
+    ///
+    /// The **generation** counts every move, so a renderer can tell whether
+    /// anything has happened without comparing every transform.
+    pub fn set_position(&mut self, id: Id, at: [f64; 3]) {
+        if let Some(gob) = self.gobs.get_mut(id as usize) {
+            if gob.position != at {
+                gob.position = at;
+                self.generation += 1;
+            }
+        }
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn get(&self, id: Id) -> Option<&Gob> {

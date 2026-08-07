@@ -141,6 +141,11 @@ pub struct Boot {
     pub input: Input,
     /// The gob the level told the engine is the player, by name.
     pub player: Option<String>,
+    /// `name -> the id of the animation the object is playing`, from
+    /// `omAnimPlay`. An object that has not been told plays animation 0.
+    pub playing: BTreeMap<String, f64>,
+    /// How many times an object was moved while this level ran.
+    pub moves: u64,
     /// Objects frozen until the player arrives — a level holds its encounters
     /// this way, and a boot of all ten puts hundreds there.
     pub stasis: BTreeSet<String>,
@@ -540,6 +545,82 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         })?,
     )?;
 
+    // --- moving things --------------------------------------------------
+    // `mdkGobSetPosition(gob, "l10r2_mbad1")` puts an object on a **named
+    // waypoint**; `mdkGobSetPositionXYZ(gob, x, y, z)` puts it at a point.
+    // Both write the arena and the Lua-side table, because the scripts read
+    // `gob.position.x` straight back -- `boss.lua` does
+    // `mdkGobSetPositionXYZ(v, v.position.x, v.position.y, v.position.z + 0.1)`.
+    globals.set(
+        "mdkGobSetPosition",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let at = match args.get(1) {
+                Some(Value::String(name)) => {
+                    let points = lua.globals().get::<mlua::Table>("points")?;
+                    points
+                        .get::<Option<mlua::Table>>(name.to_string_lossy().to_string())?
+                        .map(|p| {
+                            [
+                                p.get::<f64>(1).unwrap_or(0.0),
+                                p.get::<f64>(2).unwrap_or(0.0),
+                                p.get::<f64>(3).unwrap_or(0.0),
+                            ]
+                        })
+                }
+                other => position(other),
+            };
+            if let (Some(Value::Table(gob)), Some(at)) = (args.first(), at) {
+                place(lua, gob, at)?;
+            }
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "mdkGobSetPositionXYZ",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            if let Some(Value::Table(gob)) = args.first() {
+                let at = [
+                    args.get(1).map(number).unwrap_or(0.0),
+                    args.get(2).map(number).unwrap_or(0.0),
+                    args.get(3).map(number).unwrap_or(0.0),
+                ];
+                place(lua, gob, at)?;
+            }
+            Ok(())
+        })?,
+    )?;
+
+    // `omAnimPlay(door, ANIM_OPEN, ANIMFLAG_NOREWIND + ANIMFLAG_NOTRANS)`
+    // chooses which of a model's animations runs. Until this, everything
+    // played animation 0 -- which is an animation, not a bind pose, so a
+    // door was always mid-swing.
+    globals.set(
+        "omAnimPlay",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            if let Some(name) = args.first().and_then(gob_name) {
+                let id = args.get(1).map(number).unwrap_or(0.0);
+                boot_mut(lua)?.playing.insert(name, id);
+            }
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "omAnimStop",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            if let Some(name) = args.first().and_then(gob_name) {
+                boot_mut(lua)?.playing.remove(&name);
+            }
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "omAnimIsPlaying",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(name) = args.first().and_then(gob_name) else { return Ok(0) };
+            Ok(boot_ref(lua)?.playing.contains_key(&name) as i32)
+        })?,
+    )?;
+
     // --- the checkpoints ------------------------------------------------
     // `mdkSetCheckpoint(n, x, y, z, facing, section)`
     globals.set(
@@ -654,6 +735,21 @@ fn distance(a: Option<&Value>, b: Option<&Value>) -> f64 {
         (Some(a), Some(b)) => (0..3).map(|c| (a[c] - b[c]).powi(2)).sum::<f64>().sqrt(),
         _ => 1e9,
     }
+}
+
+/// Write a position into both halves: the arena, which is the truth, and the
+/// Lua table, which is what the scripts read back.
+fn place(lua: &Lua, gob: &mlua::Table, at: [f64; 3]) -> mlua::Result<()> {
+    if let Some(id) = world::id_of(gob) {
+        if let Some(mut w) = lua.app_data_mut::<world::World>() {
+            w.set_position(id, at);
+        }
+    }
+    let position = lua.create_table()?;
+    position.set("x", at[0])?;
+    position.set("y", at[1])?;
+    position.set("z", at[2])?;
+    gob.set("position", position)
 }
 
 fn boot_mut(lua: &Lua) -> mlua::Result<mlua::AppDataRefMut<'_, Boot>> {

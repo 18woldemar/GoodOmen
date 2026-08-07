@@ -167,7 +167,7 @@ pub struct GpuModel {
     pub animated: bool,
     /// Kept so the node transforms can be sampled per frame. `None` when the
     /// model is not posed here — static, or more than [`MAX_NODES`] nodes.
-    posed_here: Option<Model>,
+    pub(crate) posed_here: Option<Model>,
 }
 
 #[derive(Default)]
@@ -183,6 +183,11 @@ pub struct Scene {
     shader: Option<glow::Program>,
     /// `(model name, its transform)`, in the order the scene graph gave them.
     draws: Vec<(String, Mat4)>,
+    /// The object each draw came from, so a moved object moves on screen.
+    owners: Vec<Option<crate::game::world::Id>>,
+    /// The animation each draw is playing, chosen by `omAnimPlay`. `None`
+    /// means animation 0, which is the game's own default.
+    playing: Vec<Option<f64>>,
     /// The room each draw belongs to, or `None` for an object in no room at
     /// all — which is **never culled**, as the original does not cull it.
     rooms: Vec<Option<usize>>,
@@ -213,13 +218,18 @@ fn face_normal(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> [f32; 3] {
 /// argument, not a length: 99 of 5165 records are negative and
 /// `omAnimSetSpeed(door, ANIM_OPEN, -1)` is how `elevators.lua` shuts a door
 /// it opened.
-fn node_pose(model: &Model, clock: f64) -> (Vec<f32>, Vec<f32>) {
+fn node_pose(model: &Model, chosen: Option<f64>, clock: f64) -> (Vec<f32>, Vec<f32>) {
     let mut rotation = vec![0.0f32; MAX_NODES * 4];
     let mut offset = vec![0.0f32; MAX_NODES * 4];
     for i in 0..MAX_NODES {
         rotation[i * 4] = 1.0;
     }
-    let Some(anim) = model.animations.first() else { return (rotation, offset) };
+    // the animation `omAnimPlay` named, by its id, or animation 0 -- which
+    // is the game's own default and is an animation, not a bind pose
+    let anim = chosen
+        .and_then(|id| model.animations.iter().find(|a| a.id as f64 == id))
+        .or_else(|| model.animations.first());
+    let Some(anim) = anim else { return (rotation, offset) };
     let rate = anim.rate.abs() as f64;
     let t = if rate > 0.0 { (clock * rate).fract() } else { 0.0 };
     for (i, (q, o)) in model.node_world(anim, t).into_iter().enumerate().take(MAX_NODES) {
@@ -405,9 +415,52 @@ impl Scene {
     }
 
     /// Put a loaded model into the draw list at a transform, in a room.
-    pub fn place(&mut self, name: &str, transform: Mat4, room: Option<usize>) {
+    pub fn place(
+        &mut self,
+        name: &str,
+        transform: Mat4,
+        room: Option<usize>,
+        owner: Option<crate::game::world::Id>,
+    ) {
         self.draws.push((name.to_ascii_lowercase(), transform));
         self.rooms.push(room);
+        self.owners.push(owner);
+        self.playing.push(None);
+    }
+
+    /// Follow the world: an object the scripts moved moves on screen, and one
+    /// they told to play an animation plays that one.
+    ///
+    /// Only the models that are **posed here** take a transform from their
+    /// object — a static model's vertices are already in world space, so
+    /// moving it would move it twice.
+    pub fn follow(
+        &mut self,
+        world: &crate::game::world::World,
+        playing: &std::collections::BTreeMap<String, f64>,
+    ) {
+        for i in 0..self.draws.len() {
+            let Some(id) = self.owners[i] else { continue };
+            let Some(gob) = world.get(id) else { continue };
+            self.playing[i] = playing.get(&gob.name).copied();
+            if self
+                .models
+                .get(&self.draws[i].0)
+                .is_some_and(|m| m.posed_here.is_some())
+            {
+                self.draws[i].1 = Mat4::translation([
+                    gob.position[0] as f32,
+                    gob.position[1] as f32,
+                    gob.position[2] as f32,
+                ])
+                .times(&Mat4::rotation([
+                    gob.rotation[0] as f32,
+                    gob.rotation[1] as f32,
+                    gob.rotation[2] as f32,
+                    gob.rotation[3] as f32,
+                ]));
+            }
+        }
     }
 
     pub fn draw_count(&self) -> usize {
@@ -555,7 +608,7 @@ impl Scene {
             // models are static and want the same identity every time
             match &model.posed_here {
                 Some(source) => {
-                    let (rotation, offset) = node_pose(source, clock);
+                    let (rotation, offset) = node_pose(source, self.playing[i], clock);
                     gl.uniform_4_f32_slice(rotation_at.as_ref(), &rotation);
                     gl.uniform_4_f32_slice(offset_at.as_ref(), &offset);
                     unposed = false;
