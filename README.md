@@ -35,7 +35,9 @@ It reads the game out of its own directory — `data/*.zip` first and then
 - **runs one**: the body walks with collision, the driver ticks, and
   `OnEnterRoom`, `OnTimer` and `OnUpdate` fire in the order the scripts
   expect — **11501 of 11958 handler calls run to the end**, which is
-  `tools/boot.py`'s figure to the digit;
+  `tools/boot.py`'s figure to the digit. The player's own object moves with
+  the body, so proximity reaches the scripts: walking about level 6 is enough
+  to make `l6_kermit` start an animation on its own;
 - **draws it**: OpenGL 3.3 core, textured, animated in the vertex shader, lit
   by the level's own `OBJ_STATICLIGHT` objects, and culled by the authored
   room visibility — a median of 15.7% of a level's triangles.
@@ -143,12 +145,12 @@ Reconnaissance through Wine — file traces, apitrace on the GL stream — is in
 ## Checking it
 
 ```bash
-python3 tools/check.py            # 40 checks, about a minute
+python3 tools/check.py            # 41 checks, about a minute
 python3 tools/check.py --quick    # the 7 that need no game files
 python3 tools/check.py --slow     # plus the texture codec, 4205514 blocks
 ```
 
-Fourteen of those hold the **Rust engine against the Python that defines
+Fifteen of those hold the **Rust engine against the Python that defines
 it** — the same texture bytes, the same model numbers, the same collision
 answers, the same scene graphs, the same boot. Anything whose inputs are
 missing is reported as skipped, never as passed.

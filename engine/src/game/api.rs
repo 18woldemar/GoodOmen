@@ -892,6 +892,16 @@ pub fn tick(
     state.clock += dt;
     let globals = scripts.lua.globals();
 
+    // **The player's own object has to move with the body.** Everything this
+    // game triggers, it triggers by proximity: `elevators.lua` opens a door
+    // with `mdkGobDistance(door, mdkGetPlayerGob())`, and the scripts call
+    // `mdkGetPlayerGob` 320 times and `mdkGobDistance` 143. Leave the player
+    // gob at the checkpoint and every one of those measures a distance that
+    // never changes, so nothing in a level ever fires.
+    if let Ok(player) = scripts.lua.named_registry_value::<mlua::Table>("player") {
+        place(&scripts.lua, &player, at)?;
+    }
+
     // the room under the player, and an entry when it changes
     let here = rooms.at(at).first().copied();
     if here != state.room {

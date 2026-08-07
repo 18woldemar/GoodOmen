@@ -685,10 +685,15 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     }
 
     // what the scripts actually did to the world while it ran
-    let (moved, playing) = {
+    let (moved, playing, what) = {
         let w = world::world(&scripts.lua).expect("a world");
         let boot = scripts.lua.app_data_ref::<api::Boot>().expect("boot state");
-        (w.generation(), boot.playing.len())
+        let what: Vec<String> = boot
+            .playing
+            .iter()
+            .map(|(n, id)| format!("{n}:{id}"))
+            .collect();
+        (w.generation(), boot.playing.len(), what)
     };
     let (fired, survived) = state.total();
     let mut slots: Vec<String> = state
@@ -701,6 +706,8 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         ("rooms entered", state.rooms_entered, expect_flag("--expect-rooms")),
         ("handler calls", fired, expect_flag("--expect-events")),
         ("handlers ran to the end", survived, expect_flag("--expect-survived")),
+        ("animations chosen", playing, expect_flag("--expect-playing")),
+        ("object moves", moved as usize, expect_flag("--expect-moves")),
     ] {
         if let Some(want) = want {
             if got != want {
@@ -712,12 +719,13 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         "l{number} cp{checkpoint}: {steps} ticks of {seconds:.0}s on {} input, \
          travelled {:.0} units, met a wall on {} frames, inside geometry on {}, \
          {} rooms entered, {survived} of {fired} handler calls ran to the end, \
-         {moved} object moves, {playing} animations chosen [{}]",
+         {moved} object moves, {playing} animations chosen{} [{}]",
         if recorded { "the game's own recorded" } else { "held-forwards" },
         body.travelled,
         body.hits,
         body.inside,
         state.rooms_entered,
+        if what.is_empty() { String::new() } else { format!(" ({})", what.join(", ")) },
         slots.join(", ")
     ))
 }
