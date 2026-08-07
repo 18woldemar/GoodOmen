@@ -282,6 +282,43 @@ impl World {
         if self.hurt(id, amount) { Hit::Died } else { Hit::Hurt }
     }
 
+    /// Take an object and everything under it out of the world, and say what
+    /// went — the names, so the caller can clear the Lua globals too.
+    ///
+    /// `mdkDestroyRoom` is the only caller and a room's contents are its
+    /// children, so this is a tree. The arena entries stay (ids are handed
+    /// out by position and must not move), but they are emptied and their
+    /// names unindexed: a destroyed room cannot be found, drawn or hit, and
+    /// nothing that held an id gets a different object back.
+    pub fn destroy(&mut self, id: Id) -> Vec<String> {
+        let mut doomed = vec![id];
+        let mut i = 0;
+        while i < doomed.len() {
+            let parent = doomed[i];
+            for (child, gob) in self.gobs.iter().enumerate() {
+                if gob.parent == Some(parent) && !gob.name.is_empty() {
+                    doomed.push(child as Id);
+                }
+            }
+            i += 1;
+        }
+        let mut gone = Vec::with_capacity(doomed.len());
+        for id in doomed {
+            let Some(gob) = self.gobs.get_mut(id as usize) else { continue };
+            let name = std::mem::take(&mut gob.name);
+            if name.is_empty() {
+                continue;
+            }
+            *gob = Gob::default();
+            if self.by_name.get(&name) == Some(&id) {
+                self.by_name.remove(&name);
+            }
+            gone.push(name);
+        }
+        self.generation += 1;
+        gone
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation
     }

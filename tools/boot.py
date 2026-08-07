@@ -177,6 +177,11 @@ ANSWERS = {"chGetGameWasReset": "0", "mdkLoadLevelIsInstant": "0",
            # the difficulty, the other half of every hitpoint. Hard, because
            # that is the setting the binary's enemy table is written for --
            # `mdkDiffScale` doubles the number, so 0.5 is 1x.
+           # the streaming: which rooms a checkpoint frees. Recorded rather
+           # than acted on here, and applied after level() returns.
+           "mdkCheckpointAddDeleteRoom":
+               "function(n, room) DELETES[table.getn(DELETES) + 1] = "
+               "{n, room} end",
            "mdkGetDifficulty": "0.5",
            "mdkDiffScale": "function(n) return n end"}
 
@@ -261,7 +266,9 @@ end
 -- the scripts' own state -- the minigame ship integrates `gob.x = gob.x +
 -- gob.vx*dt` -- so the driver must not squat on it.
 local function _place(name, otype, sc, parent, group, x, y, z)
-  local gob = {name = name, type = otype, __gob = 1,
+  -- the parent is kept because destroying a room takes its contents with
+  -- it, and a room's contents are its children
+  local gob = {name = name, type = otype, __gob = 1, __parent = parent,
                position = {x = x or 0, y = y or 0, z = z or 0}}
   _G[name] = gob
   return gob
@@ -269,6 +276,26 @@ end
 function mdkRegisterObject(name, ...)
   CALLS[table.getn(CALLS) + 1] = "mdkRegisterObject"
   return _place(name, unpack(arg))
+end
+-- 0x441fc0 into 0x42e4a0: the room goes and so does everything under it,
+-- because a room's contents are its children. The scripts call this
+-- directly -- level9.lua on a switch, boss.lua when Zizzy's arena changes --
+-- and the streaming below calls it for a checkpoint's whole delete list.
+function mdkDestroyRoom(room)
+  CALLS[table.getn(CALLS) + 1] = "mdkDestroyRoom"
+  if type(room) ~= "table" or not room.name then return end
+  local doomed, again = {[room.name] = 1}, 1
+  while again == 1 do
+    again = 0
+    for n, g in pairs(_G) do
+      if type(g) == "table" and not doomed[n]
+         and type(rawget(g, "__parent")) == "table"
+         and doomed[g.__parent.name] then
+        doomed[n], again = 1, 1
+      end
+    end
+  end
+  for n in pairs(doomed) do _G[n] = nil end
 end
 function mdkCreateObjectLua(name, ...)
   CALLS[table.getn(CALLS) + 1] = "mdkCreateObjectLua"
@@ -347,7 +374,7 @@ for _, job in ipairs(JOBS) do
       rawset(_G, name, nil)
     end
   end
-  TIMERS, STASIS, CLOCK, ROOM = {}, {}, 0, nil
+  TIMERS, STASIS, CLOCK, ROOM, DELETES = {}, {}, 0, nil, {}
   -- the engine sets these; without them `doloadingscreen` takes neither of
   -- its branches and nothing is preloaded, which is exactly the streaming
   -- half of a level start
@@ -356,6 +383,17 @@ for _, job in ipairs(JOBS) do
   local key = "l" .. job[1] .. " cp" .. job[2]
   if ok then
     BOOTED[table.getn(BOOTED) + 1] = key
+    -- The streaming. `mdkCheckpointAddDeleteRoom(n, room)` names the rooms
+    -- that are gone once checkpoint n is reached (0x42ec20 appends to the
+    -- record at 0x4bba90 + n*36), and starting *at* n means every list up to
+    -- n has already been applied -- see engine/src/game/api.rs `stream`. The
+    -- engine checks that no checkpoint thereby loses its own room; here it is
+    -- done only so that both sides fire the same handlers.
+    for i = 1, table.getn(DELETES) do
+      if DELETES[i][1] <= job[2] then
+        mdkDestroyRoom(DELETES[i][2])
+      end
+    end
     -- `OnCreate` is a step of the load, not a handler to be surveyed. The
     -- original sweeps the whole object tree once at the end of the sequence
     -- (0x42e170, from 0x4012e0) and guards it with bit 0x1000000 in
@@ -395,9 +433,12 @@ for _, job in ipairs(JOBS) do
       end
       sort(names)
       for i = 1, table.getn(names) do
+        -- a handler earlier in the sweep may have destroyed a room, and
+        -- with it objects still on this list; the engine skips them the
+        -- same way
         local gob = _G[names[i]]
         slots = {}
-        for slot, fn in pairs(gob) do
+        for slot, fn in pairs(type(gob) == "table" and gob or {}) do
           if type(fn) == "function" and strfind(slot, "^On")
              and slot ~= "OnCreate" then
             slots[table.getn(slots) + 1] = slot

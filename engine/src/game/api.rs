@@ -81,6 +81,17 @@ pub struct Checkpoint {
     pub position: [f64; 3],
     pub facing: f64,
     pub section: Option<f64>,
+    /// The rooms that are gone once this checkpoint is reached, from
+    /// `mdkCheckpointAddDeleteRoom` — **3199 calls in a boot, the largest
+    /// single entry on the work list**, and between them the whole of the
+    /// game's streaming. The lists are disjoint and every one of them names
+    /// rooms *behind* its checkpoint, which is what a level frees as you walk
+    /// forward. Only six of the ten levels have any.
+    pub delete: Vec<String>,
+    /// `mdkCheckpointSetPrevCheckpoint` — the streaming chain, which is
+    /// **not** the index order: level 2 goes 3 → 5 → 9 → 10, skipping 4
+    /// because 4 is in another section. `mdkSetCheckpoint` defaults it to -1.
+    pub prev: Option<usize>,
 }
 
 /// A command the scripts declare, and the input it answers to.
@@ -223,6 +234,14 @@ pub struct Boot {
     /// Registered names with no behaviour here yet, and how often the boot
     /// called each.
     pub unimplemented: BTreeMap<String, usize>,
+    /// Every object a `mdkDestroyRoom` took out of the world, rooms and
+    /// their contents alike.
+    pub destroyed: Vec<String>,
+    /// Set when streaming destroyed the very room the level is starting in —
+    /// which would mean the delete lists are being applied at the wrong
+    /// moment. It must stay at zero across all 129 checkpoints; see
+    /// [`stream`].
+    pub homeless: usize,
     /// Everything that has been killed, in the order it died. A name can
     /// appear only once: the built-in refuses to hit something already at
     /// zero, so `OnDie` fires exactly once per object.
@@ -1105,7 +1124,52 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 position: [at(1), at(2), at(3)],
                 facing: at(4),
                 section: args.get(5).map(number),
+                // 0x42ebc0 clears the delete list and writes -1 to the
+                // previous-checkpoint field, so a checkpoint set twice keeps
+                // neither
+                delete: Vec::new(),
+                prev: None,
             });
+            Ok(())
+        })?,
+    )?;
+    // `mdkCheckpointAddDeleteRoom(n, room)` — 0x441e60 into 0x42ec20, which
+    // appends the room to the list at +0x14 of checkpoint `n`'s 36-byte
+    // record (the table at 0x4bba90 holds 50 of them).
+    globals.set(
+        "mdkCheckpointAddDeleteRoom",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let n = args.first().map(number).unwrap_or(-1.0);
+            let Some(room) = args.get(1).and_then(gob_name) else { return Ok(()) };
+            let mut boot = boot_mut(lua)?;
+            if let Some(cp) = boot.checkpoints.iter_mut().find(|c| c.index == n) {
+                cp.delete.push(room);
+            }
+            Ok(())
+        })?,
+    )?;
+    // `mdkCheckpointSetPrevCheckpoint(n, prev)` — 0x42ec50, one word at +0x20.
+    globals.set(
+        "mdkCheckpointSetPrevCheckpoint",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let n = args.first().map(number).unwrap_or(-1.0);
+            let prev = args.get(1).map(number).unwrap_or(-1.0);
+            let mut boot = boot_mut(lua)?;
+            if let Some(cp) = boot.checkpoints.iter_mut().find(|c| c.index == n) {
+                cp.prev = if prev >= 0.0 { Some(prev as usize) } else { None };
+            }
+            Ok(())
+        })?,
+    )?;
+    // `mdkDestroyRoom(room)` — 0x441fc0 into 0x42e4a0, which drops the room
+    // from the engine's list of live rooms and then destroys the gob. Here
+    // that is the gob **and everything parented to it**, because a room's
+    // contents are its children and the original destroys a tree.
+    globals.set(
+        "mdkDestroyRoom",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(room) = args.first().and_then(gob_name) else { return Ok(()) };
+            destroy_room(lua, &room)?;
             Ok(())
         })?,
     )?;
@@ -1262,6 +1326,88 @@ fn change_gob<T>(lua: &Lua, v: Option<&Value>, f: impl FnOnce(&mut world::World,
     let mut w = world::world_mut(lua)?;
     let id = w.find(&name)?;
     Some(f(&mut w, id))
+}
+
+/// Destroy a room: the gob, everything parented to it, and their globals.
+///
+/// The Lua tables go too. A script that still holds one would otherwise get a
+/// handle whose `__gob` names an emptied arena slot, which is a subtler
+/// failure than the `nil` the original leaves behind.
+fn destroy_room(lua: &Lua, room: &str) -> mlua::Result<usize> {
+    let gone = {
+        let mut w = world::world_mut(lua).ok_or_else(|| mlua::Error::runtime("no world"))?;
+        let Some(id) = w.find(room) else { return Ok(0) };
+        w.destroy(id)
+    };
+    let globals = lua.globals();
+    for name in &gone {
+        let _ = globals.set(name.as_str(), Value::Nil);
+    }
+    boot_mut(lua)?.destroyed.extend(gone.iter().cloned());
+    Ok(gone.len())
+}
+
+/// Apply the delete lists of every checkpoint up to and including the one the
+/// level is starting at — the game's streaming, done in one step because the
+/// engine arrives at a checkpoint rather than walking to it.
+///
+/// **The trigger is inferred, and the inference has two supports.** The
+/// bookkeeping is read outright (0x42ec20 appends, 0x42ebc0 clears, 0x42e4a0
+/// destroys), but the site that walks a checkpoint's list when it is reached
+/// is not in the binary at all.
+///
+/// It is in `mdk2.lua`, as `DeleteCheckpointRooms(cp)` — which walks
+/// `Level.scenegraph.checkpoints[cp].delete` and calls `mdkDestroyRoom` on
+/// each. **Nothing calls it.** No script does, and its name does not occur in
+/// `mdk2Main.exe`, so it is not a Lua callback either: it is dead code that
+/// BioWare left behind. Dead, but it states the contract — *one* checkpoint's
+/// list, applied when that checkpoint is reached — and arriving at checkpoint
+/// N means having reached every streaming checkpoint before it.
+///
+/// The second support is a check rather than a reading: **all 129 checkpoints
+/// still stand in a room that exists** afterwards, and `--boot` fails if one
+/// does not.
+fn stream(lua: &Lua, checkpoint: f64) -> mlua::Result<()> {
+    let lists: Vec<Vec<String>> = {
+        let boot = boot_ref(lua)?;
+        boot.checkpoints
+            .iter()
+            .filter(|c| c.index <= checkpoint && !c.delete.is_empty())
+            .map(|c| c.delete.clone())
+            .collect()
+    };
+    for rooms in lists {
+        for room in rooms {
+            destroy_room(lua, &room)?;
+        }
+    }
+
+    // and the check: the checkpoint the level is starting at must still be
+    // standing in a room. A room's box comes from the scene graph, which has
+    // already run, so this asks the same question the driver asks every tick.
+    let here: Vec<String> = {
+        let boot = boot_ref(lua)?;
+        let Some(cp) = boot.checkpoints.iter().find(|c| c.index == checkpoint) else {
+            return Ok(());
+        };
+        boot.rooms
+            .iter()
+            .filter(|r| {
+                r.bbox.is_some_and(|b| {
+                    (0..3).all(|i| b[i] <= cp.position[i] && cp.position[i] <= b[i + 3])
+                })
+            })
+            .map(|r| r.name.clone())
+            .collect()
+    };
+    if !here.is_empty() {
+        let w = world::world(lua).ok_or_else(|| mlua::Error::runtime("no world"))?;
+        if !here.iter().any(|n| w.find(n).is_some()) {
+            drop(w);
+            boot_mut(lua)?.homeless += 1;
+        }
+    }
+    Ok(())
 }
 
 /// Deal damage, from 0x40e660.
@@ -1549,6 +1695,7 @@ pub fn level(scripts: &Scripts, number: u32, checkpoint: u32, section: &str) -> 
         ))
         .set_name("level")
         .exec()?;
+    stream(&scripts.lua, checkpoint as f64)?;
     create(scripts)?;
     Ok(())
 }

@@ -583,7 +583,7 @@ fn boot(
     let (mut fired, mut survived) = (0usize, 0usize);
     let (mut moves, mut playing) = (0u64, 0usize);
     let (mut spawners, mut spawned, mut armed, mut died) = (0usize, 0usize, 0usize, 0usize);
-    let mut queued = 0usize;
+    let (mut queued, mut destroyed, mut homeless) = (0usize, 0usize, 0usize);
     let mut why: std::collections::BTreeMap<String, usize> = Default::default();
     let mut faults: std::collections::BTreeSet<u32> = Default::default();
     let mut resources = std::collections::BTreeSet::new();
@@ -641,6 +641,8 @@ fn boot(
                     spawned += b.spawned.len();
                     armed += b.spawned.iter().filter(|(_, hp)| *hp > 0).count();
                     died += b.died.len();
+                    destroyed += b.destroyed.len();
+                    homeless += b.homeless;
                     // spawners a handler has filled but nothing has
                     // drained: a boot fires handlers and never ticks
                     queued += b.spawners.values().filter(|s| s.queue > 0).count();
@@ -697,6 +699,10 @@ fn boot(
         // hitpoints; a gap here means a type the table at 0x4ab2e8 misses
         ("of them with hitpoints", armed, expect_flag("--expect-armed")),
         ("objects killed", died, expect_flag("--expect-died")),
+        ("objects streamed out", destroyed, expect_flag("--expect-destroyed")),
+        // the one that decides whether the delete lists are applied at the
+        // right moment: a checkpoint must never lose its own room
+        ("checkpoints left roomless", homeless, expect_flag("--expect-roomless")),
     ] {
         if let Some(want) = want {
             if got != want {
@@ -718,6 +724,7 @@ fn boot(
          {commands} commands over {bindings} bindings (0 faults), \
          {stasis} objects in stasis, {timers} timers, \
          {spawners} spawners set up ({queued} left queued), \
+         {destroyed} objects streamed out ({homeless} checkpoints left roomless), \
          {} functions called with no behaviour yet{}",
         resources.len(),
         sounds.len(),
