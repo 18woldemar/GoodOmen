@@ -60,7 +60,13 @@ fn main() {
             })
             .map(|(a, _)| std::path::PathBuf::from(a))
             .unwrap_or_else(Install::beside_the_binary);
-        match boot(&root, n, cp, args.iter().any(|a| a == "--work-list")) {
+        match boot(
+            &root,
+            n,
+            cp,
+            args.iter().any(|a| a == "--work-list"),
+            args.iter().any(|a| a == "--events"),
+        ) {
             Ok(line) => println!("{line}"),
             Err(e) => {
                 eprintln!("goodomen: {e}");
@@ -242,7 +248,13 @@ fn main() {
 /// With `n` and `cp` zero it starts **every** level at **every** checkpoint,
 /// which is `tools/boot.py`'s measure and the one that says the sequence not
 /// only runs but can be satisfied.
-fn boot(root: &std::path::Path, n: u32, cp: u32, work_list: bool) -> Result<String, String> {
+fn boot(
+    root: &std::path::Path,
+    n: u32,
+    cp: u32,
+    work_list: bool,
+    events: bool,
+) -> Result<String, String> {
     let mut install = Install::open(root).map_err(|e| e.to_string())?;
     // every script, in one map, so the engine's `dofile` can resolve a bare
     // resource name the way the original's does
@@ -270,6 +282,8 @@ fn boot(root: &std::path::Path, n: u32, cp: u32, work_list: bool) -> Result<Stri
     let levels: Vec<u32> = if n > 0 { vec![n] } else { (1..=10).collect() };
     let (mut started, mut rooms, mut checkpoints) = (0usize, 0usize, 0usize);
     let (mut commands, mut bindings, mut stasis, mut timers) = (0usize, 0usize, 0usize, 0usize);
+    let (mut fired, mut survived) = (0usize, 0usize);
+    let mut why: std::collections::BTreeMap<String, usize> = Default::default();
     let mut faults: std::collections::BTreeSet<u32> = Default::default();
     let mut resources = std::collections::BTreeSet::new();
     let mut sounds = std::collections::BTreeSet::new();
@@ -303,8 +317,13 @@ fn boot(root: &std::path::Path, n: u32, cp: u32, work_list: bool) -> Result<Stri
         stasis += first.stasis.len();
         timers += first.timers.len();
         for number in numbers {
-            match run_one(&sources, level, number, "sectionA") {
-                Ok(b) => {
+            match run_one_with(&sources, level, number, "sectionA", events) {
+                Ok((b, f, s, r)) => {
+                    fired += f;
+                    survived += s;
+                    for (kind, count) in r {
+                        *why.entry(kind).or_insert(0) += count;
+                    }
                     started += 1;
                     resources.extend(b.resources.iter().cloned());
                     sounds.extend(b.sounds.iter().cloned());
@@ -334,6 +353,13 @@ fn boot(root: &std::path::Path, n: u32, cp: u32, work_list: bool) -> Result<Stri
         for (name, count) in ranked {
             println!("{name} {count}");
         }
+        // and why the handlers that stopped, stopped: each kind names state
+        // the engine does not hold yet
+        let mut stopped: Vec<(&String, &usize)> = why.iter().collect();
+        stopped.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        for (kind, count) in stopped.iter().take(20) {
+            println!("stopped {count}\t{kind}");
+        }
     }
     for f in failures.iter().take(10) {
         eprintln!("goodomen: {f}");
@@ -346,6 +372,8 @@ fn boot(root: &std::path::Path, n: u32, cp: u32, work_list: bool) -> Result<Stri
         ("resources", resources.len(), expect_flag("--expect-resources")),
         ("rooms", rooms, expect_flag("--expect-rooms")),
         ("bindings", bindings, expect_flag("--expect-bindings")),
+        ("handler calls", fired, expect_flag("--expect-events")),
+        ("handlers ran to the end", survived, expect_flag("--expect-survived")),
     ] {
         if let Some(want) = want {
             if got != want {
@@ -366,10 +394,15 @@ fn boot(root: &std::path::Path, n: u32, cp: u32, work_list: bool) -> Result<Stri
          ({missing} missing), {rooms} rooms, {checkpoints} checkpoints, \
          {commands} commands over {bindings} bindings (0 faults), \
          {stasis} objects in stasis, {timers} timers, \
-         {} functions called with no behaviour yet",
+         {} functions called with no behaviour yet{}",
         resources.len(),
         sounds.len(),
-        work.len()
+        work.len(),
+        if events {
+            format!(", {survived} of {fired} handler calls ran to the end")
+        } else {
+            String::new()
+        }
     ))
 }
 
@@ -395,6 +428,25 @@ fn run_one(
     checkpoint: u32,
     section: &str,
 ) -> Result<goodomen::game::api::Boot, String> {
+    run_one_with(sources, level, checkpoint, section, false).map(|(b, _, _, _)| b)
+}
+
+/// The same, optionally firing every handler afterwards.
+fn run_one_with(
+    sources: &std::collections::BTreeMap<String, String>,
+    level: u32,
+    checkpoint: u32,
+    section: &str,
+    events: bool,
+) -> Result<
+    (
+        goodomen::game::api::Boot,
+        usize,
+        usize,
+        std::collections::BTreeMap<String, usize>,
+    ),
+    String,
+> {
     use goodomen::game::api;
     use goodomen::game::script::Scripts;
 
@@ -405,10 +457,16 @@ fn run_one(
         .ok_or_else(|| "no mdk2.lua".to_string())?;
     scripts.run("mdk2.lua", boot).map_err(|e| e.to_string())?;
     api::level(&scripts, level, checkpoint, section).map_err(|e| e.to_string())?;
-    scripts
+    let (fired, survived, reasons) = if events {
+        api::fire_events(&scripts).map_err(|e| e.to_string())?
+    } else {
+        (0, 0, Default::default())
+    };
+    let boot = scripts
         .lua
         .remove_app_data::<api::Boot>()
-        .ok_or_else(|| "no boot state".to_string())
+        .ok_or_else(|| "no boot state".to_string())?;
+    Ok((boot, fired, survived, reasons))
 }
 
 /// Replay a recorded demo through the controller and say where the body went.
