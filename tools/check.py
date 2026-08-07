@@ -55,8 +55,13 @@ CORPUS = [
 ]
 
 # needs the game executable and unicorn, so it is opt-in
-SLOW = [("texture codec matches the original",
-         ["texdec.py", "extracted/base", "--check"], "base")]
+SLOW = [
+    ("texture codec matches the original",
+     ["texdec.py", "extracted/base", "--check"], "base"),
+    ("the controller walks every level",
+     ["walksim.py", "extracted/base", "--resources", "extracted", "--all",
+      "--expect-standing", "2556"], "base"),
+]
 
 
 # the slow check imports unicorn, which lives in the project venv
