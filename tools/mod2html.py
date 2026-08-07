@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import re
 import struct
 import sys
 from pathlib import Path
@@ -56,7 +57,7 @@ b{color:#dde}
 <canvas id=c></canvas>
 <div id=hud><b>__TITLE__</b><br>__STATS__<br>drag to look &middot; WASD &middot;
 R/F up-down &middot; shift faster<span id=walkhelp></span><br>
-mode: <b id=mode>flying</b></div>
+mode: <b id=mode>flying</b><span id=roomline></span></div>
 <script>
 const MESH = __MESH__, TEX = __TEX__;
 const gl = document.getElementById('c').getContext('webgl');
@@ -116,6 +117,30 @@ for (const [name, uri] of Object.entries(TEX)) {
 const COLL = __COLL__;
 // the level's own restart points, from Level.scenegraph.checkpoints
 const SPAWNS = __SPAWNS__;
+
+// --- the level's own visibility, when the page was built with a room graph
+// ROOMS[name] = {box: [6], vis: [room names]} -- straight out of
+// Level.scenegraph, see tools/rooms.py. Standing in a room, the engine draws
+// that room and the rooms it lists, and nothing else; level 1 room 1 sees
+// five of the level's fifty-nine. Geometry in no room at all is always
+// drawn, which is what the engine does with a gob it never put in one.
+const ROOMS = __ROOMS__;
+let culling = !!ROOMS, shown = null, hereName = '';
+function visibleRooms(p){
+  if (!ROOMS) return null;
+  let here = [];
+  for (const name in ROOMS){
+    const b = ROOMS[name].box;
+    if (b && p[0] >= b[0] && p[1] >= b[1] && p[2] >= b[2] &&
+             p[0] <= b[3] && p[1] <= b[4] && p[2] <= b[5]) here.push(name);
+  }
+  hereName = here.join(' + ');
+  if (!here.length) return null;          // outside every room: draw it all
+  const set = new Set(['']);              // '' is the geometry in no room
+  for (const name of here)
+    for (const v of ROOMS[name].vis) set.add(v);
+  return set;
+}
 let CF = null, CU = null;
 if (COLL) {
   const buf = bytes(COLL.data).buffer;
@@ -174,6 +199,7 @@ addEventListener('keydown', e => {
     document.getElementById('mode').textContent =
       (walking ? 'walking' : 'flying') + ' \u00b7 ' + s.label;
   }
+  if (e.code === 'KeyC' && ROOMS) culling = !culling;
   if (e.code === 'KeyG' && COLL){
     walking = !walking; vz = 0;
     document.getElementById('mode').textContent =
@@ -279,9 +305,17 @@ function frame(){
   // down first with the depth buffer writing, and the translucent ones after
   // with it read-only -- glass and gradients then show what is behind them
   // instead of being punched out by an alpha test.
+  shown = culling ? visibleRooms(pos) : null;
+  if (ROOMS)
+    document.getElementById('roomline').textContent =
+      ' · room: ' + (hereName || 'none')
+      + (culling ? ' · drawing ' + (shown ? shown.size - 1 : 'all') : '')
+      + (culling ? '' : ' · culling off');
+  const skip = d => shown && !shown.has(d.room);
+
   gl.disable(gl.BLEND); gl.depthMask(true);
   for (const d of MESH.draws)
-    if (!d.blend){
+    if (!d.blend && !skip(d)){
       gl.uniform1f(uCut, 0.35);
       gl.bindTexture(gl.TEXTURE_2D, textures[d.tex] || blank);
       gl.drawArrays(gl.TRIANGLES, d.first, d.count);
@@ -289,7 +323,7 @@ function frame(){
   gl.enable(gl.BLEND); gl.depthMask(false);
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
   for (const d of MESH.draws)
-    if (d.blend){
+    if (d.blend && !skip(d)){
       gl.uniform1f(uCut, 0.02);
       gl.bindTexture(gl.TEXTURE_2D, textures[d.tex] || blank);
       gl.drawArrays(gl.TRIANGLES, d.first, d.count);
@@ -363,9 +397,58 @@ def selftest() -> None:
     print("mod2html.py: self-test passed")
 
 
+def _rooms(graph_path: Path, resources: Path) -> dict | None:
+    """The level's visibility graph, when this scene is one of the ten levels.
+
+    Only `base/lN.lua` has a `scripts/levelN.lua` beside it to read it from;
+    a movie set or a menu scene has none, and the page then draws everything
+    the way it always did.
+    """
+    m = re.fullmatch(r"l(\d+)", graph_path.stem)
+    if not m:
+        return None
+    try:
+        import rooms as rm
+        table, _, _ = rm.load(int(m.group(1)), resources, rm._override(resources))
+    except Exception:
+        return None
+    return {name: {"box": (r["box"][0] + r["box"][1]) if r["box"] else None,
+                   "vis": rm.visible_from(table, name)}
+            for name, r in table.items() if r["live"]}
+
+
+def object_rooms(graph: dict) -> dict:
+    """Which room each object belongs to. -> {object name: room name or None}.
+
+    A room is an `OBJ_ROOM` object and everything under it in the parent
+    chain is in it, whether it hangs off the room directly (290 of level 1's
+    409 objects) or off a group that does. 5159 of the ten levels' 5237
+    objects resolve; the 78 that do not hang off `scene` itself -- scenery,
+    lights, spawners -- and are never culled, which is what the engine does
+    with a gob that is in no room.
+    """
+    by = {o["name"]: o for o in graph["objects"]}
+    out = {}
+    for o in graph["objects"]:
+        seen, cur = set(), o
+        while cur is not None and cur["name"] not in seen:
+            seen.add(cur["name"])
+            if cur["type"] == "OBJ_ROOM":
+                break
+            cur = by.get(cur["parent"])
+        out[o["name"]] = cur["name"] if cur and cur["type"] == "OBJ_ROOM" else None
+    return out
+
+
 def scene_geometry(path: Path, resources: Path) -> tuple[list, list, int]:
-    """Merge every model a scene graph places. -> (vertices, triangles, count)"""
+    """Merge every model a scene graph places. -> (vertices, triangles, count)
+
+    Each triangle carries the name of the room its object is in, so that
+    `build()` can group the draw calls by room and the page can use the
+    level's authored visibility -- see tools/rooms.py.
+    """
     graph = sg.parse(path.read_text(errors="replace"))
+    where = object_rooms(graph)
     cache: dict[Path, Model] = {}
     verts: list = []
     tris: list = []
@@ -383,8 +466,9 @@ def scene_geometry(path: Path, resources: Path) -> tuple[list, list, int]:
         if not v:
             continue
         base = len(verts)
+        room = where.get(o["name"]) or ""
         verts += place(o, v, model._sec(1) is not None)
-        tris += [(a + base, b + base, c + base) for a, b, c in t]
+        tris += [(a + base, b + base, c + base, room) for a, b, c in t]
         placed += 1
     return verts, tris, placed
 
@@ -473,18 +557,23 @@ def _blended(name: str, resources: Path | None) -> bool:
 
 def build(verts: list, tris: list, png_dir: Path | None,
           resources: Path | None = None) -> tuple[dict, dict]:
-    by_tex: dict[str | None, list[int]] = {}
-    for a, b, c in tris:
-        by_tex.setdefault(verts[a][2], []).extend((a, b, c))
+    # grouped by room as well as by texture, so the page can drop the rooms
+    # the level says are not visible from where you stand
+    groups: dict[tuple, list[int]] = {}
+    for t in tris:
+        a, b, c = t[0], t[1], t[2]
+        room = t[3] if len(t) > 3 else ""
+        groups.setdefault((room, verts[a][2]), []).extend((a, b, c))
 
     data = bytearray()
     draws = []
-    for tex, idx in by_tex.items():
+    for (room, tex), idx in groups.items():
         first = len(data) // 20
         for i in idx:
             pos, uv, _ = verts[i]
             data += struct.pack("<5f", *pos, *uv)
         draws.append({"tex": tex or "", "first": first, "count": len(idx),
+                      "room": room,
                       "blend": _blended(tex or "", resources)})
 
     pts = [v[0] for v in verts]
@@ -536,10 +625,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.src is None or args.out is None:
         ap.error("src and -o are required")
 
-    coll, spawns = None, None
+    coll, spawns, room_graph = None, None, None
     if args.scene:
         verts, tris, placed = scene_geometry(args.src, args.resources)
         what = f"{placed} objects"
+        room_graph = _rooms(args.src, args.resources)
+        if room_graph:
+            what += f" &middot; {len(room_graph)} rooms"
         if args.walk:
             spawns = _spawns(args.src, args.resources)
             coll = scene_collision(args.src, args.resources)
@@ -561,7 +653,8 @@ def main(argv: list[str] | None = None) -> int:
                 .replace("__MESH__", json.dumps(mesh))
                 .replace("__TEX__", json.dumps(textures))
                 .replace("__COLL__", json.dumps(coll))
-                .replace("__SPAWNS__", json.dumps(spawns)))
+                .replace("__SPAWNS__", json.dumps(spawns))
+                .replace("__ROOMS__", json.dumps(room_graph)))
     args.out.write_text(page)
     print(f"{args.out}: {stats.replace('&middot;', '|')}, "
           f"{len(page)/2**20:.1f} MiB", file=sys.stderr)

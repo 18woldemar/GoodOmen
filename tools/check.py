@@ -28,7 +28,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 EXTRACTED = ROOT / "extracted"
 
-SELFTESTS = ["scene", "mod2obj", "mod2html", "texdec", "luaapi", "luarun"]
+SELFTESTS = ["scene", "mod2obj", "mod2html", "texdec", "luaapi", "luarun",
+             "rooms"]
 
 # (name, argv, what has to exist first)
 CORPUS = [
@@ -61,6 +62,9 @@ CORPUS = [
      None),
     ("checkpoints stand in open space",
      ["spawn.py", "extracted", "--all", "--expect", "128"],
+     "scripts/level1.lua"),
+    ("room graphs resolve",
+     ["rooms.py", "extracted", "--check", "--expect", "823"],
      "scripts/level1.lua"),
 ]
 
