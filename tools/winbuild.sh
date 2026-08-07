@@ -1,0 +1,29 @@
+#!/bin/sh
+# Cross-build the engine for Windows and run the result under Wine against a
+# real installation. "It builds" is not "it works", and this is the whole
+# difference: the binary is dropped into the game directory and started with
+# no arguments, which is the way it is meant to be used.
+#
+# Skips itself when the linker or Wine is missing. Needs MDK2_GOG.
+set -e
+cd "$(dirname "$0")/.."
+
+command -v x86_64-w64-mingw32-gcc >/dev/null || {
+  echo "skip: no x86_64-w64-mingw32-gcc (pacman -S mingw-w64-gcc)"; exit 0; }
+WINE=$(command -v wine || ls "$HOME"/Downloads/wine-*/bin/wine 2>/dev/null | head -1)
+[ -n "$WINE" ] || { echo "skip: no wine"; exit 0; }
+[ -d "$MDK2_GOG" ] || { echo "skip: MDK2_GOG is not set to an installation"; exit 0; }
+
+cargo build --release --quiet --target x86_64-pc-windows-gnu \
+      --manifest-path engine/Cargo.toml
+EXE=engine/target/x86_64-pc-windows-gnu/release/goodomen.exe
+
+# into the game directory and out again: the binary has to find the game
+# beside itself, which is the one thing running it from elsewhere cannot test
+cp "$EXE" "$MDK2_GOG/goodomen-check.exe"
+trap 'rm -f "$MDK2_GOG/goodomen-check.exe"' EXIT
+OUT=$(cd "$MDK2_GOG" && WINEDEBUG=-all "$WINE" goodomen-check.exe 2>/dev/null)
+
+echo "$OUT" | grep -q "4751/4751 files read" || {
+  echo "the Windows build did not read the containers:"; echo "$OUT"; exit 1; }
+echo "$OUT" | tail -1

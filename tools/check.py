@@ -87,6 +87,8 @@ ENGINE = [
     ("the engine reads every container",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG"], None),
+    ("the Windows build runs the same",
+     ["sh", "tools/winbuild.sh"], None),
     ("the engine's own tests pass",
      ["cargo", "test", "--lib", "--manifest-path", "engine/Cargo.toml"],
      None),

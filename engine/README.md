@@ -14,10 +14,13 @@ to install, nothing to configure. Pass a path to read a game somewhere else:
 
 ## Platforms
 
-**Linux and Windows are the targets.** They are what has to work perfectly
-and they are what gets tested — Windows by cross-compiling from Linux and
-running the result under Wine against a real installation, so "it builds" is
-never mistaken for "it works".
+**Linux and Windows are the targets**, and both are tested rather than
+claimed. `tools/winbuild.sh` cross-builds the Windows binary, drops it into a
+real installation and starts it with **no arguments** — the way it is meant
+to be used — under Wine, and requires the same 4751 files and the same
+checksums the Linux build gets. "It builds" is never mistaken for "it works",
+and finding the game beside itself is the one thing running from elsewhere
+cannot test.
 
 **macOS is not claimed.** There is no Apple hardware to test on here, and an
 untested platform is not a supported one. The graphics choice happens to
@@ -31,6 +34,8 @@ Cross-compiling for Windows needs the target and a linker:
     rustup target add x86_64-pc-windows-gnu
     sudo pacman -S mingw-w64-gcc          # or your distribution's equivalent
     cargo build --release --target x86_64-pc-windows-gnu
+
+466 KiB, no runtime to install, 2 seconds to build.
 
 ## Stack, and why
 
