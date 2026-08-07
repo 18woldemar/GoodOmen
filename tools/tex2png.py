@@ -14,14 +14,25 @@ E:\\mdk2\\Omen\\omTexture.c):
     0x04  u32  21              always 21 = 16+4+1, the pixel count in the tail
     0x08  u32  width
     0x0c  u32  height
-    0x10  u32  3 | 4           channels: RGB / RGBA
+    0x10  u32  3 | 4           channels: RGB / RGBA. **This is what decides
+                               whether a surface is alpha-tested or blended**,
+                               and it is exact: all 517 textures that say 3
+                               are fully opaque, all 238 that say 4 carry
+                               alpha, 190 of them partial.
     0x14  u32  1
     0x18  u32  0
     0x1c  u32  0
     0x20  u32  0 | 1           has alpha (exactly when channels == 4)
     0x24  u32  32 | 0          32 -> compressed TEXC chunk; 0 -> raw BGRA
-    0x28  f32                  ? compression quality (Textures.txt, shipped
-                               alongside, reports RMS/PSNR per texture)
+    0x28  f32                  **uninitialised.** It reads as a float and the
+                               guess was compression quality, since the
+                               shipped `Textures.txt` is a leftover log of
+                               "RMS = 22.41 PSNR = 34.63" lines. Refuted: the
+                               value groups by *conversion batch*, not by
+                               texture -- all 75 `ao_*` share 9.2e-41 and all
+                               72 `hw_*` share 5.6e-07, values no one would
+                               choose -- and 110 textures have a plain zero.
+                               It is whatever was on the stack that run.
     0x2c  u32  'TEXC'          chunk tag, stored LE so the bytes read "CXET"
     0x30  u32  0
     0x34  u32  width
@@ -38,8 +49,8 @@ at exactly 4 bits per pixel; the 4x4, 2x2 and 1x1 levels are stored as raw
 BGRA, which is why the file ends with 16+4+1 = 21 pixels = 84 bytes.
 
 The 4 bpp coding is a multi-mode block codec: 8x4-pixel blocks, 16 bytes each,
-with the top three bits of the block's fourth dword selecting one of four
-decoders (fcn.0045d660 / 0045d8c0 / 0045da90 / 0045dc70 in mdk2Main.exe).
+in **six layouts** chosen by bits 127, 126, 125 and 124. It is decoded from
+scratch in `tools/texdec.py`, byte-for-byte against the original.
 Those four modes are not decoded yet -- see docs/journal.md.
 
 That gives an exact size identity, asserted below, which holds for all 761
