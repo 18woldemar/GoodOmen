@@ -33,6 +33,13 @@ bit.
 `../tools/bsp.py` on points placed exactly on the planes, which is where the
 one thing that can be quietly wrong in that format would show.
 
+**Scripts**: all 89 shipped `.lua`, which are Lua **3** run on a Lua 5.1 the
+engine carries itself (`mlua`, vendored — nothing to install). Three things
+make that work and there are only three: the `$if` pragma pass, a prelude for
+Lua 3's flat library, and two rewrites (`%upvalue`, and `break` used as an
+identifier). `--lua` compiles them all and `../tools/luarun.py --engine`
+requires the same answers.
+
 ## What it draws
 
     ./goodomen --window        # a window, and a triangle in it
