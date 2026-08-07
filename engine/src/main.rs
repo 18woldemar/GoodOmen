@@ -40,6 +40,49 @@ fn main() {
         }
         return;
     }
+    // `--demo l1.lua demo1_5.omn --from x,y,z --yaw a` replays the game's
+    // own recorded input through the controller. No GL, so it runs anywhere.
+    if let Some(i) = args.iter().position(|a| a == "--demo") {
+        let value = |flag: &str| {
+            args.iter()
+                .position(|a| a == flag)
+                .and_then(|k| args.get(k + 1))
+                .cloned()
+        };
+        let graph = args.get(i + 1).cloned().unwrap_or_else(|| "l1.lua".into());
+        let demo = args.get(i + 2).cloned().unwrap_or_else(|| "demo1_5.omn".into());
+        let start: Vec<f64> = value("--from")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|v| v.trim().parse().ok())
+            .collect();
+        if start.len() != 3 {
+            eprintln!("goodomen: --demo needs --from x,y,z");
+            std::process::exit(1);
+        }
+        let yaw = value("--yaw").and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let mouse = value("--mouse").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        let root = args
+            .iter()
+            .zip(std::iter::once(&String::new()).chain(args.iter()))
+            .find(|(a, before)| {
+                !a.starts_with("--")
+                    && !["--demo", "--from", "--yaw", "--mouse", "--expect"]
+                        .contains(&before.as_str())
+                    && *before != &graph
+            })
+            .map(|(a, _)| std::path::PathBuf::from(a))
+            .unwrap_or_else(Install::beside_the_binary);
+        match replay(&root, &graph, &demo, [start[0], start[1], start[2]], yaw, mouse) {
+            Ok(line) => println!("{line}"),
+            Err(e) => {
+                eprintln!("goodomen: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     // `--level l1` renders a level; with `--window` it is shown, without it
     // the pixels are checked offscreen the way `--triangle` is
     if let Some(i) = args.iter().position(|a| a == "--level") {
@@ -53,7 +96,15 @@ fn main() {
             })
             .map(|(a, _)| std::path::PathBuf::from(a))
             .unwrap_or_else(Install::beside_the_binary);
-        match level(&root, &graph, show) {
+        let start: Option<[f64; 3]> = args
+            .iter()
+            .position(|a| a == "--from")
+            .and_then(|k| args.get(k + 1))
+            .and_then(|v| {
+                let c: Vec<f64> = v.split(',').filter_map(|n| n.trim().parse().ok()).collect();
+                (c.len() == 3).then(|| [c[0], c[1], c[2] + goodomen::game::body::EYE])
+            });
+        match level(&root, &graph, show, start) {
             Ok(line) => println!("{line}"),
             Err(e) if e.starts_with(goodomen::render::NO_VIDEO) => println!("skip: {e}"),
             Err(e) => {
@@ -156,12 +207,76 @@ fn main() {
     );
 }
 
+/// Replay a recorded demo through the controller and say where the body went.
+///
+/// The invariant is the one that can be asserted without the original: the
+/// game's own input, run through this controller, must never put the body
+/// inside the world.
+fn replay(
+    root: &std::path::Path,
+    graph: &str,
+    demo: &str,
+    start: [f64; 3],
+    yaw: f64,
+    mouse: f64,
+) -> Result<String, String> {
+    use goodomen::formats::omn;
+    use goodomen::game::body::{Body, Collision, EYE, WALK};
+    use goodomen::game::{script::Scripts, world};
+
+    let mut install = Install::open(root).map_err(|e| e.to_string())?;
+    let source: String = install
+        .read(graph)
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(|&b| b as char)
+        .collect();
+    let scripts = Scripts::new().map_err(|e| e.to_string())?;
+    world::install(&scripts.lua).map_err(|e| e.to_string())?;
+    scripts.run(graph, &source).map_err(|e| e.to_string())?;
+
+    let collision = {
+        let w = world::world(&scripts.lua).expect("a world");
+        Collision::load(&mut install, &w)
+    };
+    let bytes = install.read(demo).map_err(|e| e.to_string())?;
+    // frame 0 is the load and carries no input
+    let frames = omn::parse(&bytes).map_err(|e| e.to_string())?;
+    let frames = &frames[1.min(frames.len())..];
+
+    let mut body = Body::new([start[0], start[1], start[2] + EYE], yaw);
+    body.replay(&collision, frames, mouse, WALK);
+
+    let seconds: f32 = frames.iter().map(|f| f.dt).sum();
+    let drift = (0..3)
+        .map(|c| (body.position[c] - [start[0], start[1], start[2] + EYE][c]).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    Ok(format!(
+        "{demo}: {} frames, {seconds:.1}s, {} trees and {} nodes; travelled {:.0} units, \
+         {drift:.0} from where it started, {} at the end, met a wall on {} frames, \
+         inside geometry on {}",
+        frames.len(),
+        collision.len(),
+        collision.nodes,
+        body.travelled,
+        if body.on_ground { "standing" } else { "in the air" },
+        body.hits,
+        body.inside
+    ))
+}
+
 /// Load a level and draw it — into a window if `show`, otherwise offscreen
 /// with the pixels checked.
 ///
 /// The camera has nothing to go on yet, so it frames the level's own extent
 /// from a fixed direction: deterministic, and the same picture every run.
-fn level(root: &std::path::Path, graph: &str, show: bool) -> Result<String, String> {
+fn level(
+    root: &std::path::Path,
+    graph: &str,
+    show: bool,
+    start: Option<[f64; 3]>,
+) -> Result<String, String> {
     use goodomen::render::{scene::Scene, Offscreen};
 
     let mut install = Install::open(root).map_err(|e| e.to_string())?;
@@ -199,23 +314,119 @@ fn level(root: &std::path::Path, graph: &str, show: bool) -> Result<String, Stri
     );
 
     if show {
+        use goodomen::game::body::{Body, Collision, EYE, SPRINT, WALK};
         use sdl2::event::Event;
-        use sdl2::keyboard::Keycode;
+        use sdl2::keyboard::{Keycode, Scancode};
+
+        // walking needs the collision world, and a place to stand: the
+        // checkpoints live in the level *script*, which wants the boot the
+        // engine does not have yet, so `--from` supplies one
+        let walk = std::env::args().any(|a| a == "--walk");
+        let mut body = Body::new(start.unwrap_or([eye[0] as f64, eye[1] as f64, eye[2] as f64]), 0.0);
+        let collision = if walk {
+            let scripts = goodomen::game::script::Scripts::new().map_err(|e| e.to_string())?;
+            goodomen::game::world::install(&scripts.lua).map_err(|e| e.to_string())?;
+            let source: String = install
+                .read(graph)
+                .map_err(|e| e.to_string())?
+                .iter()
+                .map(|&b| b as char)
+                .collect();
+            scripts.run(graph, &source).map_err(|e| e.to_string())?;
+            let w = goodomen::game::world::world(&scripts.lua).expect("a world");
+            Collision::load(&mut install, &w)
+        } else {
+            Collision::default()
+        };
+
         println!("OpenGL {version}\n{summary}");
+        println!(
+            "{}  --  W A S D to move, mouse to look, shift to run, escape to leave",
+            if walk {
+                format!("walking, {} trees under foot", collision.len())
+            } else {
+                "flying".to_string()
+            }
+        );
+        video.sdl.mouse().set_relative_mouse_mode(true);
+        let (mut yaw, mut pitch) = (0.0f64, -0.2f64);
+        let mut last = std::time::Instant::now();
         loop {
             for event in video.events.poll_iter() {
                 match event {
                     Event::Quit { .. }
                     | Event::KeyDown { keycode: Some(Keycode::Escape), .. } => {
                         unsafe { scene.delete(&video.gl) };
-                        return Ok("closed".into());
+                        return Ok(format!("{summary}, left at {:?}", body.position));
+                    }
+                    Event::MouseMotion { xrel, yrel, .. } => {
+                        yaw -= xrel as f64 * 0.0025;
+                        pitch = (pitch - yrel as f64 * 0.0025).clamp(-1.5, 1.5);
                     }
                     _ => {}
                 }
             }
+            let dt = last.elapsed().as_secs_f64().min(0.1);
+            last = std::time::Instant::now();
+
+            let keys: std::collections::HashSet<Scancode> =
+                video.events.keyboard_state().pressed_scancodes().collect();
+            let held = |s: Scancode| keys.contains(&s);
+            let (fx, fy) = (yaw.cos(), yaw.sin());
+            let mut d = [0.0f64, 0.0];
+            if held(Scancode::W) || held(Scancode::Up) {
+                d = [d[0] + fx, d[1] + fy];
+            }
+            if held(Scancode::S) || held(Scancode::Down) {
+                d = [d[0] - fx, d[1] - fy];
+            }
+            if held(Scancode::D) {
+                d = [d[0] - fy, d[1] + fx];
+            }
+            if held(Scancode::A) {
+                d = [d[0] + fy, d[1] - fx];
+            }
+            let fast = held(Scancode::LShift) || held(Scancode::RShift);
+
+            if walk {
+                body.step(
+                    &collision,
+                    d,
+                    held(Scancode::Space),
+                    if fast { SPRINT } else { WALK },
+                    dt,
+                );
+            } else {
+                // flying: no collision, and fast enough to cross a level
+                let speed = span as f64 * if fast { 0.8 } else { 0.25 };
+                let length = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1.0);
+                body.position[0] += d[0] / length * speed * dt * pitch.cos();
+                body.position[1] += d[1] / length * speed * dt * pitch.cos();
+                if d != [0.0, 0.0] {
+                    body.position[2] += pitch.sin() * speed * dt;
+                }
+                if held(Scancode::Space) {
+                    body.position[2] += speed * dt;
+                }
+                if held(Scancode::LCtrl) {
+                    body.position[2] -= speed * dt;
+                }
+            }
+
+            let from = [
+                body.position[0] as f32,
+                body.position[1] as f32,
+                body.position[2] as f32,
+            ];
+            let ahead = [
+                from[0] + (yaw.cos() * pitch.cos()) as f32,
+                from[1] + (yaw.sin() * pitch.cos()) as f32,
+                from[2] + pitch.sin() as f32,
+            ];
+            let view = Mat4::look_at(from, ahead, [0.0, 0.0, 1.0]);
             let (w, h) = video.window.drawable_size();
             let projection =
-                Mat4::perspective(1.1, w as f32 / h.max(1) as f32, span * 0.002, span * 4.0);
+                Mat4::perspective(1.1, w as f32 / h.max(1) as f32, 0.05, span * 4.0);
             unsafe {
                 video.gl.viewport(0, 0, w as i32, h as i32);
                 video.gl.clear_color(0.05, 0.06, 0.09, 1.0);
@@ -223,6 +434,7 @@ fn level(root: &std::path::Path, graph: &str, show: bool) -> Result<String, Stri
                 scene.draw(&video.gl, &projection.times(&view), span * 2.0)?;
             }
             video.window.gl_swap_window();
+            let _ = EYE;
         }
     }
 

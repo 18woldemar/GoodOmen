@@ -386,6 +386,63 @@ def survey(graph: Path, resources: Path, seed: int = 7,
             "starts": len(starts), "rows": rows}
 
 
+def _engine(args) -> int:
+    """Replay the demo here and in the engine, and require the same body.
+
+    The start comes from the level's checkpoint table, which the engine
+    cannot read yet -- it needs the level script, not the scene graph -- so it
+    is computed here and handed over. Everything after that is each side's own
+    controller against its own collision world, and they must land on the same
+    numbers: the trees loaded, the distance travelled, the drift, whether it
+    ends standing, the frames that met a wall, and the frames inside geometry.
+    """
+    import subprocess
+    import omn
+    import rooms as rm
+
+    level = int(re.search(r"l(\d+)", args.src.stem).group(1))
+    frames = omn.parse(args.demo.read_bytes())[1:]
+    table, cps, _ = rm.load(level, args.resources, rm._override(args.resources))
+    cp = cps[str(args.checkpoint)]
+    start = rm._list(cp["2"])[:3]
+    yaw = cp.get("4") or 0.0
+    mine = replay(World(args.src, args.resources),
+                  [start[0], start[1], start[2] + EYE], yaw, frames, args.mouse)
+
+    root = Path(__file__).resolve().parent.parent
+    out = subprocess.run(
+        ["cargo", "run", "--quiet", "--release", "--manifest-path",
+         str(root / "engine/Cargo.toml"), "--", args.engine,
+         "--demo", args.src.name, args.demo.name,
+         "--from", ",".join(repr(c) for c in start),
+         "--yaw", repr(yaw), "--mouse", repr(args.mouse)],
+        capture_output=True, text=True, check=True).stdout
+
+    want = {"frames": len(frames),
+            "travelled": round(mine["travelled"]),
+            "drift": round(mine["drift"]),
+            "standing": mine["ground"],
+            "hits": mine["hits"],
+            "inside": mine["inside"]}
+    m = re.search(r"(\d+) frames.*travelled (\d+) units, (\d+) from where it "
+                  r"started, (standing|in the air) at the end, met a wall on "
+                  r"(\d+) frames, inside geometry on (\d+)", out)
+    if not m:
+        print(f"the engine said something else:\n{out}", file=sys.stderr)
+        return 1
+    got = {"frames": int(m.group(1)), "travelled": int(m.group(2)),
+           "drift": int(m.group(3)), "standing": m.group(4) == "standing",
+           "hits": int(m.group(5)), "inside": int(m.group(6))}
+    bad = [k for k in want if want[k] != got[k]]
+    for k in bad:
+        print(f"MISMATCH {k}: {want[k]} here, {got[k]} in the engine",
+              file=sys.stderr)
+    print(f"{len(frames)} frames replayed both ways, {len(bad)} disagree "
+          f"({want['travelled']} units, {want['hits']} wall frames, "
+          f"{want['inside']} inside)", file=sys.stderr)
+    return 1 if bad or want["inside"] else 0
+
+
 def _replay(args) -> int:
     """Replay a demo and say where it went, and through which rooms."""
     import omn
@@ -441,6 +498,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--checkpoint", type=int, default=5,
                     help="which checkpoint the demo starts at "
                          "(demo1_5.omn means level 1, checkpoint 5)")
+    ap.add_argument("--engine", metavar="GAMEDIR",
+                    help="replay the demo in the engine too and require the "
+                         "same body")
     ap.add_argument("--mouse", type=float, default=1.0,
                     help="radians per unit of the demo's axis values; a guess,"
                          " the file does not carry the sensitivity")
@@ -454,7 +514,7 @@ def main(argv: list[str] | None = None) -> int:
               f"scancodes or mouse ids, {len(faults)} faults", file=sys.stderr)
         return 1 if faults else 0
     if args.demo:
-        return _replay(args)
+        return _engine(args) if args.engine else _replay(args)
 
     if args.all:
         files = [p for n in range(1, 11)

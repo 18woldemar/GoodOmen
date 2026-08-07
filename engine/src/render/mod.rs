@@ -26,7 +26,10 @@ pub struct Video {
     pub events: sdl2::EventPump,
     _gl_context: sdl2::video::GLContext,
     _video: sdl2::VideoSubsystem,
-    _sdl: sdl2::Sdl,
+    /// Public for the mouse: relative mode is asked of the context. **Last**,
+    /// because fields drop in declaration order and SDL must outlive the GL
+    /// context that was made from it.
+    pub sdl: sdl2::Sdl,
 }
 
 impl Video {
@@ -72,7 +75,7 @@ impl Video {
             events,
             _gl_context: gl_context,
             _video: video,
-            _sdl: sdl,
+            sdl,
         })
     }
 

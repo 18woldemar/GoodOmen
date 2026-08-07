@@ -51,6 +51,11 @@ A level is the scene graph **run**, its models and textures uploaded, and
 every object placed — 409 objects and 74658 triangles for level 1. There is
 no lighting yet and no room culling.
 
+Add `--walk --from x,y,z` to put a body on the ground instead of flying. W A
+S D to move, the mouse to look, shift to run, space to jump. It is the same
+controller `--demo` replays the game's own recorded input through, which is
+how it is checked: 1347 frames, 131 units, and never once inside the world.
+
 `--triangle` is the renderer's own check: it opens a hidden window, draws
 into a framebuffer object and reads three pixels back — the centre, a corner,
 and the green vertex — each of which fails for a different reason. On a
