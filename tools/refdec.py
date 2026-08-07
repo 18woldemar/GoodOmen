@@ -49,8 +49,10 @@ HEAP = 0x10000000
 HEAP_SIZE = 0x1000000
 RET_MAGIC = 0x0BADF00D  # sentinel return address; hitting it stops emulation
 
-DATA_OFFSET = 0x68
 TAIL_BYTES = 84
+
+# the container arithmetic belongs to the decoder, not to the oracle
+from texdec import levels  # noqa: E402
 
 
 def _align(x: int, a: int = 0x1000) -> int:
@@ -108,34 +110,6 @@ class RefDecoder:
         self.uc.reg_write(UC_X86_REG_EIP, DECODE_LEVEL)
         self.uc.emu_start(DECODE_LEVEL, RET_MAGIC)
         return self.uc.mem_read(dest, nbytes)
-
-
-def levels(data: bytes) -> list[tuple[int, int, int, int]]:
-    """-> [(offset, size, width, height)], largest level first.
-
-    Derived analytically rather than from the 0x3c table: levels of 8x8 and
-    up take w*h/2 bytes, the rest are raw BGRA, and they follow each other
-    from 0x68. The table only holds the *last* nine levels — a 1024x1024
-    texture has eleven, so its two largest are absent from it — which makes
-    the arithmetic the more reliable source. The table is checked against it.
-    """
-    width, height = struct.unpack_from("<2I", data, 8)
-    out, off = [], DATA_OFFSET
-    while True:
-        size = (width * height // 2 if width >= 8 and height >= 8
-                else width * height * 4)
-        out.append((off, size, width, height))
-        off += size
-        if width == 1 and height == 1:
-            break
-        width, height = max(1, width // 2), max(1, height // 2)
-    if off != len(data):
-        raise ValueError(f"levels total {off}, file is {len(data)}")
-    table = [o for o in struct.unpack_from("<9I", data, 0x3c) if o]
-    starts = [o for o, _, _, _ in out]
-    if sorted(table) != starts[-len(table):]:
-        raise ValueError("offset table disagrees with the level arithmetic")
-    return out
 
 
 def decode_top(dec: RefDecoder, data: bytes) -> tuple[int, int, bytes]:

@@ -2,10 +2,10 @@
 """
 tex2png.py -- parse .tex textures; convert to PNG what can be decoded.
 
-The container is parsed here. The 4 bpp block codec is not reimplemented yet,
-so compressed levels are decoded by `tools/refdec.py`, which emulates the
-original routine and needs `mdk2Main.exe` (path from --exe or $MDK2_GOG).
-That is a research oracle, not engine code -- see rule 2 in CLAUDE.md.
+The container is parsed here; the 4 bpp block codec lives in
+`tools/texdec.py`. Neither needs the game executable any more -- the codec was
+reimplemented from scratch and checked block for block against the emulated
+original, so `--exe` and `tools/refdec.py` are only kept for that comparison.
 
 The .tex format (Omen renderer; the binary's debug paths name
 E:\\mdk2\\Omen\\omTexture.c):
@@ -139,15 +139,13 @@ def parse(data: bytes) -> dict:
 
 def to_png(data: bytes, decoder=None) -> bytes:
     from PIL import Image
+
+    import texdec
     info = parse(data)
     if info["compressed"]:
-        if decoder is None:
-            raise CodecNotDecoded("compressed level needs the reference "
-                                  "decoder; pass --exe or set MDK2_GOG")
-        import refdec
-        off, size, width, height = refdec.levels(data)[0]
-        pixels = bytes(decoder.decode_level(width, height,
-                                            data[off:off + size]))
+        off, size, width, height = texdec.levels(data)[0]
+        decode = decoder.decode_level if decoder else texdec.decode_level
+        pixels = bytes(decode(width, height, data[off:off + size]))
     else:
         width, height, pixels = info["width"], info["height"], info["pixels"]
     img = Image.frombytes("RGBA", (width, height), pixels, "raw", "BGRA")
@@ -173,7 +171,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--exe", type=Path,
                     default=Path(os.environ.get("MDK2_GOG", ".")) /
                     "mdk2Main.exe",
-                    help="mdk2Main.exe, for decoding compressed levels")
+                    help="mdk2Main.exe: decode with the emulated original "
+                         "instead, to compare against tools/texdec.py")
+    ap.add_argument("--oracle", action="store_true",
+                    help="decode with the emulated original, not texdec.py")
     args = ap.parse_args(argv)
 
     files = sorted(args.src.glob("*.tex")) if args.src.is_dir() else [args.src]
@@ -185,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
         args.out.mkdir(parents=True, exist_ok=True)
 
     decoder = None
-    if not args.validate and args.exe.is_file():
+    if args.oracle:
         import refdec
         decoder = refdec.RefDecoder(args.exe)
 
