@@ -61,7 +61,9 @@ It reads the game out of its own directory — `data/*.zip` first and then
   played at anyone. `1.00@5u 1.00@10u 0.50@20u 0.25@80u` against the clamped
   inverse law, and a tail of `0.000 PADDEDCELL against 0.214 ARENA` a quarter
   second after the sound stops. **All 76 ambient sounds the ten levels place
-  decode.**
+  decode**, and the **music streams** — 27 tracks, 1h 23m, decoded a block at
+  a time into a queue rather than held in memory, and looping the way the
+  `.mus` playlists say.
 
 **Linux and Windows are both tested**, and the Windows build is
 cross-compiled and run under Wine inside a real installation as part of the
@@ -89,7 +91,7 @@ Where the engine and a tool can both do a thing, **they must agree**, and
 | `tools/mod2html.py` | Packs a model — or, with `--scene`, a whole level and everything standing in it — into a single self-contained WebGL viewer. With `--walk` the collision trees come too and you can walk the level instead of flying it, spawning at the game's own checkpoints. No libraries, no server. |
 | `tools/bsp.py` | Reads and validates the `.bsp` collision trees; point-in-solid and drop queries. **692/692 validate.** |
 | `tools/scene.py` | Reads the level scene graphs — every object's type, position, parent and resource. **54 files, 5633 objects, 0 complaints.** |
-| `tools/wavc.py` | The sounds and the music. **992 of the 998 `.wav` files are not RIFF** — they are `WAVCV1.0` over Interplay ACM, the Baldur's Gate codec — and `Music/` is 27 bare ACM streams, 2h 46m of it, with Infinity Engine `.mus` playlists. |
+| `tools/wavc.py` | The sounds and the music. **992 of the 998 `.wav` files are not RIFF** — they are `WAVCV1.0` over Interplay ACM, the Baldur's Gate codec — and `Music/` is 27 bare ACM streams, 1h 23m of it, with Infinity Engine `.mus` playlists. |
 | `tools/walksim.py` | The viewer's controller, in Python, over every level. **2557 spawn points: 2556 stay standing, 2 ever inside geometry.** |
 | `tools/spawn.py` | The checkpoints a level starts you at, pulled by running its script, and whether each one stands in open space. **129 checkpoints, 128 clear.** |
 | `tools/luarun.py` | Runs the shipped Lua on a stock `lua5.1`. **All 31 scripts run to the end**, and the scene graphs they register match `scene.py` exactly — 5633 objects, no disagreement. |
@@ -169,7 +171,7 @@ Reconnaissance through Wine — file traces, apitrace on the GL stream — is in
 ## Checking it
 
 ```bash
-python3 tools/check.py            # 44 checks, about a minute
+python3 tools/check.py            # 45 checks, about a minute
 python3 tools/check.py --quick    # the 7 that need no game files
 python3 tools/check.py --slow     # plus the texture codec, 4205514 blocks
 ```

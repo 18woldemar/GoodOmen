@@ -104,6 +104,7 @@ pub unsafe fn start(
         .map(|(i, r)| r.visible.iter().copied().chain(std::iter::once(i)).collect())
         .collect();
     let env: Vec<Option<f64>> = boot.rooms.iter().map(|r| r.env).collect();
+    let music: Vec<Option<f64>> = boot.rooms.iter().map(|r| r.music).collect();
     let index: std::collections::BTreeMap<&str, usize> =
         names.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
 
@@ -204,7 +205,7 @@ pub unsafe fn start(
             by_type,
             triangles: scene.triangle_count(),
         },
-        rooms: Visibility { names, boxes, visible, env },
+        rooms: Visibility { names, boxes, visible, env, music },
         checkpoints,
         collision,
     })

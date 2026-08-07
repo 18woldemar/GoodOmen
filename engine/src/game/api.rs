@@ -40,6 +40,9 @@ pub struct Visibility {
     /// The room's EAX 2.0 environment, from `mdkRoomSetEnv`. One number is
     /// all the game ever says about reverb — see `crate::audio::reverb`.
     pub env: Vec<Option<f64>>,
+    /// The room's music track, from `mdkRoomSetMusic`. `Music/TrackNN`,
+    /// identity and not an offset; 0 and -1 stop the music.
+    pub music: Vec<Option<f64>>,
 }
 
 impl Visibility {

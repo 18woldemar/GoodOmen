@@ -38,6 +38,7 @@ const AL_GAIN: i32 = 0x100A;
 const AL_ORIENTATION: i32 = 0x100F;
 const AL_SOURCE_STATE: i32 = 0x1010;
 const AL_PLAYING: i32 = 0x1012;
+const AL_BUFFERS_PROCESSED: i32 = 0x1016;
 const AL_REFERENCE_DISTANCE: i32 = 0x1020;
 const AL_MAX_DISTANCE: i32 = 0x1023;
 const AL_FORMAT_MONO16: i32 = 0x1101;
@@ -96,6 +97,8 @@ struct Api {
     alSourcePlay: unsafe extern "C" fn(u32),
     alSourceStop: unsafe extern "C" fn(u32),
     alSource3i: unsafe extern "C" fn(u32, i32, i32, i32, i32),
+    alSourceQueueBuffers: unsafe extern "C" fn(u32, i32, *const u32),
+    alSourceUnqueueBuffers: unsafe extern "C" fn(u32, i32, *mut u32),
     alListener3f: unsafe extern "C" fn(i32, f32, f32, f32),
     alListenerfv: unsafe extern "C" fn(i32, *const f32),
     alDistanceModel: unsafe extern "C" fn(i32),
@@ -167,6 +170,8 @@ impl Api {
             alSourcePlay: entry!(lib, "alSourcePlay"),
             alSourceStop: entry!(lib, "alSourceStop"),
             alSource3i: entry!(lib, "alSource3i"),
+            alSourceQueueBuffers: entry!(lib, "alSourceQueueBuffers"),
+            alSourceUnqueueBuffers: entry!(lib, "alSourceUnqueueBuffers"),
             alListener3f: entry!(lib, "alListener3f"),
             alListenerfv: entry!(lib, "alListenerfv"),
             alDistanceModel: entry!(lib, "alDistanceModel"),
@@ -509,6 +514,143 @@ impl Drop for Audio {
             (self.api.alcDestroyContext)(self.context);
             (self.api.alcCloseDevice)(self.device);
         }
+    }
+}
+
+/// A music track, played out of its compressed bytes rather than decoded
+/// whole: 25 MiB of PCM a track, and 27 of them.
+///
+/// **It loops, because every one of the 27 `.mus` playlists says so** — one
+/// segment, looping back to itself. Looping a queue means rewinding the
+/// decoder, not setting `AL_LOOPING`, which only repeats a single buffer.
+pub struct Track {
+    voice: Voice,
+    /// Every buffer made for this track. Some are queued at any moment.
+    buffers: Vec<u32>,
+    free: Vec<u32>,
+    stream: crate::formats::acm::Stream,
+    format: i32,
+    rate: i32,
+    /// Reused between fills so a track costs one allocation, not one a
+    /// second.
+    scratch: Vec<i16>,
+}
+
+/// How much audio is kept ahead of the mixer. Four of these is about a
+/// second and a half, which survives a frame that takes far too long.
+const TRACK_BUFFERS: usize = 4;
+/// Samples per buffer, across all channels. A stereo 22050 Hz block is 2048
+/// values, so this is eight blocks — about a third of a second.
+const TRACK_SAMPLES: usize = 16384;
+
+impl Audio {
+    /// Start a track. The bytes are the bare ACM stream `Music/` holds.
+    pub fn music(&mut self, acm: Vec<u8>) -> Result<Track, String> {
+        let stream =
+            crate::formats::acm::Stream::open(acm).map_err(|e| e.to_string())?;
+        let format = if stream.header.channels >= 2 {
+            AL_FORMAT_STEREO16
+        } else {
+            AL_FORMAT_MONO16
+        };
+        let rate = stream.header.rate as i32;
+        let mut buffers = vec![0u32; TRACK_BUFFERS];
+        unsafe { (self.api.alGenBuffers)(TRACK_BUFFERS as i32, buffers.as_mut_ptr()) };
+        self.error("alGenBuffers for music")?;
+        self.buffers.extend_from_slice(&buffers);
+
+        let mut id = 0u32;
+        unsafe { (self.api.alGenSources)(1, &mut id) };
+        self.error("alGenSources for music")?;
+        self.sources.push(id);
+        // music is not in the world: it does not move with the listener and
+        // it is not fed through the room's reverb
+        unsafe {
+            (self.api.alSourcei)(id, AL_SOURCE_RELATIVE, 1);
+            (self.api.alSource3f)(id, AL_POSITION, 0.0, 0.0, 0.0);
+        }
+
+        let mut track = Track {
+            voice: Voice(id),
+            free: buffers.clone(),
+            buffers,
+            stream,
+            format,
+            rate,
+            scratch: Vec::with_capacity(TRACK_SAMPLES + 4096),
+        };
+        self.fill(&mut track)?;
+        self.play(track.voice);
+        Ok(track)
+    }
+
+    /// Hand the mixer whatever it has finished with, refilled. Call it once a
+    /// frame; it does nothing when nothing has been consumed.
+    pub fn pump(&mut self, track: &mut Track) -> Result<(), String> {
+        let mut processed = 0i32;
+        unsafe {
+            (self.api.alGetSourcei)(track.voice.0, AL_BUFFERS_PROCESSED, &mut processed)
+        };
+        if processed > 0 {
+            let mut done = vec![0u32; processed as usize];
+            unsafe {
+                (self.api.alSourceUnqueueBuffers)(track.voice.0, processed, done.as_mut_ptr())
+            };
+            self.error("alSourceUnqueueBuffers")?;
+            track.free.extend(done);
+        }
+        self.fill(track)?;
+        // a frame that took far too long can drain the queue and stop the
+        // source; starting it again is the whole of the recovery
+        if !self.playing(track.voice) {
+            self.play(track.voice);
+        }
+        Ok(())
+    }
+
+    /// Fill and queue every free buffer.
+    fn fill(&mut self, track: &mut Track) -> Result<(), String> {
+        while let Some(id) = track.free.pop() {
+            track.scratch.clear();
+            while track.scratch.len() < TRACK_SAMPLES {
+                if !track.stream.block(&mut track.scratch) {
+                    // the end, and every track loops back to itself
+                    track.stream.rewind();
+                    if !track.stream.block(&mut track.scratch) {
+                        break;
+                    }
+                }
+            }
+            if track.scratch.is_empty() {
+                track.free.push(id);
+                break;
+            }
+            unsafe {
+                (self.api.alBufferData)(
+                    id,
+                    track.format,
+                    track.scratch.as_ptr() as *const c_void,
+                    std::mem::size_of_val(track.scratch.as_slice()) as i32,
+                    track.rate,
+                );
+                (self.api.alSourceQueueBuffers)(track.voice.0, 1, &id);
+            }
+            self.error("queueing music")?;
+        }
+        Ok(())
+    }
+
+    pub fn stop_music(&self, track: &Track) {
+        self.stop(track.voice);
+    }
+
+    pub fn music_gain(&self, track: &Track, gain: f32) {
+        self.gain(track.voice, gain);
+    }
+
+    /// How many buffers this track owns, for a check to assert on.
+    pub fn queued(&self, track: &Track) -> usize {
+        track.buffers.len() - track.free.len()
     }
 }
 

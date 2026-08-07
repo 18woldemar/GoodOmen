@@ -214,6 +214,30 @@ fn main() {
         return;
     }
 
+    // `--music DIR` reads the 27 bare ACM streams under `Music/` and checks
+    // the two things streaming them adds: that rewinding really starts over,
+    // and that a queued source produces sound.
+    if let Some(i) = args.iter().position(|a| a == "--music") {
+        let dir = args
+            .get(i + 1)
+            .filter(|a| !a.starts_with("--"))
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(Install::beside_the_binary);
+        let expect = args
+            .iter()
+            .position(|a| a == "--expect")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|n| n.parse::<usize>().ok());
+        match music(&dir, expect) {
+            Ok(line) => println!("{line}"),
+            Err(e) => {
+                eprintln!("goodomen: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     // `--pcm file.wav` writes one sound's samples to stdout as s16le, which
     // is what `ffmpeg -f acm` writes too, so the two can be diffed directly.
     if let Some(i) = args.iter().position(|a| a == "--pcm") {
@@ -337,6 +361,148 @@ fn main() {
         install.entry_count(),
         bytes as f64 / (1024.0 * 1024.0)
     );
+}
+
+/// Where a track number's stream is. `mdkRoomSetMusic(room, N)` means
+/// `Music/TrackNN`, identity and not an offset, and the `.mus` beside it names
+/// one segment `A` looping back to itself — so the file is
+/// `Music/TrackNN/tracknna.acm`. **The case on disk is inconsistent**
+/// (`track01a.acm` sits beside `Track18a.acm`), so it is matched folded.
+fn music_track(root: &std::path::Path, n: u32) -> Option<std::path::PathBuf> {
+    let want = format!("track{n:02}a.acm");
+    let mut stack = vec![root.join("Music")];
+    // the directory itself may be `music/`
+    if !stack[0].is_dir() {
+        stack[0] = root.join("music");
+    }
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).ok()?.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p
+                .file_name()
+                .is_some_and(|f| f.to_string_lossy().to_ascii_lowercase() == want)
+            {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// The music: every `.acm` under a directory, checked for the two things
+/// streaming adds to decoding.
+///
+/// **Rewinding has to be a real restart.** The decoder carries state between
+/// blocks — a wrap buffer the inverse transform reads either side of its
+/// window — so going back to the first block without clearing it would give
+/// a second time round that is not the first. That is what makes a looping
+/// track sound wrong on the seam and nowhere else, which is the worst kind of
+/// bug to be told about.
+fn music(root: &std::path::Path, expect: Option<usize>) -> Result<String, String> {
+    use goodomen::formats::acm;
+
+    let dir = [root.join("Music"), root.join("music"), root.to_path_buf()]
+        .into_iter()
+        .find(|p| p.is_dir())
+        .ok_or_else(|| format!("no Music under {}", root.display()))?;
+    let mut tracks: Vec<std::path::PathBuf> = Vec::new();
+    let mut stack = vec![dir.clone()];
+    while let Some(d) = stack.pop() {
+        let Ok(read) = std::fs::read_dir(&d) else { continue };
+        for e in read.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("acm")) {
+                tracks.push(p);
+            }
+        }
+    }
+    tracks.sort();
+    if tracks.is_empty() {
+        return Err(format!("no .acm streams under {}", dir.display()));
+    }
+
+    // four blocks is enough to have filled the wrap buffer and used it
+    const BLOCKS: usize = 4;
+    let (mut seconds, mut stereo) = (0.0f64, 0usize);
+    for path in &tracks {
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut s = acm::Stream::open(bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        let h = s.header;
+        if h.channels >= 2 {
+            stereo += 1;
+        }
+        seconds += h.samples as f64 / (h.rate as f64 * h.channels.max(1) as f64);
+        let mut first = Vec::new();
+        for _ in 0..BLOCKS {
+            s.block(&mut first);
+        }
+        s.rewind();
+        let mut again = Vec::new();
+        for _ in 0..BLOCKS {
+            s.block(&mut again);
+        }
+        if first != again {
+            let at = first.iter().zip(&again).position(|(a, b)| a != b);
+            return Err(format!(
+                "{}: rewinding did not start over — {} samples, first differs at {at:?}",
+                path.file_name().unwrap_or_default().to_string_lossy(),
+                first.len()
+            ));
+        }
+    }
+    if let Some(want) = expect {
+        if tracks.len() != want {
+            return Err(format!("{} streams, expected {want}", tracks.len()));
+        }
+    }
+
+    // and the naming rule the rooms rely on: `mdkRoomSetMusic(room, N)` is
+    // `Music/TrackNN/tracknna.acm`, identity and not an offset. Every index a
+    // room names is in 1..=27, so every one of those must resolve.
+    let unresolved: Vec<u32> =
+        (1..=tracks.len() as u32).filter(|&n| music_track(root, n).is_none()).collect();
+    if !unresolved.is_empty() {
+        return Err(format!(
+            "no file for track {unresolved:?} — the Music/TrackNN naming does not hold"
+        ));
+    }
+
+    // and one of them through the mixer, on the loopback device so that
+    // nothing is played at anyone
+    let played = match goodomen::audio::Audio::loopback(44100) {
+        Ok(mut audio) => {
+            let bytes = std::fs::read(&tracks[0]).map_err(|e| e.to_string())?;
+            let mut track = audio.music(bytes)?;
+            let queued = audio.queued(&track);
+            let mut peak = 0f32;
+            // a second of it, a frame at a time, pumping as a game would
+            for _ in 0..60 {
+                let block = audio.render(735)?;
+                peak = peak.max(
+                    block.iter().map(|s| s.unsigned_abs() as f32).fold(0.0, f32::max) / 32767.0,
+                );
+                audio.pump(&mut track)?;
+            }
+            if peak < 0.01 {
+                return Err(format!("the queued track rendered silence (peak {peak:.4})"));
+            }
+            format!(", {queued} buffers ahead, peak {peak:.2} through the mixer")
+        }
+        Err(e) if e.starts_with(goodomen::audio::NO_AUDIO) => String::new(),
+        Err(e) => return Err(e),
+    };
+
+    Ok(format!(
+        "{} music streams, {stereo} stereo, {:.0}h{:02.0}m in all, \
+         every TrackNN resolves, all rewind to the sample{played}",
+        tracks.len(),
+        (seconds / 3600.0).floor(),
+        (seconds % 3600.0) / 60.0,
+    ))
 }
 
 /// Start levels the way the game does, and report what they asked for.
@@ -700,7 +866,8 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
             .ok_or_else(|| format!("level {number} has no checkpoint {checkpoint}"))?;
         let collision = Collision::load(&mut install, &w);
         let env = boot.rooms.iter().map(|r| r.env).collect();
-        (api::Visibility { names, boxes, visible, env }, collision, spawn)
+        let music = boot.rooms.iter().map(|r| r.music).collect();
+        (api::Visibility { names, boxes, visible, env, music }, collision, spawn)
     };
 
     let frames = install
@@ -904,7 +1071,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
     // and a check must not play sound at anybody, so the sounds are decoded
     // and counted and nothing is opened.
     let mut read = |name: &str| install.read(name).ok();
-    let (heard, sounding) = if show {
+    let (mut heard, sounding) = if show {
         match goodomen::audio::Audio::open()
             .and_then(|d| goodomen::audio::Ambience::open(d, &ambient, &mut read))
         {
@@ -928,13 +1095,22 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         .and_then(|&i| rooms.env[i])
         .map(|e| goodomen::audio::reverb::NAMES[(e as usize).min(25)])
         .unwrap_or("GENERIC");
+    // and the track it asks for, resolved rather than only named: a room
+    // naming a track no file answers to would otherwise be silent for good
+    let track_here = match here.first().and_then(|&i| rooms.music[i]).unwrap_or(0.0) as i32 {
+        n if n > 0 => match music_track(root, n as u32) {
+            Some(_) => format!("Track{n:02}"),
+            None => format!("Track{n:02} MISSING"),
+        },
+        _ => "no music".to_string(),
+    };
 
     let mut yaw = spawn.facing;
     let mut pitch = 0.0f64;
     let summary = format!(
         "l{number} cp{checkpoint}: {} objects, {} placed ({} by their type), {} triangles, \
          {} posed, {} lights, {} refused, in {} \
-         ({} rooms visible from it, {standing_in}), {sounding}",
+         ({} rooms visible from it, {standing_in}, {track_here}), {sounding}",
         loaded.objects,
         loaded.placed,
         loaded.by_type,
@@ -968,8 +1144,11 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         );
         let mut at = body.position;
         let mut cull = true;
-        // -1 is not an environment, so the first frame always sets one
+        // -1 is not an environment, so the first frame always sets one; the
+        // same trick starts the music, since -1 is also "stop"
         let mut listening = -1i32;
+        let mut playing_track = -1i32;
+        let mut track: Option<goodomen::audio::Track> = None;
         let started = std::time::Instant::now();
         let mut last = std::time::Instant::now();
         loop {
@@ -1066,6 +1245,30 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
             if let (Some(a), true) = (&heard, env != listening) {
                 a.audio.environment(env);
                 listening = env;
+            }
+            // and its music. 0 and -1 stop it; anything else is Music/TrackNN
+            let want = here.first().and_then(|&i| rooms.music[i]).unwrap_or(0.0) as i32;
+            if let (Some(a), true) = (&mut heard, want != playing_track) {
+                playing_track = want;
+                if let Some(t) = track.take() {
+                    a.audio.stop_music(&t);
+                }
+                track = (want > 0)
+                    .then(|| music_track(&root, want as u32))
+                    .flatten()
+                    .and_then(|p| std::fs::read(p).ok())
+                    .and_then(|bytes| match a.audio.music(bytes) {
+                        Ok(t) => Some(t),
+                        Err(e) => {
+                            eprintln!("goodomen: {e}");
+                            None
+                        }
+                    });
+            }
+            if let (Some(a), Some(t)) = (&mut heard, &mut track) {
+                if let Err(e) = a.audio.pump(t) {
+                    eprintln!("goodomen: {e}");
+                }
             }
             // Third person when walking: the player has a body now, so the
             // camera stands behind it. `BEHIND` and `ABOVE` are chosen here

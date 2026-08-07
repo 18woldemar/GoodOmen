@@ -128,8 +128,8 @@ impl Tables {
 /// sits in the backing array.
 const MID: usize = 0x8000;
 
-struct Decoder<'a> {
-    src: &'a [u8],
+struct Decoder {
+    src: Vec<u8>,
     at: usize,
     acc: u32,
     have: u32,
@@ -146,7 +146,7 @@ struct Decoder<'a> {
     tables: Tables,
 }
 
-impl<'a> Decoder<'a> {
+impl Decoder {
     /// Past the end reads as zero. The original refills through a callback
     /// that returns nothing at EOF, and eleven of the game's streams rely on
     /// it: they stop within a block of the end and the last block is only
@@ -205,7 +205,7 @@ impl Column {
     }
 }
 
-impl<'a> Decoder<'a> {
+impl Decoder {
     /// Fill column `ind` by routine `code`. False means the code is one the
     /// encoder never emits, which the original treats as the end of the
     /// stream.
@@ -494,7 +494,7 @@ fn juggle(wrap: &mut [i32], block: &mut [i32], sub_len: usize, sub_count: usize)
     }
 }
 
-impl<'a> Decoder<'a> {
+impl Decoder {
     fn juggle_block(&mut self) {
         if self.level == 0 {
             return;
@@ -553,7 +553,7 @@ pub fn header(acm: &[u8]) -> Result<Header, Error> {
         return Err(Error::Truncated);
     }
     let mut d = Decoder {
-        src: acm,
+        src: acm[..HEADER].to_vec(),
         at: 0,
         acc: 0,
         have: 0,
@@ -585,43 +585,84 @@ pub fn header(acm: &[u8]) -> Result<Header, Error> {
     })
 }
 
+/// A stream being decoded a block at a time.
+///
+/// The music is 25 MiB of PCM a track and there are 27 of them, so it is
+/// played out of this rather than decoded whole. Everything else in the game
+/// goes through [`decode`] — which is this, drained — so the two cannot drift
+/// apart and the check against `ffmpeg` covers both.
+pub struct Stream {
+    d: Decoder,
+    pub header: Header,
+    /// Samples still owed, across all channels.
+    left: usize,
+}
+
+impl Stream {
+    /// Take ownership of a stream and read its header.
+    pub fn open(acm: Vec<u8>) -> Result<Stream, Error> {
+        let h = header(&acm)?;
+        let cols = 1usize << h.level;
+        let rows = h.rows as usize;
+        if cols * rows > 1 << 20 {
+            return Err(Error::Absurd { cols, rows });
+        }
+        Ok(Stream {
+            header: h,
+            left: h.samples as usize,
+            d: Decoder {
+                src: acm,
+                at: HEADER,
+                acc: 0,
+                have: 0,
+                cols,
+                rows,
+                level: h.level,
+                // 2048 values at a time, less the two the transform reads
+                // either side
+                chunk: (2048 / cols).saturating_sub(2).max(1),
+                block: vec![0; rows * cols],
+                // enough for every stride: cols + cols/2 + ... + 2
+                wrap: vec![0; if h.level == 0 { 0 } else { 2 * cols - 2 }],
+                amp: vec![0; 0x10000],
+                tables: Tables::new(),
+            },
+        })
+    }
+
+    /// One block onto the end of `out`. False at the end of the stream.
+    pub fn block(&mut self, out: &mut Vec<i16>) -> bool {
+        if self.left == 0 || !self.d.block() {
+            return false;
+        }
+        let want = self.left.min(self.d.block.len());
+        out.extend((0..want).map(|i| (self.d.block[i] >> self.header.level) as i16));
+        self.left -= want;
+        true
+    }
+
+    /// Start again from the first block. The music loops — every one of the
+    /// 27 `.mus` playlists names one segment looping back to itself — and
+    /// **the wrap buffer and the bit reader have to go back with it**, or the
+    /// second time round is not the first.
+    pub fn rewind(&mut self) {
+        self.left = self.header.samples as usize;
+        self.d.at = HEADER;
+        self.d.acc = 0;
+        self.d.have = 0;
+        self.d.block.iter_mut().for_each(|v| *v = 0);
+        self.d.wrap.iter_mut().for_each(|v| *v = 0);
+    }
+}
+
 /// Decode a whole stream to interleaved 16-bit PCM.
 ///
 /// Short output is not an error: eleven of the game's streams stop inside
 /// their last block and the original stops with them.
 pub fn decode(acm: &[u8]) -> Result<Vec<i16>, Error> {
-    let h = header(acm)?;
-    let cols = 1usize << h.level;
-    let rows = h.rows as usize;
-    if cols * rows > 1 << 20 {
-        return Err(Error::Absurd { cols, rows });
-    }
-    let mut d = Decoder {
-        src: acm,
-        at: HEADER,
-        acc: 0,
-        have: 0,
-        cols,
-        rows,
-        level: h.level,
-        // 2048 values at a time, less the two the transform reads either side
-        chunk: (2048 / cols).saturating_sub(2).max(1),
-        block: vec![0; rows * cols],
-        // enough for every stride: cols + cols/2 + ... + 2
-        wrap: vec![0; if h.level == 0 { 0 } else { 2 * cols - 2 }],
-        amp: vec![0; 0x10000],
-        tables: Tables::new(),
-    };
-    let mut out: Vec<i16> = Vec::with_capacity(h.samples as usize);
-    while out.len() < h.samples as usize {
-        if !d.block() {
-            break;
-        }
-        let want = (h.samples as usize - out.len()).min(d.block.len());
-        for i in 0..want {
-            out.push((d.block[i] >> h.level) as i16);
-        }
-    }
+    let mut s = Stream::open(acm.to_vec())?;
+    let mut out: Vec<i16> = Vec::with_capacity(s.header.samples as usize);
+    while s.block(&mut out) {}
     Ok(out)
 }
 
