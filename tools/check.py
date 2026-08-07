@@ -214,14 +214,23 @@ def main(argv: list[str] | None = None) -> int:
         if not engine:
             print("skip  the engine -- cargo is not installed")
             skipped += len(ENGINE)
-        for label, cmd, needs in CORPUS + engine + (SLOW if args.slow else []):
+        for label, raw, needs in CORPUS + engine + (SLOW if args.slow else []):
             cmd = [c.replace("$MDK2_GOG", env.get("MDK2_GOG", ""))
-                   for c in cmd]
+                   for c in raw]
             if needs is None:
                 # a tool given a path in the game directory; a command that
                 # is not one of our tools brings its own inputs
                 if cmd[0].endswith(".py") and not Path(cmd[1]).exists():
                     print(f"skip  {label} -- no {cmd[1]}")
+                    skipped += 1
+                    continue
+                # ...except the engine, which is handed the installation and
+                # cannot invent one. A fresh clone with no game must report
+                # these as skipped, not failed: a check that cannot run has
+                # not found anything wrong.
+                if "$MDK2_GOG" in " ".join(raw) and not exe.is_file():
+                    print(f"skip  {label} -- MDK2_GOG is not set to an "
+                          "installation")
                     skipped += 1
                     continue
             elif not (EXTRACTED / needs).exists():
