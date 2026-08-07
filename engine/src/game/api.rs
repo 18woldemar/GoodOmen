@@ -26,6 +26,7 @@
 //! `doloadingscreen` takes neither branch — no `mdkPreloadRes`, no sound
 //! bank, no loading screen.
 
+use crate::game::functions::FUNCTIONS;
 use crate::game::script::{Error, Scripts};
 use crate::game::world::{self, Gob};
 use mlua::{Lua, Value, Variadic};
@@ -88,11 +89,13 @@ pub struct Command {
     pub mode: f64,
 }
 
-/// The two object types the engine asks for by meaning rather than by
-/// number. Their values are the game's, so they are **looked up** in the
-/// surface read out of the player's own executable, never written here.
-pub const OBJ_ROOM_NAME: &str = "OBJ_ROOM";
-pub const OBJ_STATICLIGHT_NAME: &str = "OBJ_STATICLIGHT";
+/// `OBJ_STATICLIGHT`, which is the only object type that omits the trailing
+/// flag — nineteen arguments to `mdkRegisterObject`, not twenty.
+pub const OBJ_STATICLIGHT: f64 = 802.0;
+
+/// `OBJ_ROOM`, out of `tools/luaconst.py`'s reading of the binary. Named
+/// here because the renderer asks for it by meaning, not by number.
+pub const OBJ_ROOM: f64 = 803.0;
 
 /// The last scancode DirectInput defines.
 const DIK_MAX: u32 = 0xED;
@@ -138,9 +141,6 @@ pub struct Boot {
     pub input: Input,
     /// The gob the level told the engine is the player, by name.
     pub player: Option<String>,
-    /// The `OBJ_*` values this run needs by meaning, looked up once out of
-    /// the executable's own table.
-    pub object_kinds: BTreeMap<String, f64>,
     /// Objects frozen until the player arrives — a level holds its encounters
     /// this way, and a boot of all ten puts hundreds there.
     pub stasis: BTreeSet<String>,
@@ -207,35 +207,10 @@ fn room_index(v: &Value) -> Option<usize> {
 
 /// Install the whole surface: the implemented half, then a recorder for
 /// every other name the binary registers.
-pub fn install(
-    lua: &Lua,
-    sources: BTreeMap<String, String>,
-    surface: &crate::game::surface::Surface,
-) -> Result<(), Error> {
+pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error> {
     world::install(lua)?;
-    lua.set_app_data(Boot {
-        sources,
-        delta: 1.0 / 30.0,
-        object_kinds: [
-            (OBJ_ROOM_NAME, surface.constant(OBJ_ROOM_NAME).unwrap_or(0.0)),
-            (
-                OBJ_STATICLIGHT_NAME,
-                surface.constant(OBJ_STATICLIGHT_NAME).unwrap_or(0.0),
-            ),
-        ]
-        .into_iter()
-        .map(|(n, v)| (n.to_string(), v))
-        .collect(),
-        ..Boot::default()
-    });
+    lua.set_app_data(Boot { sources, delta: 1.0 / 30.0, ..Boot::default() });
     let globals = lua.globals();
-
-    // the ALL_CAPS globals are the engine's constants, and they are numbers:
-    // the scripts add them as bit flags. Their values come out of the
-    // player's own executable rather than out of this repository.
-    for (name, value) in &surface.constants {
-        globals.set(name.as_str(), *value)?;
-    }
 
     // --- the scene ------------------------------------------------------
     let scene = lua.create_function(|_, ()| Ok("scene"))?;
@@ -621,18 +596,17 @@ pub fn install(
     // function() end`. Reading the convention rather than guessing is what
     // `tools/luarun.py` established, and it is what gets all 129 checkpoints
     // through.
-    for name in surface.functions.keys() {
-        if globals.contains_key(name.as_str())? {
+    for (name, _address) in FUNCTIONS {
+        if globals.contains_key(name)? {
             continue;
         }
         let makes = ["Create", "Make", "New", "Get"].iter().any(|w| name.contains(w));
-        let recorded = name.clone();
         globals.set(
-            name.as_str(),
+            name,
             lua.create_function(move |lua, _: Variadic<Value>| {
                 *boot_mut(lua)?
                     .unimplemented
-                    .entry(recorded.clone())
+                    .entry(name.to_string())
                     .or_insert(0) += 1;
                 if makes {
                     Ok(Value::Table(lua.create_table()?))

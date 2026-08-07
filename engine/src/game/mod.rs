@@ -5,6 +5,7 @@ pub mod api;
 pub mod body;
 pub mod install;
 pub mod level;
+pub mod constants;
+pub mod functions;
 pub mod script;
-pub mod surface;
 pub mod world;
