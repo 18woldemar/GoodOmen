@@ -93,6 +93,8 @@ ENGINE = [
       "--tex", "--expect", "761"], None),
     ("the engine's models agree with mod2obj.py",
      ["modcheck.py", "extracted", "--run", "$MDK2_GOG"], "base"),
+    ("the engine's collision trees agree with bsp.py",
+     ["bsp.py", "extracted", "--engine", "$MDK2_GOG"], "base"),
     ("the Windows build runs the same",
      ["sh", "tools/winbuild.sh"], None),
     ("the engine's own tests pass",

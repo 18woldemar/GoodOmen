@@ -134,6 +134,82 @@ def depth(nodes: list) -> int:
     return best
 
 
+def probe_points(nodes: list) -> list[tuple[float, float, float]]:
+    """Query points derived from the tree itself, so no other file is needed
+    and two implementations can be asked exactly the same thing.
+
+    The first are the feet of the planes, negated -- `contains` negates again,
+    so each lands **exactly on** a plane, which is where two implementations
+    would differ if either got the `>= 0` boundary wrong. The rest are a 4x4x4
+    grid over the box those feet span. `engine/src/main.rs` builds the same
+    list, in the same order.
+    """
+    out = [tuple(-normal[c] * dist for c in range(3))
+           for normal, dist, _f, _b in nodes[:256]]
+    lo = [min(p[c] for p in out) for c in range(3)]
+    hi = [max(p[c] for p in out) for c in range(3)]
+    for a in range(4):
+        for b in range(4):
+            for c in range(4):
+                t = (a, b, c)
+                out.append(tuple(lo[k] + (hi[k] - lo[k]) * t[k] / 3.0
+                                 for k in range(3)))
+    return out
+
+
+def digest(files: list[Path]) -> int:
+    """`name nodes depth inside crc32` a line, which is what the engine
+    prints for `--bsp`."""
+    import zlib
+    for f in sorted(files, key=lambda p: p.name.lower()):
+        nodes = parse(f.read_bytes())
+        validate(nodes)
+        answers = bytes(contains(nodes, p) for p in probe_points(nodes))
+        print(f"{f.name.lower()} {len(nodes)} {depth(nodes)} "
+              f"{sum(answers)} {zlib.crc32(answers):08x}")
+    print(f"{len(files)} trees", file=sys.stderr)
+    return 0
+
+
+def compare(files: list[Path], gamedir: str) -> int:
+    """Run the engine over `gamedir` and require the same answers.
+
+    Not just the same parse: the `inside` answers come from points that lie
+    exactly on the planes, so the `>= 0` boundary -- the one thing in this
+    format that can be quietly wrong -- is what is being compared.
+    """
+    import subprocess
+    import zlib
+    root = Path(__file__).resolve().parent.parent
+    out = subprocess.run(
+        ["cargo", "run", "--quiet", "--release", "--manifest-path",
+         str(root / "engine/Cargo.toml"), "--", gamedir, "--bsp"],
+        capture_output=True, text=True, check=True).stdout
+    theirs = {}
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) == 5:
+            theirs[f[0]] = (int(f[1]), int(f[2]), int(f[3]), f[4])
+
+    bad = []
+    for f in files:
+        name = f.name.lower()
+        nodes = parse(f.read_bytes())
+        validate(nodes)
+        answers = bytes(contains(nodes, p) for p in probe_points(nodes))
+        mine = (len(nodes), depth(nodes), sum(answers),
+                f"{zlib.crc32(answers):08x}")
+        if theirs.get(name) != mine:
+            bad.append(f"{name}: {mine} against the engine's "
+                       f"{theirs.get(name)}")
+    for name in sorted(set(theirs) - {f.name.lower() for f in files}):
+        bad.append(f"{name}: the engine read it and this did not")
+    for line in bad[:20]:
+        print(f"MISMATCH {line}", file=sys.stderr)
+    print(f"{len(files)} trees, {len(bad)} disagree", file=sys.stderr)
+    return 1 if bad else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("src", type=Path, help="a .bsp file or a directory")
@@ -141,11 +217,23 @@ def main(argv: list[str] | None = None) -> int:
                     help="check every file and report totals")
     ap.add_argument("--point", nargs=3, type=float, metavar=("X", "Y", "Z"),
                     help="report whether this point is inside solid geometry")
+    ap.add_argument("--digest", action="store_true",
+                    help="one line per tree, for --engine to diff")
+    ap.add_argument("--engine", metavar="GAMEDIR",
+                    help="run the engine over this installation and require "
+                         "it to answer identically")
     args = ap.parse_args(argv)
 
-    files = sorted(args.src.glob("*.bsp")) if args.src.is_dir() else [args.src]
+    files = (sorted(args.src.rglob("*.bsp")) if args.src.is_dir()
+             else [args.src])
     if not files:
         ap.error(f"no .bsp files in {args.src}")
+
+    if args.digest:
+        return digest(files)
+
+    if args.engine:
+        return compare(files, args.engine)
 
     if args.point:
         nodes = parse(files[0].read_bytes())

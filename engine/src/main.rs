@@ -5,6 +5,7 @@
 //! in the form `tools/texdec.py --digest` prints, so that
 //! `tools/texcheck.sh` can hold the two implementations to each other.
 
+use goodomen::formats::bsp::Bsp;
 use goodomen::formats::container::crc32;
 use goodomen::formats::model::Model;
 use goodomen::formats::tex::Texture;
@@ -14,6 +15,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let tex = args.iter().any(|a| a == "--tex");
     let models = args.iter().any(|a| a == "--mod");
+    let trees = args.iter().any(|a| a == "--bsp");
     // the only positional argument is the game directory; `--expect N` takes
     // a value, so the token after it is not one
     let root = args
@@ -31,7 +33,7 @@ fn main() {
         }
     };
 
-    if tex || models {
+    if tex || models || trees {
         // `--expect N`, the same convention the Python tools use: a check
         // that silently found nothing is the failure mode worth guarding
         let expect = args
@@ -43,8 +45,10 @@ fn main() {
         // this is being run as a check, only the verdict is wanted
         let (what, found) = if tex {
             ("textures", textures(&mut install, expect.is_none()))
-        } else {
+        } else if models {
             ("models", meshes(&mut install, expect.is_none()))
+        } else {
+            ("trees", collision(&mut install, expect.is_none()))
         };
         if let Some(n) = expect {
             if found != n {
@@ -136,6 +140,97 @@ fn textures(install: &mut Install, list: bool) -> usize {
         found.len()
     );
     found.len()
+}
+
+/// Parse and validate every `.bsp`, then ask each tree the same deterministic
+/// questions, so that a disagreement about *inside* shows and not just a
+/// disagreement about parsing. The points come from the tree's own planes —
+/// see `probe_points`.
+fn collision(install: &mut Install, list: bool) -> usize {
+    let found = entries_named(install, ".bsp");
+    let (mut nodes, mut deepest) = (0usize, 0usize);
+
+    for (name, i, j) in &found {
+        let data = match install.containers[*i].read_at(*j) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("goodomen: {name}: {e}");
+                std::process::exit(1);
+            }
+        };
+        let bsp = match Bsp::parse(&data) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("goodomen: {name}: {e}");
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = bsp.validate() {
+            eprintln!("goodomen: {name}: {e}");
+            std::process::exit(1);
+        }
+        let answers: Vec<u8> = probe_points(&bsp)
+            .into_iter()
+            .map(|p| bsp.contains(p) as u8)
+            .collect();
+        nodes += bsp.nodes.len();
+        deepest = deepest.max(bsp.depth());
+        if list {
+            println!(
+                "{name} {} {} {} {:08x}",
+                bsp.nodes.len(),
+                bsp.depth(),
+                answers.iter().map(|&a| a as usize).sum::<usize>(),
+                crc32(&answers)
+            );
+        }
+    }
+    eprintln!(
+        "{} trees, {nodes} nodes, deepest {deepest}",
+        found.len()
+    );
+    found.len()
+}
+
+/// Query points derived from the tree itself, so no other file is needed and
+/// two implementations can be asked exactly the same thing.
+///
+/// The first are the feet of the planes, negated — `contains` negates again,
+/// so each lands **exactly on** a plane, which is where two implementations
+/// would differ if either got the `>= 0` boundary wrong. The rest are a 4x4x4
+/// grid over the box those feet span.
+fn probe_points(bsp: &Bsp) -> Vec<[f64; 3]> {
+    let mut out: Vec<[f64; 3]> = bsp
+        .nodes
+        .iter()
+        .take(256)
+        .map(|n| {
+            [
+                -(n.normal[0] as f64 * n.dist as f64),
+                -(n.normal[1] as f64 * n.dist as f64),
+                -(n.normal[2] as f64 * n.dist as f64),
+            ]
+        })
+        .collect();
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for p in &out {
+        for c in 0..3 {
+            lo[c] = lo[c].min(p[c]);
+            hi[c] = hi[c].max(p[c]);
+        }
+    }
+    for a in 0..4 {
+        for b in 0..4 {
+            for c in 0..4 {
+                let t = [a, b, c];
+                out.push(std::array::from_fn(|k| {
+                    lo[k] + (hi[k] - lo[k]) * t[k] as f64 / 3.0
+                }));
+            }
+        }
+    }
+    out
 }
 
 /// Every container member with this extension, lowercased and sorted, so that
