@@ -315,6 +315,12 @@ impl Scene {
         for tri in &mesh.triangles {
             // a node has one resource, so a run of triangles shares one
             let slot = mesh.resource[tri[0] as usize];
+            // **0xFF means the node draws nothing**, and it has to be taken
+            // at its word: drawing it with a blank white texture instead put
+            // an untextured lump in the middle of every room.
+            if slot == NO_RESOURCE {
+                continue;
+            }
             let texture = (slot != NO_RESOURCE)
                 .then(|| model.refs.get(slot as usize))
                 .flatten()
