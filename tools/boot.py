@@ -182,6 +182,10 @@ ANSWERS = {"chGetGameWasReset": "0", "mdkLoadLevelIsInstant": "0",
            "mdkCheckpointAddDeleteRoom":
                "function(n, room) DELETES[table.getn(DELETES) + 1] = "
                "{n, room} end",
+           # a number, not nil: script.lua's StopScript tests
+           # `omGobIsStasis(self) == 0` before clearing the script flag
+           "omGobIsStasis":
+               "function(g) return (g and STASIS[g.name]) and 1 or 0 end",
            "mdkGetDifficulty": "0.5",
            "mdkDiffScale": "function(n) return n end"}
 

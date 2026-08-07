@@ -215,6 +215,15 @@ pub struct Boot {
     /// Objects frozen until the player arrives — a level holds its encounters
     /// this way, and a boot of all ten puts hundreds there.
     pub stasis: BTreeSet<String>,
+    /// Objects running a scripted sequence — bit **0x800000** in the
+    /// original's `omgob[0xb4]`, set by `mdkGobEnableScript` (0x40e210) and
+    /// cleared by `mdkGobDisableScript` (0x40e230). The engine calls the Lua
+    /// global **`ScriptUpdate(gob)`** once a tick for each of them and for
+    /// nothing else (0x42be11 tests the bit before the call), which is how
+    /// `scripts/script.lua` drives every cutscene and sequenced action in the
+    /// game — `StartScript`, `StartGlobalScript` and `StartMovie` are used
+    /// 290 times across the level scripts and all three go through it.
+    pub scripted: BTreeSet<String>,
     /// Seconds since the last frame. A boot has not drawn one, so it holds
     /// the rate the recorded demo runs at — 30 fps — rather than zero, which
     /// would divide.
@@ -548,6 +557,19 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 boot_mut(lua)?.stasis.remove(&name);
             }
             Ok(())
+        })?,
+    )?;
+    // `omGobIsStasis(gob)` — **a number**, 0 or 1 (0x41f720 pushes an int),
+    // and answering it is not optional. `script.lua`'s `StopScript` reads
+    // `omGobIsStasis(self) == 0` before clearing the script flag, so a
+    // recorder answering `nil` makes that test false: no script ever stops,
+    // the flag stays set, and `ScriptUpdate` runs off the end of its own
+    // task list on the next tick. 840 of a run's 1741 calls died that way.
+    globals.set(
+        "omGobIsStasis",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(name) = args.first().and_then(gob_name) else { return Ok(0.0) };
+            Ok(if boot_ref(lua)?.stasis.contains(&name) { 1.0 } else { 0.0 })
         })?,
     )?;
     // the dynamic half of the event surface, writing the same slot the
@@ -900,6 +922,25 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             Ok(())
         })?,
     )?;
+
+    // The scripted-sequence flag. `script.lua`'s `StartScript` sets it and
+    // the driver then calls `ScriptUpdate` on the object every tick.
+    for name in ["mdkGobEnableScript", "mdkGobDisableScript"] {
+        let on = name == "mdkGobEnableScript";
+        globals.set(
+            name,
+            lua.create_function(move |lua, args: Variadic<Value>| {
+                let Some(gob) = args.first().and_then(gob_name) else { return Ok(()) };
+                let mut boot = boot_mut(lua)?;
+                if on {
+                    boot.scripted.insert(gob);
+                } else {
+                    boot.scripted.remove(&gob);
+                }
+                Ok(())
+            })?,
+        )?;
+    }
 
     // --- damage, and dying ----------------------------------------------
     // `mdkDealDamage(source, victim, amount, type, part)` — 0x43bb20 into
@@ -1782,6 +1823,10 @@ pub struct Ticking {
     /// count because the two answer different questions: whether the body
     /// meets anything, and whether what it meets is scripted.
     pub touched: BTreeSet<String>,
+    /// Why handlers stopped, by message without its position — the same
+    /// grouping `fire_events` uses, so a run's failures can be read the way
+    /// a boot's are.
+    pub why: BTreeMap<String, usize>,
 }
 
 impl Ticking {
@@ -1984,6 +2029,39 @@ pub fn tick_touching(
     for name in awake {
         if let Ok(gob) = globals.get::<mlua::Table>(name.as_str()) {
             state.call(&gob, "OnUpdate");
+        }
+    }
+
+    // and the scripted sequences. 0x42bd60 tests bit 0x800000 on each gob
+    // and calls the Lua global `ScriptUpdate` for the ones that have it —
+    // **not a handler on the object**, a global taking the object, which is
+    // why `script.lua` defines exactly one of them for the whole game.
+    //
+    // The clock has to be written first: `ScriptUpdate` opens with
+    // `chGetDeltaT()` and every wait in every cutscene counts down by it.
+    boot_mut(&scripts.lua)?.delta = dt;
+    let running: Vec<String> = boot_ref(&scripts.lua)?.scripted.iter().cloned().collect();
+    if !running.is_empty() {
+        if let Ok(update) = globals.get::<mlua::Function>("ScriptUpdate") {
+            for name in running {
+                let Ok(gob) = globals.get::<mlua::Table>(name.as_str()) else { continue };
+                let entry = state.fired.entry("ScriptUpdate".to_string()).or_insert((0, 0));
+                entry.0 += 1;
+                match update.call::<Value>(gob) {
+                    Ok(_) => entry.1 += 1,
+                    Err(e) => {
+                        // grouped the way `fire_events` groups: the message
+                        // without its position
+                        let text = e.to_string();
+                        let line = text.lines().next().unwrap_or("").to_string();
+                        let kind = line
+                            .rfind(": ")
+                            .map(|i| line[i + 2..].to_string())
+                            .unwrap_or(line);
+                        *state.why.entry(kind).or_insert(0) += 1;
+                    }
+                }
+            }
         }
     }
 

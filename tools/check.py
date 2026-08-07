@@ -138,7 +138,7 @@ ENGINE = [
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--run", "1", "5", "45", "--expect-rooms", "1",
-      "--expect-events", "13500", "--expect-survived", "12150",
+      "--expect-events", "18900", "--expect-survived", "17550",
       "--expect-touched", "1"], None),
     ("a run reaches a spawner and the enemies arrive with hitpoints",
      ["cargo", "run", "--quiet", "--release",

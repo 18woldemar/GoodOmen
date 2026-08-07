@@ -1016,6 +1016,8 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         (w.generation(), boot.playing.len(), what, sounds, boot.spawned.len())
     };
     let (fired, survived) = state.total();
+    let mut stopped: Vec<(&String, &usize)> = state.why.iter().collect();
+    stopped.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
     let mut slots: Vec<String> = state
         .fired
         .iter()
@@ -1046,7 +1048,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
          {moved} object moves, {playing} animations chosen, \
          {fired_sounds} sounds fired, {spawned} objects spawned, \
          {} objects touched and {} of them \
-         scripted{}{} [{}]",
+         scripted{}{} [{}]{}",
         if recorded { "the game's own recorded" } else { "held-forwards" },
         body.travelled,
         body.hits,
@@ -1063,7 +1065,22 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
             )
         },
         if what.is_empty() { String::new() } else { format!(" ({})", what.join(", ")) },
-        slots.join(", ")
+        slots.join(", "),
+        // and the commonest reasons handlers stopped, which name the state
+        // the driver does not hold yet
+        if stopped.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " stopped: {}",
+                stopped
+                    .iter()
+                    .take(3)
+                    .map(|(k, n)| format!("{n}x {k}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        }
     ))
 }
 
