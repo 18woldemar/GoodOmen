@@ -1,0 +1,12 @@
+[package]
+name = "goodomen"
+version = "0.1.0"
+edition = "2021"
+description = "An open reimplementation of the MDK2 engine, run on your own copy of the game"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true

@@ -81,6 +81,17 @@ CORPUS = [
      "scripts/level1.lua"),
 ]
 
+# The engine is Rust and the tools are Python, and where both can do a thing
+# they must agree. Skipped when cargo is not installed.
+ENGINE = [
+    ("the engine reads every container",
+     ["cargo", "run", "--quiet", "--release",
+      "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG"], None),
+    ("the engine's own tests pass",
+     ["cargo", "test", "--lib", "--manifest-path", "engine/Cargo.toml"],
+     None),
+]
+
 # needs the game executable and unicorn, so it is opt-in
 SLOW = [
     ("texture codec matches the original",
@@ -112,11 +123,18 @@ def _env() -> dict:
 
 
 def _run(argv: list[str]) -> tuple[bool, str]:
-    p = subprocess.run([PYTHON, str(ROOT / "tools" / argv[0])]
-                       + argv[1:], cwd=ROOT, capture_output=True, text=True,
+    # a `.py` name is one of our tools; anything else is a command, which is
+    # how the Rust engine gets checked against the Python that defines it
+    cmd = ([PYTHON, str(ROOT / "tools" / argv[0])] + argv[1:]
+           if argv[0].endswith(".py") else argv)
+    p = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
                        env=_env())
-    tail = (p.stderr or p.stdout or "").strip().splitlines()
-    return p.returncode == 0, tail[-1] if tail else ""
+    out = (p.stderr or "") + (p.stdout or "")
+    lines = [l for l in out.strip().splitlines() if l.strip()]
+    # cargo prints a result line per target; the one that ran the tests is
+    # the one worth showing
+    real = [l for l in lines if l.startswith("test result:") and "0 passed" not in l]
+    return p.returncode == 0, (real or lines or [""])[-1]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -139,11 +157,18 @@ def main(argv: list[str] | None = None) -> int:
     if not args.quick:
         env = _env()
         exe = Path(env.get("MDK2_GOG", "")) / "mdk2Main.exe"
-        for label, cmd, needs in CORPUS + (SLOW if args.slow else []):
+        import shutil
+        engine = ENGINE if shutil.which("cargo") else []
+        if not engine:
+            print("skip  the engine -- cargo is not installed")
+            skipped += len(ENGINE)
+        for label, cmd, needs in CORPUS + engine + (SLOW if args.slow else []):
             cmd = [c.replace("$MDK2_GOG", env.get("MDK2_GOG", ""))
                    for c in cmd]
-            if needs is None:                       # a path in the game dir
-                if not Path(cmd[1]).exists():
+            if needs is None:
+                # a tool given a path in the game directory; a command that
+                # is not one of our tools brings its own inputs
+                if cmd[0].endswith(".py") and not Path(cmd[1]).exists():
                     print(f"skip  {label} -- no {cmd[1]}")
                     skipped += 1
                     continue

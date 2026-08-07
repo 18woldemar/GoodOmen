@@ -57,3 +57,6 @@ png/
 
 # generated viewers embed assets
 view/
+
+# the engine's build output
+engine/target/
