@@ -132,6 +132,50 @@ def constants(image: Image) -> dict[str, float]:
     return out[site]
 
 
+def functions(image: Image) -> dict[str, int]:
+    """Every Lua function the binary registers, and where its body is.
+
+    The same shape as the constants, one push shorter:
+
+        push 0x43ac80                   ; the C function
+        push str.mdkRegisterObject
+        push 0
+        call 0x444890                   ; register_function(0, name, fn)
+
+    cdecl again, so the callee sees `(0, name, function)`. A pointer is only
+    accepted when it addresses `.text`, which is what keeps this from
+    matching a constant registration or a coincidence of bytes.
+    """
+    data = image.data
+    _n, sva, _vs, raw, rsize = image.section(".text")
+    lo, hi = image.base + sva, image.base + sva + rsize
+    out: dict[int, dict[str, int]] = {}
+    o, end = raw, raw + rsize
+    while o < end - 20:
+        if data[o] != PUSH_IMM32:
+            o += 1
+            continue
+        p, args = o, []
+        for _ in range(3):
+            got = _push(data, p)
+            if not got:
+                break
+            args.append(got[0])
+            p = got[1]
+        if len(args) == 3 and args[2] == 0 and data[p] == CALL_REL32 \
+                and lo <= args[0] < hi:
+            name = image.identifier(args[1])
+            if name:
+                target = image.base + sva + (p + 5 - raw) + \
+                    struct.unpack_from("<i", data, p + 1)[0]
+                out.setdefault(target, {})[name] = args[0]
+        o += 1
+    if not out:
+        raise ValueError("no function registrations found")
+    site = max(out, key=lambda k: len(out[k]))
+    return out[site]
+
+
 def _pretty(value: float) -> str:
     return str(int(value)) if value == int(value) else repr(value)
 
@@ -153,6 +197,42 @@ def markdown(table: dict[str, float]) -> str:
              "|---|---|"]
     lines += [f"| `{n}` | {_pretty(v)} |" for n, v in sorted(table.items())]
     return "\n".join(lines) + "\n"
+
+
+def rust_functions(table: dict[str, int]) -> str:
+    body = "\n".join(f'    ("{n}", {v:#x}),' for n, v in sorted(table.items()))
+    return f'''//! Every Lua function the original registers, and the address of its body.
+//!
+//! **Generated** by `tools/luaconst.py --functions` from `mdk2Main.exe` -- do
+//! not edit by hand. Each is registered as `push fn; push name; push 0;
+//! call`, so `(0, name, function)`, and the pointer is only accepted when it
+//! addresses `.text`.
+//!
+//! The addresses are here because they are the evidence and because they are
+//! where to look when a function has to be understood. **Nothing is
+//! disassembled into this engine**; the list is a surface and a work list.
+//!
+//! {len(table)} of them.
+
+/// `(name, the address of the original's body)`, sorted by name.
+pub const FUNCTIONS: [(&str, u32); {len(table)}] = [
+{body}
+];
+
+#[cfg(test)]
+mod tests {{
+    use super::*;
+
+    /// Two read straight off the disassembly at 0x436154.
+    #[test]
+    fn the_addresses_are_the_ones_the_binary_registers() {{
+        let find = |want: &str| FUNCTIONS.iter().find(|(n, _)| *n == want).map(|(_, a)| *a);
+        assert_eq!(find("mdkRegisterObject"), Some(0x43ac80));
+        assert_eq!(find("mdkCreateObjectLua"), Some(0x43b040));
+        assert!(FUNCTIONS.windows(2).all(|w| w[0].0 < w[1].0), "sorted, unique");
+    }}
+}}
+'''
 
 
 def rust(table: dict[str, float]) -> str:
@@ -232,6 +312,9 @@ def main(argv: list[str] | None = None) -> int:
                     default=Path(os.environ.get("MDK2_GOG", ".")) / "mdk2Main.exe")
     ap.add_argument("--markdown", action="store_true")
     ap.add_argument("--rust", action="store_true")
+    ap.add_argument("--functions", action="store_true",
+                    help="the registered functions and their addresses "
+                         "instead of the constants")
     ap.add_argument("--coverage", type=Path, nargs="+", metavar="DIR")
     ap.add_argument("--expect", type=int, help="fail unless this many are found")
     ap.add_argument("--expect-undefined", type=int, metavar="N",
@@ -244,7 +327,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{args.exe} is not there -- set MDK2_GOG or pass --exe",
               file=sys.stderr)
         return 1
-    table = constants(Image(args.exe.read_bytes()))
+    image = Image(args.exe.read_bytes())
+    if args.functions:
+        found = functions(image)
+        if args.expect is not None and len(found) != args.expect:
+            print(f"{len(found)} functions, expected {args.expect}",
+                  file=sys.stderr)
+            return 1
+        if args.rust:
+            sys.stdout.write(rust_functions(found))
+        else:
+            for n, a in sorted(found.items()):
+                print(f"{n} {a:#x}")
+        print(f"{len(found)} functions", file=sys.stderr)
+        return 0
+    table = constants(image)
 
     if args.expect is not None and len(table) != args.expect:
         print(f"{len(table)} constants, expected {args.expect}", file=sys.stderr)

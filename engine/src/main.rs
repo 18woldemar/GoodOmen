@@ -40,6 +40,36 @@ fn main() {
         }
         return;
     }
+    // `--boot [N [CP]]` starts a level the way the game does. No GL.
+    if let Some(i) = args.iter().position(|a| a == "--boot") {
+        // the level and checkpoint are positional and both optional, so a
+        // flag right after `--boot` must not be read as one
+        let n: u32 = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(0);
+        let cp: u32 = if n > 0 {
+            args.get(i + 2).and_then(|v| v.parse().ok()).unwrap_or(0)
+        } else {
+            0
+        };
+        let root = args
+            .iter()
+            .zip(std::iter::once(&String::new()).chain(args.iter()))
+            .find(|(a, before)| {
+                !a.starts_with("--")
+                    && a.parse::<u32>().is_err()
+                    && *before != "--expect"
+            })
+            .map(|(a, _)| std::path::PathBuf::from(a))
+            .unwrap_or_else(Install::beside_the_binary);
+        match boot(&root, n, cp, args.iter().any(|a| a == "--work-list")) {
+            Ok(line) => println!("{line}"),
+            Err(e) => {
+                eprintln!("goodomen: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     // `--demo l1.lua demo1_5.omn --from x,y,z --yaw a` replays the game's
     // own recorded input through the controller. No GL, so it runs anywhere.
     if let Some(i) = args.iter().position(|a| a == "--demo") {
@@ -205,6 +235,165 @@ fn main() {
         install.entry_count(),
         bytes as f64 / (1024.0 * 1024.0)
     );
+}
+
+/// Start levels the way the game does, and report what they asked for.
+///
+/// With `n` and `cp` zero it starts **every** level at **every** checkpoint,
+/// which is `tools/boot.py`'s measure and the one that says the sequence not
+/// only runs but can be satisfied.
+fn boot(root: &std::path::Path, n: u32, cp: u32, work_list: bool) -> Result<String, String> {
+    let mut install = Install::open(root).map_err(|e| e.to_string())?;
+    // every script, in one map, so the engine's `dofile` can resolve a bare
+    // resource name the way the original's does
+    let mut sources = std::collections::BTreeMap::new();
+    for (name, i, j) in entries_named(&install, ".lua") {
+        if let Ok(bytes) = install.containers[i].read_at(j) {
+            sources.insert(name, bytes.iter().map(|&b| b as char).collect::<String>());
+        }
+    }
+    if let Some(dir) = install.override_dir.clone() {
+        if let Ok(read) = std::fs::read_dir(&dir) {
+            for e in read.flatten() {
+                let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+                if name.ends_with(".lua") {
+                    if let Ok(bytes) = std::fs::read(e.path()) {
+                        sources.insert(name, bytes.iter().map(|&b| b as char).collect());
+                    }
+                }
+            }
+        }
+    }
+
+    // which checkpoints each level has is what the previous boot found, so
+    // the sweep asks each level once and then starts each checkpoint it named
+    let levels: Vec<u32> = if n > 0 { vec![n] } else { (1..=10).collect() };
+    let (mut started, mut rooms, mut checkpoints) = (0usize, 0usize, 0usize);
+    let mut resources = std::collections::BTreeSet::new();
+    let mut sounds = std::collections::BTreeSet::new();
+    let mut work: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut failures = Vec::new();
+
+    for level in levels {
+        // one boot to learn the checkpoints, then one per checkpoint
+        let first = match run_one(&sources, level, cp.max(1), "sectionA") {
+            Ok(b) => b,
+            Err(e) => {
+                failures.push(format!("l{level} cp{}: {e}", cp.max(1)));
+                continue;
+            }
+        };
+        let numbers: Vec<u32> = if cp > 0 {
+            vec![cp]
+        } else {
+            let mut v: Vec<u32> = first.checkpoints.iter().map(|c| c.index as u32).collect();
+            v.sort_unstable();
+            v.dedup();
+            if v.is_empty() { vec![1] } else { v }
+        };
+        // a level's rooms and checkpoints are the same at every checkpoint,
+        // so they are counted once per level rather than once per boot
+        rooms += first.rooms.len();
+        checkpoints += first.checkpoints.len();
+        for number in numbers {
+            match run_one(&sources, level, number, "sectionA") {
+                Ok(b) => {
+                    started += 1;
+                    resources.extend(b.resources.iter().cloned());
+                    sounds.extend(b.sounds.iter().cloned());
+                    for (name, count) in &b.unimplemented {
+                        *work.entry(name.clone()).or_insert(0) += count;
+                    }
+                }
+                Err(e) => failures.push(format!("l{level} cp{number}: {e}")),
+            }
+        }
+    }
+
+    let mut missing = 0usize;
+    for name in resources.iter().chain(sounds.iter()) {
+        if install.read(name).is_err()
+            && install.read(&format!("{name}.mod")).is_err()
+            && install.read(&format!("{name}.tex")).is_err()
+            && install.read(&format!("{name}.wav")).is_err()
+        {
+            missing += 1;
+        }
+    }
+
+    if work_list {
+        let mut ranked: Vec<(&String, &usize)> = work.iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        for (name, count) in ranked {
+            println!("{name} {count}");
+        }
+    }
+    for f in failures.iter().take(10) {
+        eprintln!("goodomen: {f}");
+    }
+    if !failures.is_empty() {
+        return Err(format!("{} of {} boots failed", failures.len(), failures.len() + started));
+    }
+    for (what, got, want) in [
+        ("boots", started, args_expect()),
+        ("resources", resources.len(), expect_flag("--expect-resources")),
+        ("rooms", rooms, expect_flag("--expect-rooms")),
+    ] {
+        if let Some(want) = want {
+            if got != want {
+                return Err(format!("{got} {what}, expected {want}"));
+            }
+        }
+    }
+    if missing > 0 {
+        return Err(format!("{missing} named resources are not in the game"));
+    }
+    Ok(format!(
+        "{started} boots, {} resources and {} hard-coded sounds named \
+         ({missing} missing), {rooms} rooms, {checkpoints} checkpoints, \
+         {} functions called with no behaviour yet",
+        resources.len(),
+        sounds.len(),
+        work.len()
+    ))
+}
+
+/// `--expect N`, read here rather than threaded through, because the boot is
+/// the only caller.
+fn args_expect() -> Option<usize> {
+    expect_flag("--expect")
+}
+
+fn expect_flag(flag: &str) -> Option<usize> {
+    let args: Vec<String> = std::env::args().collect();
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse().ok())
+}
+
+/// One level start in a state of its own — the gobs are destroyed between
+/// levels, and a fresh state is the honest way to say so.
+fn run_one(
+    sources: &std::collections::BTreeMap<String, String>,
+    level: u32,
+    checkpoint: u32,
+    section: &str,
+) -> Result<goodomen::game::api::Boot, String> {
+    use goodomen::game::api;
+    use goodomen::game::script::Scripts;
+
+    let scripts = Scripts::new().map_err(|e| e.to_string())?;
+    api::install(&scripts.lua, sources.clone()).map_err(|e| e.to_string())?;
+    let boot = sources
+        .get("mdk2.lua")
+        .ok_or_else(|| "no mdk2.lua".to_string())?;
+    scripts.run("mdk2.lua", boot).map_err(|e| e.to_string())?;
+    api::level(&scripts, level, checkpoint, section).map_err(|e| e.to_string())?;
+    scripts
+        .lua
+        .remove_app_data::<api::Boot>()
+        .ok_or_else(|| "no boot state".to_string())
 }
 
 /// Replay a recorded demo through the controller and say where the body went.
