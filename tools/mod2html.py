@@ -37,6 +37,13 @@ Two ceilings, both deliberate: a model with more than 64 nodes does not fit
 the uniform array WebGL 1 guarantees and stays in its bind pose (9 of level
 1's models), and only animation 0 plays, on a loop.
 
+**And the level's ambience.** `OBJ_AMBIENTSOUND` objects are placed in the
+scene graph like anything else, so the page loops each one through WebAudio
+with a distance falloff and the level has a sound again -- six sources and
+three clips in level 1, 354 KiB of them. It needs `ffmpeg` at build time to
+turn the WAVC into RIFF, and is skipped without it; browsers will not start
+audio before a gesture, so the first click or key does.
+
 For one of the ten levels it also embeds the **room graph** (`tools/rooms.py`)
 and uses the level's own visibility: standing in a room, only that room and
 the rooms it lists are drawn, which at the game's own spawn points is a median
@@ -80,7 +87,7 @@ b{color:#dde}
 <canvas id=c></canvas>
 <div id=hud><b>__TITLE__</b><br>__STATS__<br>drag to look &middot; WASD &middot;
 R/F up-down &middot; shift faster<span id=walkhelp></span><br>
-mode: <b id=mode>flying</b><span id=roomline></span>
+mode: <b id=mode>flying</b><span id=roomline></span><span id=sound></span>
 <pre id=events></pre></div>
 <script>
 const MESH = __MESH__, TEX = __TEX__;
@@ -131,6 +138,47 @@ for (const [name, uri] of Object.entries(TEX)) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
   };
   img.src = uri;
+}
+
+// --- the level's ambient sound, when ffmpeg was there to decode it ------
+// SOUND.sources are OBJ_AMBIENTSOUND objects straight from the scene graph.
+// Three of their four payload numbers are readable: a near distance, a far
+// distance (near < far in all 80 in the corpus) and a volume. The fourth is
+// not explained -- see scene_sounds(). Browsers will not start audio before
+// a gesture, so the first click or key starts it.
+const SOUND = __SOUND__;
+let audio = null;
+function startAudio(){
+  if (audio || !SOUND) return;
+  audio = new (window.AudioContext || window.webkitAudioContext)();
+  for (const s of SOUND.sources){
+    s.gainNode = audio.createGain();
+    s.gainNode.gain.value = 0;
+    s.gainNode.connect(audio.destination);
+    fetch(SOUND.clips[s.clip]).then(r => r.arrayBuffer())
+      .then(b => audio.decodeAudioData(b))
+      .then(buf => {
+        const src = audio.createBufferSource();
+        src.buffer = buf; src.loop = true;
+        src.connect(s.gainNode); src.start();
+      }).catch(() => {});
+  }
+  document.getElementById('sound').textContent = ' \u00b7 sound on';
+}
+addEventListener('pointerdown', startAudio, {once: true});
+addEventListener('keydown', startAudio, {once: true});
+function mixAudio(p){
+  if (!audio) return;
+  for (const s of SOUND.sources){
+    if (!s.gainNode) continue;
+    const d = Math.hypot(p[0]-s.pos[0], p[1]-s.pos[1], p[2]-s.pos[2]);
+    // full volume inside `near`, falling linearly to nothing at `far`
+    let g = 0;
+    if (d <= s.near) g = s.gain;
+    else if (d < s.far) g = s.gain * (1 - (d - s.near) / (s.far - s.near));
+    if (shown && !shown.has(s.room)) g = 0;
+    s.gainNode.gain.value = g;
+  }
 }
 
 // --- the animated objects, when the page was built with --scene ---------
@@ -464,6 +512,7 @@ function frame(){
       gl.bindTexture(gl.TEXTURE_2D, textures[d.tex] || blank);
       gl.drawArrays(gl.TRIANGLES, d.first, d.count);
     }
+  mixAudio(pos);
   drawMovers(mvp, now, false);
   gl.enable(gl.BLEND); gl.depthMask(false);
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
@@ -749,6 +798,63 @@ def _pack_model(model: Model, anim: dict, data: bytearray,
             "first": first_vertex}
 
 
+AMBIENT = "OBJ_AMBIENTSOUND"
+
+
+def scene_sounds(path: Path, resources: Path,
+                 ffmpeg: str = "ffmpeg") -> dict | None:
+    """The level's ambient sounds, decoded and placed. -> {clips, sources}.
+
+    The scene graph puts these down like any other object, and three of the
+    four numbers in the payload slot are readable. Slots 0 and 1 are a near
+    and a far distance -- **near < far in all 80 ambient objects in the
+    corpus**, 1 to 40 units against 6 to 80 -- and slot 3 is the volume, 0.4
+    to 1.0. The `.mod` animation channels say the same thing from a different
+    file: a sound is animated through kind 32 (volume, 1.0), kind 33 (min
+    distance, 5 to 50) and kind 34 (max distance, 500). Three parameters, not
+    four.
+
+    **Slot 2 is not explained.** It takes four values, 0.0, 0.1, 0.2 and 0.3,
+    and a first reading of it as "the volume out at the far distance" fitted
+    the data -- slot 3 is never below it, in all 80 -- but so would anything
+    small, and the channel kinds say the engine's sound has no such
+    parameter. It is left out rather than guessed at, and the falloff here
+    runs from the volume at `near` to nothing at `far`.
+
+    A level uses few of them -- six objects and three distinct sounds in
+    level 1 -- so the clips fit in the page beside the textures.
+    """
+    import shutil
+    if not shutil.which(ffmpeg):
+        return None
+    import wavc
+    graph = sg.parse(path.read_text(errors="replace"))
+    where = object_rooms(graph)
+    clips: dict[str, str] = {}
+    sources = []
+    for o in graph["objects"]:
+        if o["type"] != AMBIENT or o["resource"] is None:
+            continue
+        found = sg.resolve(o, graph, resources)
+        if not isinstance(found, Path) or not found.is_file():
+            continue
+        name = found.stem
+        if name not in clips:
+            try:
+                wav = wavc.to_wav(found.read_bytes(), ffmpeg)
+            except Exception:
+                continue
+            clips[name] = ("data:audio/wav;base64,"
+                           + base64.b64encode(wav).decode())
+        near, far, _unexplained, volume = (list(o["payload"]) + [0] * 4)[:4]
+        sources.append({"clip": name, "pos": list(o["position"]),
+                        "near": near, "far": far, "gain": volume,
+                        "room": where.get(o["name"]) or ""})
+    if not sources:
+        return None
+    return {"clips": clips, "sources": sources}
+
+
 def _qrot(q, v):
     """The shader's rotation, with q as (x, y, z, w) -- see the vertex shader."""
     x, y, z, w = q
@@ -982,14 +1088,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.src is None or args.out is None:
         ap.error("src and -o are required")
 
-    coll, spawns, room_graph, movers = None, None, None, None
+    coll, spawns, room_graph, movers, sounds = None, None, None, None, None
     if args.scene:
         movers = scene_movers(args.src, args.resources)
+        sounds = scene_sounds(args.src, args.resources)
         verts, tris, placed = scene_geometry(args.src, args.resources,
                                              animate=movers is not None)
         what = f"{placed} objects"
         if movers:
             what += f" &middot; {len(movers['movers'])} animated"
+        if sounds:
+            what += f" &middot; {len(sounds['sources'])} ambient sounds"
         room_graph = _rooms(args.src, args.resources)
         if room_graph:
             what += f" &middot; {len(room_graph)} rooms"
@@ -1018,7 +1127,8 @@ def main(argv: list[str] | None = None) -> int:
                 .replace("__COLL__", json.dumps(coll))
                 .replace("__SPAWNS__", json.dumps(spawns))
                 .replace("__ROOMS__", json.dumps(room_graph))
-                .replace("__MOVE__", json.dumps(movers)))
+                .replace("__MOVE__", json.dumps(movers))
+                .replace("__SOUND__", json.dumps(sounds)))
     args.out.write_text(page)
     print(f"{args.out}: {stats.replace('&middot;', '|')}, "
           f"{len(page)/2**20:.1f} MiB", file=sys.stderr)
