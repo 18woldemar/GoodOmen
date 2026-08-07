@@ -15,7 +15,7 @@ scratch. The model is OpenMW and devilutionX.
 | `tools/unpack.py` | Unpacks the `data/*.zip` containers. **4751/4751 files, every CRC32 matches.** |
 | `tools/tex2png.py` | Converts `.tex` textures to PNG. **761/761**, with no emulator and no game executable. |
 | `tools/texdec.py` | The `.tex` block codec, reimplemented from scratch. **Byte-identical to the original on all 4205514 blocks.** |
-| `tools/mod2obj.py` | Reads `.mod` models. **2207/2207, 857321 triangles.** Exports OBJ, renders textured previews and turntables. |
+| `tools/mod2obj.py` | Reads `.mod` models. **2207/2207, 857321 triangles.** Exports OBJ, renders textured previews and turntables, and plays animation with slerped rotations. |
 | `tools/mod2html.py` | Packs a model — or, with `--scene`, a whole level and everything standing in it — into a single self-contained WebGL viewer. Geometry and textures inlined, no libraries, no server. |
 | `tools/bsp.py` | Reads and validates the `.bsp` collision trees; point-in-solid and drop queries. **692/692 validate.** |
 | `tools/scene.py` | Reads the level scene graphs — every object's type, position, parent and resource. **54 files, 5633 objects, 0 complaints.** |
@@ -49,7 +49,7 @@ Hence the name: the engine is called Omen, so ours is a good one.
 |---|---|
 | `data/*.zip` | ZIP, compression method **10 (PKWARE DCL Implode)**. Neither `zipfile`, `unzip`, `7z` nor `bsdtar` can read it — the decompressor here is our own. |
 | `.tex` | A mip chain at exactly **4 bits per pixel** down to 8×8, then the 4×4/2×2/1×1 levels as raw BGRA (the 84-byte tail). The 4 bpp coding is a **multi-mode block codec**: 8×4-pixel blocks in 16 bytes, each two independent 4×4 sub-blocks, with **six layouts** chosen by the top four bits. Fully decoded — see [`tools/texdec.py`](tools/texdec.py). |
-| `.mod` | Node hierarchy with per-node bounding boxes, **triangle strips over consecutive vertices — there is no index list**, 32-byte vertices (position + UV), animation as (time, key) pairs at 18 fps, and a 21-byte resource table naming the model's texture and sounds. |
+| `.mod` | Node hierarchy with per-node bounding boxes, **triangle strips over consecutive vertices — there is no index list**, 32-byte vertices (position + UV), animation as (time, key) pairs interpolated between keys — slerp for rotations — and a 21-byte resource table naming the model's texture and sounds. |
 | `.bsp` | Not geometry: a flat array of 24-byte BSP nodes (unit plane + two child indices), no header at all. A point is solid when the descent reaches a leaf through the *front* child — **with the point negated**, since the tree is authored in a mirrored frame. **692/692 trees validate.** |
 | `.lua` | Plain text, and **Lua 3.x** — the scripts use the `$if` / `$end` pragmas that only Lua 3 had. `base/l*.lua` are the level scene graphs: 5633 `mdkRegisterObject` calls placing every object in the game. |
 | `.str` | 686 entries of `{id, text, sound}`. Text is **UTF-16LE**, so one file per language is enough; `sound` names the `.wav` that speaks the line. |
@@ -68,7 +68,7 @@ traces, apitrace on the GL stream — is in
 - [x] **M2** Every texture converts to PNG without artefacts, and the codec is our own
 - [x] **M3** Kurt's model spins in a viewer, textured
 - [x] **M4** Level geometry loads, free camera flies through it
-- [x] **M5** Skeletal animation plays back
+- [x] **M5** Skeletal animation plays back, interpolated
 - [ ] **M6** The character runs around a level, collision works
 - [ ] **M7** Scripts, triggers, enemies
 - [ ] **M8** The first level can be played end to end

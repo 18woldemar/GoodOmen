@@ -49,11 +49,22 @@ Node record fields used here:
     +0x34 float[3]  translation from the parent
     +0x87 u8        index into the section 8 reference table; 0xFF = none
 
-Vertices are in **node-local** space. Without walking the hierarchy every part
-collapses onto the origin and the model renders as a blob. Accumulating +0x34
-down the parent chain puts Kurt in a recognisable T-pose: head at z=+0.215,
-thigh -0.265, shin -0.478, foot -0.525, so **Z is up**. Bone *rotations* are
-not applied yet -- limbs modelled along their local axis still lie flat.
+Vertices are in **node-local** space, and so is each node's bounding box: for
+`kurt.mod` all 33 boxes equal the box of the node's own untransformed vertices
+to within 1e-3. Without walking the hierarchy every part collapses onto the
+origin and the model renders as a blob. Accumulating +0x34 down the parent
+chain puts Kurt in a T-pose -- head at z=+0.215, thigh -0.265, shin -0.478,
+foot -0.525, so **Z is up** -- and that T-pose is the bind pose, which is what
+`posed()` returns. Rotations come from the animations, in `animate()`.
+
+`animate()` is not the identity at t=0, and there is no reason it should be:
+**animation 0 is an animation, not the bind pose.** Comparing the two looked
+for a while like a bug worth 1.76 units; it is not one. Over 368 animated
+models only 30 have `animate(anims[0], 0) == posed()`, and the biggest
+divergences are cameras and movers -- `ML8x_camera.mod` differs by 1681 times
+its own size, because its first animation begins wherever that shot begins.
+Rendered side by side, `posed()` is a clean T-pose and `animate(anims[0], 0)`
+is Kurt mid-stride.
 
 Usage:
     python3 tools/mod2obj.py extracted/base/kurt.mod -o kurt.obj
@@ -64,6 +75,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import math
 import struct
 import sys
 from pathlib import Path
@@ -77,9 +89,50 @@ REF_NAME = 16
 REF_STRIDE = 21   # char name[16] + char ext[5], e.g. "kurt" + ".tex"
 ABSENT = 0xFFFFFFFF
 
+KIND_TRANSLATION = 1      # section-3 target kinds, see animations()
+KIND_ROTATION = 2
+
 
 class ModError(ValueError):
     pass
+
+
+def _slerp(a, b, u: float):
+    """Spherical interpolation between two unit quaternions, shortest arc.
+
+    Falls back to a normalised lerp when the two are nearly parallel, where
+    the sine goes to zero and the spherical form loses all its precision.
+    """
+    dot = sum(a[c] * b[c] for c in range(4))
+    if dot < 0.0:                      # -q is the same rotation; take the
+        b = tuple(-c for c in b)       # short way round
+        dot = -dot
+    if dot > 0.9995:
+        out = tuple(a[c] + (b[c] - a[c]) * u for c in range(4))
+    else:
+        theta = math.acos(max(-1.0, min(1.0, dot)))
+        s = math.sin(theta)
+        wa, wb = math.sin((1 - u) * theta) / s, math.sin(u * theta) / s
+        out = tuple(a[c] * wa + b[c] * wb for c in range(4))
+    length = math.sqrt(sum(c * c for c in out)) or 1.0
+    return tuple(c / length for c in out)
+
+
+def selftest() -> None:
+    """`_slerp`, which is the only arithmetic here that can be wrong quietly."""
+    q0 = (1.0, 0.0, 0.0, 0.0)                       # identity
+    q1 = (0.0, 1.0, 0.0, 0.0)                       # half turn about x
+    assert _slerp(q0, q1, 0.0) == q0
+    half = _slerp(q0, q1, 0.5)
+    r = math.sqrt(0.5)
+    assert max(abs(half[c] - (r, r, 0, 0)[c]) for c in range(4)) < 1e-9, half
+    # -q is the same rotation, so the arc must not go the long way round
+    other = _slerp(q0, tuple(-c for c in q1), 0.5)
+    assert max(abs(abs(half[c]) - abs(other[c])) for c in range(4)) < 1e-9
+    # near-parallel falls back to a normalised lerp, and stays unit
+    near = _slerp(q0, (0.99999, 0.00447, 0.0, 0.0), 0.5)
+    assert abs(math.sqrt(sum(c * c for c in near)) - 1.0) < 1e-12, near
+    print("mod2obj.py: self-test passed")
 
 
 def _cstr(b: bytes) -> str:
@@ -244,18 +297,38 @@ class Model:
         return struct.unpack_from("<4f", self.data, self._sec(5) + index * 16)
 
     def sample(self, channel: dict, t: float):
-        """Nearest-key sample. Interpolation would need the value semantics
-        per kind; stepping is enough to see a pose and to check the chain."""
-        keys = channel["keys"]
+        """Interpolated sample at t in [0, 1]. Rotations slerp, the rest lerp.
+
+        Interpolation is not optional here. Over 400 models the median channel
+        carries **6.8 keys per second** -- one key every 150 ms, or better than
+        four frames apart at the 30 fps the recorded demo runs at -- so
+        stepping between keys is visibly coarse rather than merely imprecise.
+        86673 of the 117144 channels do hold a single key and are constant.
+
+        13 channels of the 117144, all in explosions, have times that go
+        backwards; the scan below simply takes the first bracketing pair and
+        does not care.
+        """
+        keys = [k for k in channel["keys"] if k[0] == k[0]]   # drop NaN times
         if not keys:
-            return None
-        best = keys[0]
-        for time, value in keys:
-            if time != time:          # NaN, a one-key channel with no time
-                continue
-            if time <= t:
-                best = (time, value)
-        return self._value(best[1])
+            keys = channel["keys"]
+            return self._value(keys[0][1]) if keys else None
+        if len(keys) == 1 or t <= keys[0][0]:
+            return self._value(keys[0][1])
+        if t >= keys[-1][0]:
+            return self._value(keys[-1][1])
+        for i in range(len(keys) - 1):
+            t0, t1 = keys[i][0], keys[i + 1][0]
+            if t0 <= t <= t1:
+                break
+        else:
+            return self._value(keys[-1][1])
+        a = self._value(keys[i][1])
+        b = self._value(keys[i + 1][1])
+        u = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
+        if channel["kind"] == KIND_ROTATION:
+            return _slerp(a, b, u)
+        return tuple(a[c] + (b[c] - a[c]) * u for c in range(4))
 
     def animate(self, anim: dict, t: float) -> tuple[list, list]:
         """-> (vertices, triangles) with the animation applied at t in [0,1]."""
@@ -268,9 +341,9 @@ class Model:
             v = self.sample(ch, t)
             if v is None:
                 continue
-            if ch["kind"] == 1:
+            if ch["kind"] == KIND_TRANSLATION:
                 trans[ch["node"]] = list(v[:3])
-            elif ch["kind"] == 2:
+            elif ch["kind"] == KIND_ROTATION:
                 quat[ch["node"]] = v
 
         def rot(q, p):
@@ -512,7 +585,9 @@ def turntable(m: Model, path: Path, texture: Path | None = None,
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
-    ap.add_argument("src", type=Path)
+    ap.add_argument("src", type=Path, nargs="?")
+    ap.add_argument("--selftest", action="store_true",
+                    help="check the quaternion interpolation")
     ap.add_argument("-o", "--out", type=Path, help="write an OBJ here")
     ap.add_argument("--preview", type=Path, help="write a preview PNG here")
     ap.add_argument("--texture", type=Path,
@@ -527,6 +602,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--stats", action="store_true",
                     help="parse a whole directory and report")
     args = ap.parse_args(argv)
+    if args.selftest:
+        selftest()
+        return 0
+    if args.src is None:
+        ap.error("a .mod file or a directory is required")
 
     if args.stats:
         files = sorted(args.src.glob("*.mod"))
