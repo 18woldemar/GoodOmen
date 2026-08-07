@@ -261,6 +261,47 @@ VECTORS = (
 )
 
 
+def decode_texture(data: bytes) -> list[bytes]:
+    """-> every level of a .tex as BGRA, largest first.
+
+    Levels of 8x8 and up are coded; the 4x4, 2x2 and 1x1 tail is raw BGRA and
+    is passed through, as are the two fonts, which have no blocks at all
+    (the u32 at 0x24 is 0 rather than 32).
+    """
+    if struct.unpack_from("<I", data, 0x24)[0] != 32:
+        width, height = struct.unpack_from("<2I", data, 8)
+        return [data[0x2c:0x2c + width * height * 4]]
+    out = []
+    for off, size, w, h in levels(data):
+        raw = data[off:off + size]
+        out.append(bytes(decode_level(w, h, raw)) if size == w * h // 2
+                   else raw)
+    return out
+
+
+def digest(files: list[Path]) -> int:
+    """One CRC32 per texture over all of its decoded levels, so that a
+    disagreement with another implementation names the texture it is in.
+
+    The engine prints the same lines (`goodomen --tex`) and
+    `tools/texcheck.sh` diffs the two; this side is the reference, being the
+    one checked block for block against the original under emulation.
+    """
+    import zlib
+    blocks = 0
+    for f in sorted(files, key=lambda p: p.name.lower()):
+        data = f.read_bytes()
+        crc = 0
+        for level in decode_texture(data):
+            crc = zlib.crc32(level, crc)
+        if struct.unpack_from("<I", data, 0x24)[0] == 32:
+            blocks += sum(size // 16 for _, size, w, h in levels(data)
+                          if size == w * h // 2)
+        print(f"{f.name.lower()} {crc:08x}")
+    print(f"{len(files)} textures, {blocks} blocks", file=sys.stderr)
+    return 0
+
+
 def selftest() -> None:
     for name, block, want in VECTORS:
         got = b"".join(bytes(p) for p in decode_block(block))
@@ -281,6 +322,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("-o", "--out", type=Path)
     ap.add_argument("--check", action="store_true",
                     help="compare every level against refdec.py")
+    ap.add_argument("--digest", action="store_true",
+                    help="one CRC32 per texture over all its levels, for "
+                         "tools/texcheck.sh to diff against the engine")
     ap.add_argument("--exe", type=Path,
                     default=Path(__import__("os").environ.get("MDK2_GOG", "."))
                     / "mdk2Main.exe")
@@ -291,6 +335,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.src is None:
         ap.error("a .tex file or a directory is required")
+
+    if args.digest:
+        # a directory of extracted resources, which is two directories deep:
+        # 755 textures in base/ and 6 in local/
+        files = (sorted(args.src.rglob("*.tex")) if args.src.is_dir()
+                 else [args.src])
+        return digest(files[:args.limit] if args.limit else files)
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import refdec

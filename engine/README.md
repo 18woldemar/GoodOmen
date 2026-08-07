@@ -12,6 +12,14 @@ to install, nothing to configure. Pass a path to read a game somewhere else:
 
     ./goodomen "/path/to/MDK 2"
 
+## What it reads so far
+
+The containers (PKWARE DCL Implode, every CRC32 checked) and the textures:
+all 761 of them, all 6701 mip levels, decoded through the game's own six-layout
+block codec. `--tex` prints one CRC32 per texture and `../tools/texcheck.sh`
+diffs those against `../tools/texdec.py`, which is byte-exact against the
+original routine under emulation.
+
 ## Platforms
 
 **Linux and Windows are the targets**, and both are tested rather than
