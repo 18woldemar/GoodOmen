@@ -67,18 +67,31 @@ checkpoints 13 and 14.
 on the object globals -- `OnEnterRoom`, `OnCreate`, `OnDie`, `OnUpdate`,
 `OnTimer`, `OnDamage`, `OnCollision` and thirteen rarer ones -- and every one
 of those tables names an object the scene graph registers. `--events` calls
-each of them once, and **42129 of 49546 calls run to the end**.
+each of them once, and **45559 of 49457 run to the end**. Objects and slots
+are taken in name order rather than hash order, because a handler can install
+another object's method and the tally would otherwise wobble by a few dozen
+between runs.
 
 That is a survey of the surface, not a simulation: a handler called out of
-context is not doing what it would do in the game. Its worth is in the 7417
-that do not survive, because each one names something the engine has to hold,
-and they come in two kinds. Engine data, mostly numbers a stub answers with
-nil: `mdkGobDistance(gob, player)` and `mdkGobDistancePoint(gob, "l1_r8wp")`
-are the two that matter -- proximity is how this game triggers nearly
-everything, and both are implementable today from the scene graph's positions
-and waypoints. And script state that only exists mid-game: `TutFuncs`,
+context is not doing what it would do in the game. Its worth is in the ~3900
+that do not survive, because each one names something the engine has to hold.
+
+Some of it turned out to be **holdable already**, which is what this driver
+does beyond stubbing. `mdkGobDistance(gob, player)` and
+`mdkGobDistancePoint(gob, "l1_r8wp")` are how this game triggers nearly
+everything, and the scene graph carries every object's position and every
+waypoint -- so the driver keeps positions on the gobs, answers both queries
+for real, and warps the player to the checkpoint that `mdkSetCheckpoint`
+recorded. That alone moved "compare nil with number" from 3410 failures to
+145, and 3000 more handler calls now run.
+
+What is left is mostly script state that only exists mid-game: `TutFuncs`,
 `SetUpDoorAndEnemies`, `GenDone` are methods another object's handler
 installs, so calling handlers in an arbitrary order is bound to miss them.
+That bounds what this measurement can mean, and it is why the number is
+pinned in `tools/check.py` rather than chased.
+
+The boot needs 68 engine functions; the handlers reach for **65 more**.
 
 Usage:
     python3 tools/boot.py extracted                  # all ten, all checkpoints
@@ -113,7 +126,7 @@ ANSWERS = {"chGetGameWasReset": "0", "mdkLoadLevelIsInstant": "0",
            "chGetDeltaT": "0.0333"}
 
 DRIVER = """
-BOOTED, FAILED, WANTED, FIRED = {}, {}, {}, {}
+BOOTED, FAILED, WANTED, FIRED, PLAYED = {}, {}, {}, {}, {}
 -- what each checkpoint demands: the argument, not just the call
 function mdkPreloadRes(name, ...)
   CALLS[table.getn(CALLS) + 1] = "mdkPreloadRes"
@@ -122,6 +135,56 @@ end
 function mdkSectionAddRes(section, name)
   CALLS[table.getn(CALLS) + 1] = "mdkSectionAddRes"
   if name then WANTED[name] = (WANTED[name] or 0) + 1 end
+end
+
+-- Positions, and the two queries the scripts lean on hardest. These are not
+-- stubs: the scene graph carries every object's position and every waypoint,
+-- so distance is a thing we can already answer for real, and proximity is
+-- how this game triggers nearly everything.
+local function _place(name, otype, sc, parent, group, x, y, z)
+  local gob = {name = name, type = otype, x = x or 0, y = y or 0, z = z or 0}
+  _G[name] = gob
+  return gob
+end
+function mdkRegisterObject(name, ...)
+  CALLS[table.getn(CALLS) + 1] = "mdkRegisterObject"
+  return _place(name, unpack(arg))
+end
+function mdkCreateObjectLua(name, ...)
+  CALLS[table.getn(CALLS) + 1] = "mdkCreateObjectLua"
+  return _place(name, unpack(arg))
+end
+local function _dist(a, b)
+  if type(a) ~= "table" or type(b) ~= "table" then return 1e9 end
+  local dx, dy, dz = (a.x or 0) - (b.x or 0), (a.y or 0) - (b.y or 0),
+                     (a.z or 0) - (b.z or 0)
+  return sqrt(dx*dx + dy*dy + dz*dz)
+end
+function mdkGobDistance(a, b)
+  CALLS[table.getn(CALLS) + 1] = "mdkGobDistance"
+  return _dist(a, b)
+end
+function mdkGobDistancePoint(gob, name)
+  CALLS[table.getn(CALLS) + 1] = "mdkGobDistancePoint"
+  return _dist(gob, points and points[name])
+end
+-- the player is a gob the script creates and the engine then warps to the
+-- checkpoint, so both halves are here rather than answered with a handle
+function mdkGetPlayerGob()
+  CALLS[table.getn(CALLS) + 1] = "mdkGetPlayerGob"
+  return bob
+end
+CPS = {}
+function mdkSetCheckpoint(n, x, y, z, facing, section)
+  CALLS[table.getn(CALLS) + 1] = "mdkSetCheckpoint"
+  CPS[n] = {x = x, y = y, z = z, facing = facing}
+end
+function mdkWarpToCheckpoint(gob, n)
+  CALLS[table.getn(CALLS) + 1] = "mdkWarpToCheckpoint"
+  local cp = CPS[n]
+  if type(gob) == "table" and cp then
+    gob.x, gob.y, gob.z = cp.x, cp.y, cp.z
+  end
 end
 for _, job in ipairs(JOBS) do
   CALLS = {}
@@ -133,24 +196,43 @@ for _, job in ipairs(JOBS) do
   local key = "l" .. job[1] .. " cp" .. job[2]
   if ok then
     BOOTED[table.getn(BOOTED) + 1] = key
+    local nboot = table.getn(CALLS)
+    for i = 1, nboot do USED[CALLS[i]] = (USED[CALLS[i]] or 0) + 1 end
     if EVENTS then
       -- every handler the level script hung on an object global. Calling one
       -- out of context is a survey of the surface, not a simulation: what it
       -- is for is the engine functions the handlers reach for, and the ones
       -- that fail name the state the engine still has to hold.
+      -- in name order: `pairs` over _G is hash order, and a handler that
+      -- installs another object's method makes the result depend on it
+      local names, slots = {}, {}
       for name, gob in pairs(_G) do
         if type(gob) == "table" and rawget(gob, "name") == name then
-          for slot, fn in pairs(gob) do
-            if type(fn) == "function" and strfind(slot, "^On") then
-              local fine, ferr = pcall(fn, gob, gob, 1, "DAMAGE_NORMAL", 1)
-              local k = slot .. "|" .. (fine and "" or tostring(ferr))
-              FIRED[k] = (FIRED[k] or 0) + 1
-            end
-          end
+          names[table.getn(names) + 1] = name
         end
       end
+      sort(names)
+      for i = 1, table.getn(names) do
+        local gob = _G[names[i]]
+        slots = {}
+        for slot, fn in pairs(gob) do
+          if type(fn) == "function" and strfind(slot, "^On") then
+            slots[table.getn(slots) + 1] = slot
+          end
+        end
+        sort(slots)
+        for j = 1, table.getn(slots) do
+          local fine, ferr = pcall(gob[slots[j]], gob, gob, 1,
+                                   "DAMAGE_NORMAL", 1)
+          local k = slots[j] .. "|" .. (fine and "" or tostring(ferr))
+          FIRED[k] = (FIRED[k] or 0) + 1
+        end
+      end
+      -- what the handlers reach for, kept apart from what the boot needs
+      for i = nboot + 1, table.getn(CALLS) do
+        PLAYED[CALLS[i]] = (PLAYED[CALLS[i]] or 0) + 1
+      end
     end
-    for i = 1, table.getn(CALLS) do USED[CALLS[i]] = (USED[CALLS[i]] or 0) + 1 end
   else
     FAILED[table.getn(FAILED) + 1] = key .. ": " .. tostring(err)
   end
@@ -160,6 +242,7 @@ for k, n in pairs(FIRED) do io.write("ev\\t" .. k .. "\\t" .. n .. "\\n") end
 for i = 1, table.getn(BOOTED) do io.write("ok\\t" .. BOOTED[i] .. "\\n") end
 for i = 1, table.getn(FAILED) do io.write("no\\t" .. FAILED[i] .. "\\n") end
 for name, n in pairs(USED) do io.write("fn\\t" .. name .. "\\t" .. n .. "\\n") end
+for name, n in pairs(PLAYED) do io.write("ev-fn\\t" .. name .. "\\t" .. n .. "\\n") end
 for name, n in pairs(WANTED) do io.write("res\\t" .. name .. "\\t" .. n .. "\\n") end
 """
 
@@ -201,22 +284,22 @@ def boot(tree: Path, override: Path | None, levels: list[int],
     source = (tmp / "mdk2.lua").read_text()
     out = luarun.run(source + DRIVER, stubs)
 
-    booted, failed, used, wanted, fired = [], [], {}, {}, {}
+    booted, failed, used, wanted, fired, played = [], [], {}, {}, {}, {}
     for line in out.split("===\n", 1)[-1].splitlines():
         kind, _, rest = line.partition("\t")
         if kind == "ok":
             booted.append(rest)
         elif kind == "no":
             failed.append(rest)
-        elif kind in ("fn", "res"):
+        elif kind in ("fn", "ev-fn", "res"):
             name, _, count = rest.partition("\t")
-            (used if kind == "fn" else wanted)[name] = int(count)
+            {"fn": used, "ev-fn": played, "res": wanted}[kind][name] = int(count)
         elif kind == "ev":
             slot, _, count = rest.rpartition("\t")
             event, _, err = slot.partition("|")
             fired[(event, err)] = int(count)
     return {"jobs": jobs, "booted": booted, "failed": failed,
-            "used": used, "wanted": wanted, "fired": fired}
+            "used": used, "wanted": wanted, "fired": fired, "played": played}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -283,7 +366,9 @@ def main(argv: list[str] | None = None) -> int:
     for line in r["failed"]:
         print(f"  {line}", file=sys.stderr)
     print(f"{len(r['booted'])}/{len(r['jobs'])} checkpoints boot through "
-          f"level(), {len(r['used'])} engine functions used", file=sys.stderr)
+          f"level(), {len(r['used'])} engine functions used"
+          + (f", {len(set(r['played']) - set(r['used']))} more reached for by "
+             f"the handlers" if args.events else ""), file=sys.stderr)
     if args.expect and len(r["booted"]) != args.expect:
         print(f"expected {args.expect}", file=sys.stderr)
         return 1

@@ -65,7 +65,7 @@ CORPUS = [
      "scripts/level1.lua"),
     ("every level starts at every checkpoint",
      ["boot.py", "extracted", "--resources", "--expect", "129",
-      "--events", "--expect-handlers", "42129"],
+      "--events", "--expect-handlers", "45559"],
      "scripts/level1.lua"),
     ("room graphs resolve",
      ["rooms.py", "extracted", "--check", "--expect", "823"],
