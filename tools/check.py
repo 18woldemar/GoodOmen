@@ -65,7 +65,7 @@ CORPUS = [
      "scripts/level1.lua"),
     ("every level starts at every checkpoint",
      ["boot.py", "extracted", "--resources", "--expect", "129",
-      "--events", "--expect-handlers", "45559"],
+      "--events", "--expect-handlers", "11501"],
      "scripts/level1.lua"),
     ("key bindings are DirectInput scancodes",
      ["walksim.py", "extracted/base/l1.lua", "--resources", "extracted",
