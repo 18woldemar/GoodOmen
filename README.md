@@ -118,6 +118,10 @@ functions** and **507 constants** it registers are each `push value; push
 name; push 0; call`, read out of the instruction stream rather than inferred.
 `OBJ_ROOM` is 803. See [`docs/lua-constants.md`](docs/lua-constants.md).
 
+The seven rules the project is held to are in [`docs/rules.md`](docs/rules.md)
+— assets are never committed, no decompiled code goes into the engine, and a
+format counts as solved only at 100%.
+
 Details, and the hypotheses that turned out to be wrong, live in
 [`docs/journal.md`](docs/journal.md). Reconnaissance through Wine — file
 traces, apitrace on the GL stream — is in

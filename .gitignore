@@ -65,3 +65,17 @@ __pycache__/
 
 # the engine's build output
 engine/target/
+
+# Instructions and notes for AI coding agents. They are working files, not
+# part of the project: they describe how to drive the work, not what the work
+# found. What is worth keeping from them lives in docs/rules.md and
+# docs/journal.md instead.
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+.claude/
+.cursor/
+.cursorrules
+.aider*
+.windsurfrules
+.github/copilot-instructions.md

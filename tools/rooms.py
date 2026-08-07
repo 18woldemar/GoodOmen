@@ -43,7 +43,7 @@ different tools, naming the same 677 things.
 
 **A room's box is its object's box** -- the authored bbox from the scene
 graph, in world coordinates because room geometry is static (see the placement
-rule in CLAUDE.md) -- unless `bmin`/`bmax` override it, which 55 rooms do.
+rule in docs/rules.md) -- unless `bmin`/`bmax` override it, which 55 rooms do.
 The check that this is the right reading is the checkpoints: 125 of the game's
 129 land inside a room of their own level, and **all four that do not have a
 reason**: `l1 cp9 "Intro Movie A"` sits at y = -1000, `l9 cp13 "Intro Movie"`

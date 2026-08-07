@@ -6,7 +6,7 @@ This is a **research oracle, not engine code.** It runs the original's own
 decode routine under a CPU emulator so we have ground truth to check a
 from-scratch decoder against, and so the block format can be probed by
 experiment (feed a synthetic block, observe the pixels) instead of by reading
-bit-shift assembly. Nothing here goes into the engine; see rule 2 in CLAUDE.md.
+bit-shift assembly. Nothing here goes into the engine; see rule 2 in docs/rules.md.
 
 The routine is reachable because it is pure: it touches only its arguments,
 the compressed block, and static tables in `.data`. So mapping the PE's
