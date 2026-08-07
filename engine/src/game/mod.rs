@@ -7,5 +7,6 @@ pub mod install;
 pub mod level;
 pub mod constants;
 pub mod functions;
+pub mod rand;
 pub mod script;
 pub mod world;

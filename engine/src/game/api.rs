@@ -205,6 +205,10 @@ pub struct Boot {
     /// What `chSeedRand` was last given. The original seeds with 127 on
     /// every level start, which is why its encounters are reproducible.
     pub seed: Option<u32>,
+    /// The generator `chRand` answers out of. It is the original's, and
+    /// `chSeedRand(127)` on every level start is why the game's encounters
+    /// repeat -- see [`crate::game::rand`].
+    pub random: crate::game::rand::Random,
     /// `name -> when its `OnTimer` comes due`, in seconds on the driver's
     /// clock. `omGobSetTimer(gob, 4)` means "call `gob.OnTimer` in four".
     pub timers: BTreeMap<String, f64>,
@@ -535,7 +539,10 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
     globals.set(
         "chSeedRand",
         lua.create_function(|lua, seed: Option<f64>| {
-            boot_mut(lua)?.seed = Some(seed.unwrap_or(0.0) as u32);
+            let seed = seed.unwrap_or(0.0) as u32;
+            let mut boot = boot_mut(lua)?;
+            boot.seed = Some(seed);
+            boot.random.seed(seed);
             Ok(())
         })?,
     )?;
@@ -727,6 +734,30 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 boot.to_play.push(i);
             }
             Ok(())
+        })?,
+    )?;
+    // `chRand()` is the original's MT19937, seeded by `chSeedRand` — see
+    // `crate::game::rand`, which is held to the original's own generator run
+    // under emulation. It is answered for real rather than recorded because
+    // **a getter that returns nil kills the handler that does arithmetic on
+    // it**: "attempt to perform arithmetic on a nil value" is the commonest
+    // reason a handler stops, and this is called 238 times.
+    globals.set(
+        "chRand",
+        lua.create_function(|lua, _: Variadic<Value>| {
+            Ok(boot_mut(lua)?.random.next())
+        })?,
+    )?;
+    // the type an object was registered with, out of the arena. Answering a
+    // table here — which the recorder's "a name with Get in it hands back a
+    // handle" rule would — is what "attempt to compare table with number"
+    // was, 51 times over.
+    globals.set(
+        "mdkGetGobType",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(name) = args.first().and_then(gob_name) else { return Ok(-1.0) };
+            let Some(w) = world::world(lua) else { return Ok(-1.0) };
+            Ok(w.find(&name).and_then(|id| w.get(id)).map(|g| g.kind).unwrap_or(-1.0))
         })?,
     )?;
     // `chSndSwitchMusic(N)` is the same numbering as a room's `music`:

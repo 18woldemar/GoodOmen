@@ -232,9 +232,12 @@ debug.setmetatable("", {__index = string,
                         __add = function(a, b) return a .. "+" .. b end})
 -- registering an object defines a global of that name, which is how the
 -- scene graphs name their parents and how the level scripts reach them
-function mdkRegisterObject(name, ...)
+function mdkRegisterObject(name, kind, ...)
   CALLS[table.getn(CALLS) + 1] = "mdkRegisterObject"
-  _G[name] = {name = name}
+  -- the type is kept because `mdkGetGobType` has to answer with it, and a
+  -- getter that answers with a table is what "attempt to compare table with
+  -- number" was, fifty-one times over
+  _G[name] = {name = name, __kind = kind}
   return _G[name]
 end
 -- and so does creating one from a script: level5.lua says
@@ -257,7 +260,13 @@ setmetatable(_G, {__index = function(_, k)
                 or string.find(k, "New") or string.find(k, "Get")
     local f = function(...)
       CALLS[table.getn(CALLS) + 1] = k
-      if ANSWERS[k] ~= nil then return ANSWERS[k] end
+      -- an answer may be a value or a function of the arguments: `chRand`
+      -- has to be different every call, and `mdkGetGobType` has to look at
+      -- what it was handed
+      if ANSWERS[k] ~= nil then
+        if type(ANSWERS[k]) == "function" then return ANSWERS[k](...) end
+        return ANSWERS[k]
+      end
       if handle then return {} end
       return nil
     end

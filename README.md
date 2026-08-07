@@ -34,7 +34,7 @@ It reads the game out of its own directory — `data/*.zip` first and then
   and none missing, 677 rooms;
 - **runs one**: the body walks with collision, the driver ticks, and
   `OnEnterRoom`, `OnTimer` and `OnUpdate` fire in the order the scripts
-  expect — **11501 of 11958 handler calls run to the end**, which is
+  expect — **11728 of 11958 handler calls run to the end**, which is
   `tools/boot.py`'s figure to the digit. The player's own object moves with
   the body, so proximity reaches the scripts: walking about level 6 is enough
   to make `l6_kermit` start an animation on its own;
@@ -105,6 +105,7 @@ Where the engine and a tool can both do a thing, **they must agree**, and
 | `tools/boot.py` | Starts a level the way the game does — `mdk2.lua:level(n, cp, sec)`, whose call graph BioWare left in a comment above it. **All ten levels start at all 129 checkpoints**, and the 2093 resources they demand all exist. |
 | `tools/luaconst.py` | The engine's Lua surface, out of the binary: **507 constants with their values** and **461 registered functions with their addresses**. `OBJ_ROOM` is 803. |
 | `tools/modcheck.py` | Holds the engine's `.mod` reader to `mod2obj.py`: eleven numbers per model, **2207/2207 agree**. |
+| `tools/rand.py` | Runs the game's own random generator under emulation. It is **MT19937, the 1998 edition**, and the engine's matches it for 2000 numbers from the seed every level start uses. |
 | `tools/acmcheck.py` | Holds the engine's Interplay ACM decoder to `ffmpeg -f acm`, the one reference here that nobody in this project wrote: **1019 streams, byte for byte**. |
 | `tools/texcheck.sh` | Holds the engine's texture codec to `texdec.py`: one CRC32 per texture over every mip level, **761/761 identical**. |
 | `tools/winbuild.sh` | Cross-builds the Windows binary, drops it into a real installation and runs it there under Wine. |
@@ -175,7 +176,8 @@ Reconnaissance through Wine — file traces, apitrace on the GL stream — is in
 ```bash
 python3 tools/check.py            # 45 checks, about a minute
 python3 tools/check.py --quick    # the 7 that need no game files
-python3 tools/check.py --slow     # plus the texture codec, 4205514 blocks
+python3 tools/check.py --slow     # plus the texture codec and the RNG,
+                                  # both against the emulated original
 ```
 
 Eighteen of those hold the **Rust engine against the Python that defines

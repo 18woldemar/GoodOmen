@@ -214,6 +214,19 @@ fn main() {
         return;
     }
 
+    // `--rand SEED N` prints the game's own random sequence, which
+    // `tools/rand.py` holds against the original's under emulation.
+    if let Some(i) = args.iter().position(|a| a == "--rand") {
+        let seed: u32 = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(127);
+        let count: usize = args.get(i + 2).and_then(|v| v.parse().ok()).unwrap_or(8);
+        let mut r = goodomen::game::rand::Random::default();
+        r.seed(seed);
+        for _ in 0..count {
+            println!("{}", r.next_u32());
+        }
+        return;
+    }
+
     // `--music DIR` reads the 27 bare ACM streams under `Music/` and checks
     // the two things streaming them adds: that rewinding really starts over,
     // and that a queued source produces sound.

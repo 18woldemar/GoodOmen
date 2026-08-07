@@ -150,9 +150,21 @@ CHECKPOINT = re.compile(
 # hands back a handle -- is wrong for the scalar getters, and the handlers
 # do arithmetic on what it returns. That is the shape of nearly everything
 # `--events` reports: an engine function that has to answer with a number.
+# `chRand` is here for the same reason and is the commonest of all: 238 calls,
+# and a nil answer is the single largest cause of a handler stopping. The
+# engine answers it with the original's own MT19937 (see
+# `engine/src/game/rand.rs`); this is a plain congruential generator, because
+# what a stub owes is *a number every time*, not the same numbers. If a
+# handler ever branched on the value the two would part company, and the
+# handler counts here and in the engine would stop agreeing -- which is
+# exactly what `check.py` would say.
 ANSWERS = {"chGetGameWasReset": "0", "mdkLoadLevelIsInstant": "0",
            "chGetDeltaT": "0.0333", "omGetAxisValue": "0",
-           "omGetCommandValue": "0"}
+           "omGetCommandValue": "0",
+           "chRand": "function() _rand = math.mod((_rand or 127) * 1103515245 "
+                     "+ 12345, 2147483648) return _rand / 2147483648 end",
+           "mdkGetGobType": "function(g) if g then return g.__kind end "
+                            "return -1 end"}
 
 # The tick loop. `steps` is the player's path, injected from Python; the
 # engine state it needs -- a clock, timers, stasis, the room boxes -- is all
