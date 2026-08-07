@@ -74,6 +74,16 @@ traces, apitrace on the GL stream — is in
 - [x] **M7** Scripts, triggers, enemies — the shipped Lua runs, the scene graphs load
 - [ ] **M8** The first level can be played end to end
 
+## Checking it
+
+```bash
+python3 tools/check.py            # 14 checks, about 2 seconds
+python3 tools/check.py --quick    # the 6 that need no game files
+python3 tools/check.py --slow     # plus the texture codec, 4205514 blocks
+```
+
+Anything whose inputs are missing is reported as skipped, never as passed.
+
 ## Running the tools
 
 ```bash
