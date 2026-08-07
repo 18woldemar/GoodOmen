@@ -120,6 +120,30 @@ fn main() {
         return;
     }
 
+    // `--run N [CP] [SECONDS]` starts a level and *runs* it: the controller
+    // walks, the driver ticks, the handlers fire. No GL.
+    if let Some(i) = args.iter().position(|a| a == "--run") {
+        let n: u32 = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(1);
+        let cp: u32 = args.get(i + 2).and_then(|v| v.parse().ok()).unwrap_or(1);
+        let seconds: f64 = args.get(i + 3).and_then(|v| v.parse().ok()).unwrap_or(10.0);
+        let root = args
+            .iter()
+            .zip(std::iter::once(&String::new()).chain(args.iter()))
+            .find(|(a, before)| {
+                !a.starts_with("--") && a.parse::<f64>().is_err() && *before != "--expect"
+            })
+            .map(|(a, _)| std::path::PathBuf::from(a))
+            .unwrap_or_else(Install::beside_the_binary);
+        match run(&root, n, cp, seconds) {
+            Ok(line) => println!("{line}"),
+            Err(e) => {
+                eprintln!("goodomen: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     // `--play N [CP]` starts level N at checkpoint CP and draws it from
     // there, culled by the room the camera stands in.
     if let Some(i) = args.iter().position(|a| a == "--play") {
@@ -552,6 +576,132 @@ fn replay(
         if body.on_ground { "standing" } else { "in the air" },
         body.hits,
         body.inside
+    ))
+}
+
+/// Start a level and **run** it: the body walks from the checkpoint, the
+/// driver ticks, and the handlers fire in the order the scripts expect.
+///
+/// The input is the game's own recording where there is one — `demoN_CP.omn`
+/// — and forwards otherwise, which is `tools/walksim.py`'s blunt measure and
+/// good enough to cross rooms.
+fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Result<String, String> {
+    use goodomen::formats::omn;
+    use goodomen::game::api;
+    use goodomen::game::body::{Body, Collision, EYE, WALK};
+    use goodomen::game::script::Scripts;
+    use goodomen::game::world;
+
+    let mut install = Install::open(root).map_err(|e| e.to_string())?;
+    let mut sources = std::collections::BTreeMap::new();
+    for (name, i, j) in entries_named(&install, ".lua") {
+        if let Ok(bytes) = install.containers[i].read_at(j) {
+            sources.insert(name, bytes.iter().map(|&b| b as char).collect::<String>());
+        }
+    }
+    if let Some(dir) = install.override_dir.clone() {
+        if let Ok(read) = std::fs::read_dir(&dir) {
+            for e in read.flatten() {
+                let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+                if name.ends_with(".lua") {
+                    if let Ok(bytes) = std::fs::read(e.path()) {
+                        sources.insert(name, bytes.iter().map(|&b| b as char).collect());
+                    }
+                }
+            }
+        }
+    }
+
+    let scripts = Scripts::new().map_err(|e| e.to_string())?;
+    api::install(&scripts.lua, sources.clone()).map_err(|e| e.to_string())?;
+    let mdk2 = sources.get("mdk2.lua").ok_or("no mdk2.lua")?;
+    scripts.run("mdk2.lua", mdk2).map_err(|e| e.to_string())?;
+    api::level(&scripts, number, checkpoint, "sectionA").map_err(|e| e.to_string())?;
+
+    let (rooms, collision, spawn) = {
+        let boot = scripts.lua.app_data_ref::<api::Boot>().ok_or("no boot state")?;
+        let w = world::world(&scripts.lua).ok_or("no world")?;
+        let mut names = Vec::new();
+        let mut boxes = Vec::new();
+        for room in &boot.rooms {
+            names.push(room.name.clone());
+            boxes.push(room.bbox.or_else(|| {
+                let gob = w.get(w.find(&room.name)?)?;
+                let (lo, hi) = (gob.bbox_min?, gob.bbox_max?);
+                Some([lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]])
+            }));
+        }
+        let visible = boot
+            .rooms
+            .iter()
+            .enumerate()
+            .map(|(i, r)| r.visible.iter().copied().chain(std::iter::once(i)).collect())
+            .collect();
+        let spawn = boot
+            .checkpoints
+            .iter()
+            .find(|c| c.index as u32 == checkpoint)
+            .cloned()
+            .ok_or_else(|| format!("level {number} has no checkpoint {checkpoint}"))?;
+        let collision = Collision::load(&mut install, &w);
+        (api::Visibility { names, boxes, visible }, collision, spawn)
+    };
+
+    let frames = install
+        .read(&format!("demo{number}_{checkpoint}.omn"))
+        .ok()
+        .and_then(|b| omn::parse(&b).ok())
+        .map(|f| f[1.min(f.len())..].to_vec());
+    let recorded = frames.is_some();
+
+    let mut body = Body::new(
+        [spawn.position[0], spawn.position[1], spawn.position[2] + EYE],
+        spawn.facing,
+    );
+    let mut state = api::Ticking::default();
+    let dt = 1.0 / 30.0;
+    let steps = (seconds / dt) as usize;
+
+    for step in 0..steps {
+        match &frames {
+            Some(f) if step < f.len() => body.replay(&collision, &f[step..step + 1], 1.0, WALK),
+            // forwards, which is enough to cross a room
+            _ => {
+                let d = [body.yaw.cos(), body.yaw.sin()];
+                body.step(&collision, d, false, WALK, dt);
+            }
+        }
+        api::tick(&scripts, &rooms, body.position, dt, &mut state).map_err(|e| e.to_string())?;
+    }
+
+    let (fired, survived) = state.total();
+    let mut slots: Vec<String> = state
+        .fired
+        .iter()
+        .map(|(s, (f, r))| format!("{s} {r}/{f}"))
+        .collect();
+    slots.sort();
+    for (what, got, want) in [
+        ("rooms entered", state.rooms_entered, expect_flag("--expect-rooms")),
+        ("handler calls", fired, expect_flag("--expect-events")),
+        ("handlers ran to the end", survived, expect_flag("--expect-survived")),
+    ] {
+        if let Some(want) = want {
+            if got != want {
+                return Err(format!("{got} {what}, expected {want}"));
+            }
+        }
+    }
+    Ok(format!(
+        "l{number} cp{checkpoint}: {steps} ticks of {seconds:.0}s on {} input, \
+         travelled {:.0} units, met a wall on {} frames, inside geometry on {}, \
+         {} rooms entered, {survived} of {fired} handler calls ran to the end [{}]",
+        if recorded { "the game's own recorded" } else { "held-forwards" },
+        body.travelled,
+        body.hits,
+        body.inside,
+        state.rooms_entered,
+        slots.join(", ")
     ))
 }
 
