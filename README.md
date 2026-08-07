@@ -16,7 +16,7 @@ scratch. The model is OpenMW and devilutionX.
 | `tools/tex2png.py` | Converts `.tex` textures to PNG. **761/761**, with no emulator and no game executable. |
 | `tools/texdec.py` | The `.tex` block codec, reimplemented from scratch. **Byte-identical to the original on all 4205514 blocks.** |
 | `tools/mod2obj.py` | Reads `.mod` models. **2207/2207, 857321 triangles.** Exports OBJ, renders textured previews and turntables, and plays animation with slerped rotations. |
-| `tools/mod2html.py` | Packs a model — or, with `--scene`, a whole level and everything standing in it — into a single self-contained WebGL viewer. Geometry and textures inlined, no libraries, no server. |
+| `tools/mod2html.py` | Packs a model — or, with `--scene`, a whole level and everything standing in it — into a single self-contained WebGL viewer. With `--walk` the collision trees come too and you can walk the level instead of flying it. No libraries, no server. |
 | `tools/bsp.py` | Reads and validates the `.bsp` collision trees; point-in-solid and drop queries. **692/692 validate.** |
 | `tools/scene.py` | Reads the level scene graphs — every object's type, position, parent and resource. **54 files, 5633 objects, 0 complaints.** |
 | `tools/luaapi.py` | Catalogues the engine functions the shipped Lua calls — **438 of them**, which is the specification the engine has to meet. See [`docs/lua-api.md`](docs/lua-api.md). |
@@ -69,7 +69,7 @@ traces, apitrace on the GL stream — is in
 - [x] **M3** Kurt's model spins in a viewer, textured
 - [x] **M4** Level geometry loads, free camera flies through it
 - [x] **M5** Skeletal animation plays back, interpolated
-- [ ] **M6** The character runs around a level, collision works
+- [x] **M6** The character runs around a level, collision works
 - [ ] **M7** Scripts, triggers, enemies
 - [ ] **M8** The first level can be played end to end
 

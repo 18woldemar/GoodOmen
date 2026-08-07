@@ -18,6 +18,11 @@ scene graph places, geometry merged into one buffer. See tools/scene.py for
 the graph itself, and `place()` below for how an object's model is put where
 the object stands.
 
+With `--walk` as well it embeds the level's `.bsp` collision trees and the
+camera can stop being a camera: **G** switches between flying and walking,
+space jumps. The controller is in the page, roughly forty lines of it, and
+what it does and does not do is written down there.
+
 Usage:
     python3 tools/mod2html.py extracted/base/ml7z_castle.mod -o castle.html
     python3 tools/mod2html.py extracted/base/kurt.mod -o kurt.html --png png/
@@ -49,8 +54,9 @@ canvas:active{cursor:grabbing}
 b{color:#dde}
 </style>
 <canvas id=c></canvas>
-<div id=hud><b>__TITLE__</b><br>__STATS__<br>drag to look &middot; WASD fly &middot;
-R/F up-down &middot; shift faster</div>
+<div id=hud><b>__TITLE__</b><br>__STATS__<br>drag to look &middot; WASD &middot;
+R/F up-down &middot; shift faster<span id=walkhelp></span><br>
+mode: <b id=mode>flying</b></div>
 <script>
 const MESH = __MESH__, TEX = __TEX__;
 const gl = document.getElementById('c').getContext('webgl');
@@ -101,9 +107,62 @@ for (const [name, uri] of Object.entries(TEX)) {
   img.src = uri;
 }
 
+// --- collision, when the page was built with --walk ---------------------
+// COLL.data is every tree's nodes back to back, 24 bytes each:
+// {float normal[3]; float dist; u32 front; u32 back}, 0xFFFFFFFF for a leaf.
+// COLL.trees[i] = {first, count, box} -- box is the world AABB, only there
+// to skip trees the point is nowhere near.
+const COLL = __COLL__;
+let CF = null, CU = null;
+if (COLL) {
+  const buf = bytes(COLL.data).buffer;
+  CF = new Float32Array(buf); CU = new Uint32Array(buf);
+}
+// The tree is authored in a mirrored frame, so the query point is negated,
+// and a point is inside solid geometry when the descent reaches a leaf
+// through the *front* child. Same rule as tools/bsp.py.
+function solid(x, y, z){
+  if (!COLL) return false;
+  const X = -x, Y = -y, Z = -z;
+  for (const t of COLL.trees){
+    const b = t.box;
+    if (x < b[0] || y < b[1] || z < b[2] || x > b[3] || y > b[4] || z > b[5])
+      continue;
+    let i = t.first;
+    for(;;){
+      const o = i * 6;
+      const side = CF[o]*X + CF[o+1]*Y + CF[o+2]*Z - CF[o+3];
+      const c = side >= 0 ? CU[o+4] : CU[o+5];
+      if (c === 0xFFFFFFFF){ if (side >= 0) return true; break; }
+      i = t.first + c;
+    }
+  }
+  return false;
+}
+// The body is a vertical segment, not a capsule -- the cheapest thing that
+// cannot walk through a wall or stand inside a floor. Only the part *above*
+// step height blocks movement: anything lower is a kerb to walk up, and
+// including the feet made a standing body think it was obstructed and step
+// two units into the air every frame.
+const EYE = 4.0, STEP = 2.0, GRAVITY = 60.0, JUMP = 22.0;
+function blocked(x, y, z){
+  for (let h = STEP; h <= EYE; h += (EYE - STEP) / 2)
+    if (solid(x, y, z - EYE + h)) return true;
+  return false;
+}
+const footed = (x, y, z) => solid(x, y, z - EYE + 0.05);
+
 let yaw = 0, pitch = 0, pos = MESH.eye.slice(), speed = MESH.span / 12;
+let walking = false, vz = 0, onGround = false;
 const keys = {};
-addEventListener('keydown', e => keys[e.code] = true);
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'KeyG' && COLL){
+    walking = !walking; vz = 0;
+    document.getElementById('mode').textContent =
+      walking ? 'walking' : 'flying';
+  }
+});
 addEventListener('keyup', e => keys[e.code] = false);
 let drag = false, lx = 0, ly = 0;
 const c = gl.canvas;
@@ -134,10 +193,53 @@ function frame(){
   const fwd = [Math.cos(yaw)*cp, Math.sin(yaw)*cp, sp];
   const right = [-Math.sin(yaw), Math.cos(yaw), 0];
   const v = speed * (keys.ShiftLeft || keys.ShiftRight ? 4 : 1);
-  const step = (d, s) => { for (let i=0;i<3;i++) pos[i] += d[i]*s; };
-  if (keys.KeyW) step(fwd, v); if (keys.KeyS) step(fwd, -v);
-  if (keys.KeyD) step(right, v); if (keys.KeyA) step(right, -v);
-  if (keys.KeyR) pos[2] += v;  if (keys.KeyF) pos[2] -= v;
+  if (walking){
+    const dt = 1/60, run = speed * (keys.ShiftLeft||keys.ShiftRight ? 2.2 : 1);
+    let dx = 0, dy = 0;
+    if (keys.KeyW){ dx += fwd[0]; dy += fwd[1]; }
+    if (keys.KeyS){ dx -= fwd[0]; dy -= fwd[1]; }
+    if (keys.KeyD){ dx += right[0]; dy += right[1]; }
+    if (keys.KeyA){ dx -= right[0]; dy -= right[1]; }
+    const len = Math.hypot(dx, dy);
+    if (len > 0){
+      dx = dx / len * run; dy = dy / len * run;
+      // in pieces of at most a quarter unit, or a fast run steps straight
+      // over a thin wall; full step first, then each axis on its own, which
+      // is what sliding along a wall amounts to
+      const pieces = Math.max(1, Math.ceil(run / 0.25));
+      for (let k = 0; k < pieces; k++){
+        for (const [ax, ay] of [[dx, dy], [dx, 0], [0, dy]]){
+          const nx = pos[0] + ax / pieces, ny = pos[1] + ay / pieces;
+          if (!blocked(nx, ny, pos[2])){ pos[0] = nx; pos[1] = ny; break; }
+        }
+      }
+    }
+    if (onGround && keys.Space){ vz = JUMP; onGround = false; }
+    vz -= GRAVITY * dt;
+    // step the fall in pieces no larger than half a unit: at terminal speed
+    // a whole frame's worth is longer than some floors are thick, and the
+    // body would drop straight through them
+    let nz = pos[2], left = vz * dt;
+    while (Math.abs(left) > 1e-6 && !footed(pos[0], pos[1], nz)){
+      const bit = Math.max(-0.5, Math.min(0.5, left));
+      nz += bit; left -= bit;
+    }
+    if (footed(pos[0], pos[1], nz)){
+      let lift = 0;                       // rise out of the surface landed on
+      while (lift < EYE && footed(pos[0], pos[1], nz + lift)) lift += 0.05;
+      nz += lift; onGround = true; vz = 0;
+    } else if (onGround && vz < 0){
+      let drop = 0;                       // stay glued over kerbs and stairs
+      while (drop < STEP && !footed(pos[0], pos[1], nz - drop)) drop += 0.05;
+      if (drop < STEP){ nz -= drop - 0.05; vz = 0; } else onGround = false;
+    } else onGround = false;
+    pos[2] = nz;
+  } else {
+    const step = (d, s) => { for (let i=0;i<3;i++) pos[i] += d[i]*s; };
+    if (keys.KeyW) step(fwd, v); if (keys.KeyS) step(fwd, -v);
+    if (keys.KeyD) step(right, v); if (keys.KeyA) step(right, -v);
+    if (keys.KeyR) pos[2] += v;  if (keys.KeyF) pos[2] -= v;
+  }
 
   // up = fwd x right, not right x fwd: the other order puts up at (0,0,-1)
   // when pitch is zero and renders the whole scene upside down
@@ -161,6 +263,8 @@ function frame(){
   }
   requestAnimationFrame(frame);
 }
+if (COLL) document.getElementById('walkhelp').textContent =
+  ' \u00b7 G to walk \u00b7 space to jump';
 frame();
 </script>
 """
@@ -248,6 +352,52 @@ def scene_geometry(path: Path, resources: Path) -> tuple[list, list, int]:
     return verts, tris, placed
 
 
+def scene_collision(path: Path, resources: Path) -> dict | None:
+    """Every `.bsp` the scene's objects name, packed into one buffer.
+
+    A tree comes with the model, so an object collides against
+    `<resource>.bsp` when one exists: for level 1 that is 81 of 265 objects,
+    the rooms and the fixed scenery, 85796 nodes in all. **None of the 81
+    belongs to an animated model**, so nothing here needs transforming --
+    static geometry is already in world space, and so is its tree.
+    """
+    graph = sg.parse(path.read_text(errors="replace"))
+    blob = bytearray()
+    trees = []
+    seen: dict[Path, dict] = {}
+    for o in graph["objects"]:
+        if o["resource"] is None:
+            continue
+        found = sg._find(resources, o["resource"] + ".bsp")
+        if found is None or found in seen:
+            continue
+        data = found.read_bytes()
+        model = sg._find(resources, o["resource"] + ".mod")
+        box = _model_box(model) if model else None
+        if box is None:
+            continue
+        seen[found] = {
+            "first": len(blob) // 24,
+            "count": len(data) // 24,
+            "box": [round(c, 3) for c in box],
+        }
+        blob += data
+        trees.append(seen[found])
+    if not trees:
+        return None
+    return {"data": base64.b64encode(bytes(blob)).decode(), "trees": trees}
+
+
+def _model_box(path: Path) -> list[float] | None:
+    """The model's world bounds, padded, used only to skip distant trees."""
+    verts, _tris = Model(path.read_bytes()).posed()
+    if not verts:
+        return None
+    pad = 1.0
+    return [min(v[0][c] for v in verts) - pad for c in range(3)] + \
+           [max(v[0][c] for v in verts) + pad for c in range(3)]
+
+
 def build(verts: list, tris: list, png_dir: Path | None) -> tuple[dict, dict]:
     by_tex: dict[str | None, list[int]] = {}
     for a, b, c in tris:
@@ -299,6 +449,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="src is a level scene graph, pack the whole level")
     ap.add_argument("--resources", type=Path, default=Path("extracted"),
                     help="extraction root, to resolve the scene's resources")
+    ap.add_argument("--walk", action="store_true",
+                    help="with --scene, embed the .bsp trees so the camera "
+                         "can walk the level instead of flying")
     ap.add_argument("--selftest", action="store_true", help="check place()")
     args = ap.parse_args(argv)
 
@@ -308,9 +461,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.src is None or args.out is None:
         ap.error("src and -o are required")
 
+    coll = None
     if args.scene:
         verts, tris, placed = scene_geometry(args.src, args.resources)
         what = f"{placed} objects"
+        if args.walk:
+            coll = scene_collision(args.src, args.resources)
+            if coll:
+                what += (f" &middot; {len(coll['trees'])} collision trees, "
+                         f"{sum(t['count'] for t in coll['trees'])} nodes")
     else:
         m = Model(args.src.read_bytes())
         verts, tris = m.posed()
@@ -322,7 +481,8 @@ def main(argv: list[str] | None = None) -> int:
     page = (PAGE.replace("__TITLE__", args.src.stem)
                 .replace("__STATS__", stats)
                 .replace("__MESH__", json.dumps(mesh))
-                .replace("__TEX__", json.dumps(textures)))
+                .replace("__TEX__", json.dumps(textures))
+                .replace("__COLL__", json.dumps(coll)))
     args.out.write_text(page)
     print(f"{args.out}: {stats.replace('&middot;', '|')}, "
           f"{len(page)/2**20:.1f} MiB", file=sys.stderr)
