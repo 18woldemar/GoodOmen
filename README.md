@@ -50,7 +50,14 @@ It reads the game out of its own directory — `data/*.zip` first and then
   animation ids is a constant the binary names `ANIM_*`**, and 6292 of the
   corpus's 6311 are. Characters and pickups are placed from their type too:
   the convention holds for 55 of the 149 `OBJ_*` types, which is what puts
-  them in the world at all.
+  them in the world at all;
+- **and you can hear it**: OpenAL Soft, opened at run time rather than linked,
+  with the level's `OBJ_AMBIENTSOUND` objects looping where they stand. The
+  payload's near and far distances drive DirectSound3D's own model, and the
+  mixer is checked the way the renderer is — rendered through a **loopback
+  device** so the mix comes back as samples, with nothing played at anyone:
+  `1.00@5u 1.00@10u 0.50@20u 0.25@80u` against the clamped inverse law. **All
+  76 ambient sounds the ten levels place decode.**
 
 **Linux and Windows are both tested**, and the Windows build is
 cross-compiled and run under Wine inside a real installation as part of the
@@ -158,12 +165,12 @@ Reconnaissance through Wine — file traces, apitrace on the GL stream — is in
 ## Checking it
 
 ```bash
-python3 tools/check.py            # 43 checks, about a minute
+python3 tools/check.py            # 44 checks, about a minute
 python3 tools/check.py --quick    # the 7 that need no game files
 python3 tools/check.py --slow     # plus the texture codec, 4205514 blocks
 ```
 
-Seventeen of those hold the **Rust engine against the Python that defines
+Eighteen of those hold the **Rust engine against the Python that defines
 it** — the same texture bytes, the same model numbers, the same collision
 answers, the same scene graphs, the same boot — and two hold its audio
 decoder against `ffmpeg`, which is not our code at all. Anything whose inputs

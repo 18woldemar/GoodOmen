@@ -135,7 +135,6 @@ import argparse
 import os
 import re
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -438,7 +437,7 @@ def boot(tree: Path, override: Path | None, levels: list[int],
     than the boots do, and `level()` clears `Level` and `Save` itself, so
     the runs do not contaminate each other.
     """
-    tmp = Path(tempfile.mkdtemp(prefix="goodomen-boot-"))
+    tmp = luarun.scratch("goodomen-boot-")
     roots = [d for d in (tree / "scripts", tree / "base", override)
              if d and d.is_dir()]
     luarun.prepare(roots, tmp, set())

@@ -9,6 +9,13 @@ license = "GPL-3.0-or-later"
 glow = "0.18.0"
 mlua = { version = "0.12.0", features = ["lua51", "vendored"] }
 
+# OpenAL is opened at run time rather than linked, so a machine without it
+# runs the game silently instead of not running it -- and the Windows build
+# needs no `OpenAL32.dll` beside the binary, which is the promise the engine
+# makes. EFX is an extension fetched by name anyway, so the whole library is
+# taken the same way.
+libloading = "0.9.0"
+
 # On Linux SDL2 comes from the system: every desktop has it, distributions
 # want it that way, and the version there (2.32) is years ahead of the one
 # sdl2-sys bundles (2.26.4), which no longer compiles against current

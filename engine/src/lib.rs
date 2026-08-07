@@ -5,6 +5,7 @@
 //! code the game runs, rather than a copy of it. `main.rs` is a thin shell
 //! around it.
 
+pub mod audio;
 pub mod formats;
 pub mod game;
 pub mod render;

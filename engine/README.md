@@ -40,6 +40,15 @@ diffs those against `ffmpeg -f acm`. That reference is worth naming: it is the
 only one in this project that nobody here wrote, so it cannot agree with us by
 sharing our mistakes. **1019 streams, byte for byte.**
 
+**And it is audible.** OpenAL Soft is **opened at run time**, not linked, so a
+machine without it plays a silent game rather than none — and the Windows
+build needs no DLL beside it, which is the one promise the engine makes.
+`--sound` is the mixer's answer to `--triangle`: it renders through OpenAL
+Soft's loopback device, so the mix comes back as samples and the distance law
+can be asserted on with nothing played at anyone. A level's
+`OBJ_AMBIENTSOUND` objects become looping sources at their own places, with
+the payload's near and far distances driving DirectSound3D's model exactly.
+
 **Scripts**: all 89 shipped `.lua`, which are Lua **3** run on a Lua 5.1 the
 engine carries itself (`mlua`, vendored — nothing to install). Three things
 make that work and there are only three: the `$if` pragma pass, a prelude for

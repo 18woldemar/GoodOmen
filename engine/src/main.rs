@@ -199,6 +199,21 @@ fn main() {
         }
         return;
     }
+    // the mixer needs no game files either, and answers the same way the
+    // renderer does: nothing audible, nothing on screen, and a skip rather
+    // than a failure where there is no device
+    if args.iter().any(|a| a == "--sound") {
+        match goodomen::audio::selfcheck() {
+            Ok(line) => println!("{line}"),
+            Err(e) if e.starts_with(goodomen::audio::NO_AUDIO) => println!("skip: {e}"),
+            Err(e) => {
+                eprintln!("goodomen: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     // `--pcm file.wav` writes one sound's samples to stdout as s16le, which
     // is what `ffmpeg -f acm` writes too, so the two can be diffed directly.
     if let Some(i) = args.iter().position(|a| a == "--pcm") {
@@ -869,12 +884,49 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         scene.follow(&w, &boot.playing, &boot.hidden);
     }
 
+    // the level's own ambient sounds, placed where its objects stand. No
+    // audio device is a quieter game, never a failed level.
+    let ambient: Vec<goodomen::audio::Ambient> =
+        match goodomen::game::world::world(&level_scripts.lua) {
+            Some(w) => w
+                .iter()
+                .filter(|(_, g)| g.kind == goodomen::game::api::OBJ_AMBIENTSOUND)
+                .filter_map(|(_, g)| {
+                    g.resource.as_ref().map(|r| {
+                        goodomen::audio::Ambient::from_payload(r, g.position, g.payload)
+                    })
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+    // A device is opened only for a window. Offscreen this runs as a check
+    // and a check must not play sound at anybody, so the sounds are decoded
+    // and counted and nothing is opened.
+    let mut read = |name: &str| install.read(name).ok();
+    let (heard, sounding) = if show {
+        match goodomen::audio::Audio::open()
+            .and_then(|d| goodomen::audio::Ambience::open(d, &ambient, &mut read))
+        {
+            Ok(a) => {
+                let line = format!("{} of {} ambient sounds", a.voices.len(), ambient.len());
+                (Some(a), line)
+            }
+            Err(e) => {
+                eprintln!("goodomen: {e}");
+                (None, format!("{} ambient sounds, none playing", ambient.len()))
+            }
+        }
+    } else {
+        let decoded = goodomen::audio::decodable(&ambient, &mut read);
+        (None, format!("{decoded} of {} ambient sounds decode", ambient.len()))
+    };
+
     let mut yaw = spawn.facing;
     let mut pitch = 0.0f64;
     let summary = format!(
         "l{number} cp{checkpoint}: {} objects, {} placed ({} by their type), {} triangles, \
          {} posed, {} lights, {} refused, in {} \
-         ({} rooms visible from it)",
+         ({} rooms visible from it), {sounding}",
         loaded.objects,
         loaded.placed,
         loaded.by_type,
@@ -1024,6 +1076,11 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 from[1] + look[1],
                 from[2] + look[2],
             ];
+            // the ears go with the camera and not with the body: what is
+            // heard has to agree with what is seen
+            if let Some(a) = &heard {
+                a.listen(from, yaw, pitch);
+            }
             let view = Mat4::look_at(from, ahead, [0.0, 0.0, 1.0]);
             let (w, h) = video.window.drawable_size();
             let projection = Mat4::perspective(1.1, w as f32 / h.max(1) as f32, 0.05, 4000.0);
@@ -1103,6 +1160,14 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         if let Some(want) = expect_flag("--expect-drawn") {
             if culled != want {
                 return Err(format!("drew {culled} triangles, expected {want}"));
+            }
+        }
+        if let Some(want) = expect_flag("--expect-sounds") {
+            if ambient.len() != want {
+                return Err(format!(
+                    "{} ambient sounds placed, expected {want}",
+                    ambient.len()
+                ));
             }
         }
         Ok(format!(

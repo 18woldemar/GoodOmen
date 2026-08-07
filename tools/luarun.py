@@ -275,6 +275,22 @@ def stub_source(api: Path | None = None) -> str:
     return STUBS
 
 
+def scratch(prefix: str = "goodomen-lua-") -> Path:
+    """A temporary directory that goes away when the process does.
+
+    It did not, for a long time: every `--tree` run left 3.1 MiB of prepared
+    scripts behind, and 4556 of them had accumulated -- 14 GiB, a full /tmp,
+    and every tool on the machine failing at once. A temporary file that
+    outlives its process is not temporary.
+    """
+    import atexit
+    import shutil
+    import tempfile
+    tmp = Path(tempfile.mkdtemp(prefix=prefix))
+    atexit.register(shutil.rmtree, tmp, ignore_errors=True)
+    return tmp
+
+
 def prepare(roots: list[Path], out: Path, defines: set[str]) -> int:
     """Write a modernised copy of every script into one flat directory.
 
@@ -570,13 +586,12 @@ def main(argv: list[str] | None = None) -> int:
                        for g in args.set)
     stubs = ("ANSWERS = {}\n" + answers) + stub_source() + globals_
     if args.tree:
-        import tempfile
-        tmp = Path(tempfile.mkdtemp(prefix="goodomen-lua-"))
+        tmp = scratch()
         roots = [d for d in (args.tree / "scripts", args.tree / "base",
                              args.override) if d and d.is_dir()]
         count = prepare(roots, tmp, set(args.define))
         stubs = f"LUADIR = [[{tmp}]]\n" + stubs
-        print(f"{count} scripts prepared in {tmp}", file=sys.stderr)
+        print(f"{count} scripts prepared", file=sys.stderr)
         # the entry script has to come from the prepared tree too, or an
         # override of it is silently ignored
         files = [tmp / f.name.lower() if (tmp / f.name.lower()).is_file()

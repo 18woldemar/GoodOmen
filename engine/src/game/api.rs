@@ -97,6 +97,10 @@ pub const OBJ_STATICLIGHT: f64 = 802.0;
 /// here because the renderer asks for it by meaning, not by number.
 pub const OBJ_ROOM: f64 = 803.0;
 
+/// `OBJ_AMBIENTSOUND`, whose `resource` slot names a `.wav` rather than a
+/// model, and whose payload is (near distance, far distance, ?, volume).
+pub const OBJ_AMBIENTSOUND: f64 = 1101.0;
+
 /// The last scancode DirectInput defines.
 const DIK_MAX: u32 = 0xED;
 /// Not scancodes: the two mouse buttons and the four half-axes.
