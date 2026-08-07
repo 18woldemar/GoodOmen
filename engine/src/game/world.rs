@@ -87,6 +87,17 @@ impl World {
         }
     }
 
+    /// Turn an object. The player's does this every tick to face where the
+    /// body is walking.
+    pub fn set_rotation(&mut self, id: Id, q: [f64; 4]) {
+        if let Some(gob) = self.gobs.get_mut(id as usize) {
+            if gob.rotation != q {
+                gob.rotation = q;
+                self.generation += 1;
+            }
+        }
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation
     }

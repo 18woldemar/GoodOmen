@@ -681,7 +681,8 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
                 body.step(&collision, d, false, WALK, dt);
             }
         }
-        api::tick(&scripts, &rooms, body.position, dt, &mut state).map_err(|e| e.to_string())?;
+        api::tick(&scripts, &rooms, body.position, body.yaw, dt, &mut state)
+            .map_err(|e| e.to_string())?;
     }
 
     // what the scripts actually did to the world while it ran
@@ -800,13 +801,34 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         .collect::<Vec<_>>()
         .join(", ");
 
+    // one tick before anything is drawn: it is the driver's first tick that
+    // puts the player's own object where the body is, and without it the
+    // player stands at the origin -- which is where Kurt was, invisible.
+    let mut ticking = goodomen::game::api::Ticking::default();
+    let _ = goodomen::game::api::tick(
+        &level_scripts,
+        &rooms,
+        [eye[0] as f64, eye[1] as f64, eye[2] as f64],
+        spawn.facing,
+        1.0 / 30.0,
+        &mut ticking,
+    );
+    if let (Some(w), Some(boot)) = (
+        goodomen::game::world::world(&level_scripts.lua),
+        level_scripts.lua.app_data_ref::<goodomen::game::api::Boot>(),
+    ) {
+        scene.follow(&w, &boot.playing, &boot.hidden);
+    }
+
     let mut yaw = spawn.facing;
     let mut pitch = 0.0f64;
     let summary = format!(
-        "l{number} cp{checkpoint}: {} objects, {} placed, {} triangles, {} posed, {} lights, in {} \
+        "l{number} cp{checkpoint}: {} objects, {} placed ({} by their type), {} triangles, \
+         {} posed, {} lights, in {} \
          ({} rooms visible from it)",
         loaded.objects,
         loaded.placed,
+        loaded.by_type,
         loaded.triangles,
         scene.posed_draws(),
         scene.lights.len(),
@@ -836,8 +858,6 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         );
         let mut at = body.position;
         let mut cull = true;
-        // the driver runs alongside the drawing: this is the game loop
-        let mut ticking = goodomen::game::api::Ticking::default();
         let started = std::time::Instant::now();
         let mut last = std::time::Instant::now();
         loop {
@@ -893,7 +913,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
             // the scripts get their tick before the frame is drawn, so what
             // is drawn is the state they just left behind
             if let Err(e) =
-                goodomen::game::api::tick(&level_scripts, &rooms, at, dt, &mut ticking)
+                goodomen::game::api::tick(&level_scripts, &rooms, at, yaw, dt, &mut ticking)
             {
                 eprintln!("goodomen: {e}");
             }
@@ -912,11 +932,31 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
             // the room under the camera decides what is drawn, every frame
             let here = rooms.at(at);
             let visible = here.first().map(|&i| rooms.visible[i].clone());
-            let from = [at[0] as f32, at[1] as f32, at[2] as f32];
+            // Third person when walking: the player has a body now, so the
+            // camera stands behind it. `BEHIND` and `ABOVE` are chosen here
+            // and not taken from the game -- the original's camera is an
+            // object (`OBJ_DEFAULTCAMERA`) with its own script, and that is
+            // not read yet.
+            const BEHIND: f64 = 4.5;
+            const ABOVE: f64 = 1.6;
+            let look = [
+                (yaw.cos() * pitch.cos()) as f32,
+                (yaw.sin() * pitch.cos()) as f32,
+                pitch.sin() as f32,
+            ];
+            let from = if walk {
+                [
+                    (at[0] - look[0] as f64 * BEHIND) as f32,
+                    (at[1] - look[1] as f64 * BEHIND) as f32,
+                    (at[2] - look[2] as f64 * BEHIND + ABOVE) as f32,
+                ]
+            } else {
+                [at[0] as f32, at[1] as f32, at[2] as f32]
+            };
             let ahead = [
-                from[0] + (yaw.cos() * pitch.cos()) as f32,
-                from[1] + (yaw.sin() * pitch.cos()) as f32,
-                from[2] + pitch.sin() as f32,
+                from[0] + look[0],
+                from[1] + look[1],
+                from[2] + look[2],
             ];
             let view = Mat4::look_at(from, ahead, [0.0, 0.0, 1.0]);
             let (w, h) = video.window.drawable_size();
@@ -940,7 +980,22 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
     }
 
     // offscreen: draw once culled and once not, and report the difference,
-    // which is what the authored visibility is worth
+    // which is what the authored visibility is worth. `--walk` puts the
+    // camera behind the body here too, so the same picture can be looked at.
+    let (eye, yaw) = if std::env::args().any(|a| a == "--walk") {
+        const BEHIND: f64 = 4.5;
+        const ABOVE: f64 = 1.6;
+        (
+            [
+                (eye[0] as f64 - yaw.cos() * BEHIND) as f32,
+                (eye[1] as f64 - yaw.sin() * BEHIND) as f32,
+                eye[2] + ABOVE as f32,
+            ],
+            yaw,
+        )
+    } else {
+        (eye, yaw)
+    };
     let (width, height) = (512i32, 512i32);
     unsafe {
         let target = Offscreen::new(&video.gl, width, height)?;

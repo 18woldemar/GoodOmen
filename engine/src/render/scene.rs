@@ -592,8 +592,17 @@ impl Scene {
         let vp = gl.get_uniform_location(shader, "view_projection");
         gl.uniform_matrix_4_f32_slice(vp.as_ref(), false, &view_projection.0);
         let model_at = gl.get_uniform_location(shader, "model");
-        let rotation_at = gl.get_uniform_location(shader, "node_rotation");
-        let offset_at = gl.get_uniform_location(shader, "node_offset");
+        // **`[0]`, not the bare name.** A uniform array's location is the
+        // location of its first element, and a driver is entitled to return
+        // nothing for the array's own name. When it does, the upload is a
+        // silent no-op: every node keeps the zero quaternion, every vertex
+        // stays node-local, and the model piles into a lump at its own
+        // origin. That is exactly what Kurt looked like.
+        let rotation_at = gl.get_uniform_location(shader, "node_rotation[0]");
+        let offset_at = gl.get_uniform_location(shader, "node_offset[0]");
+        if rotation_at.is_none() || offset_at.is_none() {
+            return Err("the node transform uniforms are not where the shader says".into());
+        }
         // node 0 as the identity is what an unposed model rides on
         let identity: Vec<f32> = std::iter::repeat([1.0f32, 0.0, 0.0, 0.0])
             .take(MAX_NODES)

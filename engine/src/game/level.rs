@@ -41,6 +41,9 @@ pub struct Loaded {
     /// and the objects that name nothing at all.
     pub without_a_model: usize,
     pub triangles: usize,
+    /// Objects drawn because their **type** named a model, the characters
+    /// among them.
+    pub by_type: usize,
 }
 
 /// **Start** a level the way the game does, and fill `scene` from what it
@@ -122,10 +125,28 @@ pub unsafe fn start(
         .map(|(_, g)| crate::render::scene::Light::from_payload(g.position, g.payload))
         .collect();
 
-    let placements: Vec<(String, Mat4, Option<usize>, world::Id)> = w
+    let player = boot.player.clone();
+    let placements: Vec<(String, Mat4, Option<usize>, world::Id, bool)> = w
         .iter()
         .filter_map(|(id, gob)| {
-            let resource = gob.resource.clone()?;
+            // a character's `resource` slot holds a **waypoint name**, and a
+            // sound's holds a `.wav`, so neither names a model; the model
+            // comes from the object's type instead
+            let named = match gob.resource.clone() {
+                Some(r) if r.to_ascii_lowercase().ends_with(".wav") => None,
+                other => other,
+            };
+            // The type-to-model convention holds for only 67 of the 149
+            // `OBJ_*` types, so it is not applied to all of them: it would
+            // drag in twenty-one guesses, and `cloak.mod`'s vertices are
+            // uninitialised. It is applied to **the player**, which the
+            // level named itself through `mdkSetPlayModeGobs`, and where
+            // `OBJ_KURT` wearing `kurt.mod` is not in doubt.
+            let is_player = player.as_deref() == Some(gob.name.as_str());
+            let from_type = named.is_none() && is_player;
+            let resource = named.or_else(|| {
+                is_player.then(|| crate::game::api::model_for_type(gob.kind)).flatten()
+            })?;
             Some((
                 resource,
                 Mat4::translation([
@@ -141,6 +162,7 @@ pub unsafe fn start(
                 ])),
                 room_of(id),
                 id,
+                from_type,
             ))
         })
         .collect();
@@ -153,7 +175,8 @@ pub unsafe fn start(
 
     let mut placed = 0;
     let mut without_a_model = 0;
-    for (resource, transform, room, id) in placements {
+    let mut by_type = 0;
+    for (resource, transform, room, id, from_type) in placements {
         if !scene.load(gl, install, &resource) {
             without_a_model += 1;
             continue;
@@ -166,11 +189,20 @@ pub unsafe fn start(
             Some(id),
         );
         placed += 1;
+        if from_type {
+            by_type += 1;
+        }
     }
 
     Ok(Started {
         scripts,
-        loaded: Loaded { objects, placed, without_a_model, triangles: scene.triangle_count() },
+        loaded: Loaded {
+            objects,
+            placed,
+            without_a_model,
+            by_type,
+            triangles: scene.triangle_count(),
+        },
         rooms: Visibility { names, boxes, visible },
         checkpoints,
         collision,
@@ -242,6 +274,7 @@ pub unsafe fn load(
         objects,
         placed,
         without_a_model,
+        by_type: 0,
         triangles: scene.triangle_count(),
     })
 }

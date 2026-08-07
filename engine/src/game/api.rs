@@ -779,6 +779,29 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
     Ok(())
 }
 
+/// The `OBJ_*` name of a type value, out of the table the binary registers.
+pub fn type_name(kind: f64) -> Option<&'static str> {
+    crate::game::constants::CONSTANTS
+        .iter()
+        .find(|(n, v)| *v == kind && n.starts_with("OBJ_"))
+        .map(|(n, _)| *n)
+}
+
+/// The model a character wears, which the scene graph does **not** say: a
+/// character's `resource` slot holds a **waypoint name**, so the model comes
+/// from its type.
+///
+/// The engine's own mapping lives in the per-type constructor below
+/// `0x42ac60` and has not been read. What is used here is the naming
+/// convention the data keeps — `OBJ_KURT` wears `kurt.mod`, `OBJ_MAX` wears
+/// `max.mod` — and it is a convention and not a rule: **67 of the 149
+/// `OBJ_*` types have a model named after them**, and the rest do not.
+/// Everything it does not cover simply goes undrawn, which is the honest
+/// failure.
+pub fn model_for_type(kind: f64) -> Option<String> {
+    type_name(kind).map(|n| n[4..].to_ascii_lowercase())
+}
+
 /// A gob's name, from the table the scripts hold it by.
 fn gob_name(v: &Value) -> Option<String> {
     match v {
@@ -965,6 +988,7 @@ pub fn tick(
     scripts: &Scripts,
     rooms: &Visibility,
     at: [f64; 3],
+    facing: f64,
     dt: f64,
     state: &mut Ticking,
 ) -> Result<(), Error> {
@@ -978,7 +1002,22 @@ pub fn tick(
     // gob at the checkpoint and every one of those measures a distance that
     // never changes, so nothing in a level ever fires.
     if let Ok(player) = scripts.lua.named_registry_value::<mlua::Table>("player") {
-        place(&scripts.lua, &player, at)?;
+        // the body's position is its **eye**; a model stands on its feet, so
+        // the object goes an eye-height lower
+        place(
+            &scripts.lua,
+            &player,
+            [at[0], at[1], at[2] - crate::game::body::EYE],
+        )?;
+        // and it faces where the body faces: a yaw about Z, in the (w,x,y,z)
+        // order everything here stores a quaternion in
+        if let (Some(id), Some(mut w)) = (
+            world::id_of(&player),
+            scripts.lua.app_data_mut::<world::World>(),
+        ) {
+            let half = facing / 2.0;
+            w.set_rotation(id, [half.cos(), 0.0, 0.0, half.sin()]);
+        }
     }
 
     // the room under the player, and an entry when it changes
