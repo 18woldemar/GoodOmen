@@ -54,10 +54,14 @@ It reads the game out of its own directory — `data/*.zip` first and then
 - **and you can hear it**: OpenAL Soft, opened at run time rather than linked,
   with the level's `OBJ_AMBIENTSOUND` objects looping where they stand. The
   payload's near and far distances drive DirectSound3D's own model, and the
-  mixer is checked the way the renderer is — rendered through a **loopback
-  device** so the mix comes back as samples, with nothing played at anyone:
-  `1.00@5u 1.00@10u 0.50@20u 0.25@80u` against the clamped inverse law. **All
-  76 ambient sounds the ten levels place decode.**
+  rooms reverberate through EFX with **the 26 EAX 2.0 environments** — level 1
+  opens in a `PARKINGLOT` and level 7's hub is a `HANGAR`, which are the level
+  tables' own numbers. The mixer is checked the way the renderer is: rendered
+  through a **loopback device** so the mix comes back as samples, with nothing
+  played at anyone. `1.00@5u 1.00@10u 0.50@20u 0.25@80u` against the clamped
+  inverse law, and a tail of `0.000 PADDEDCELL against 0.214 ARENA` a quarter
+  second after the sound stops. **All 76 ambient sounds the ten levels place
+  decode.**
 
 **Linux and Windows are both tested**, and the Windows build is
 cross-compiled and run under Wine inside a real installation as part of the

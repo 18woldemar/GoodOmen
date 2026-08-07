@@ -44,10 +44,13 @@ sharing our mistakes. **1019 streams, byte for byte.**
 machine without it plays a silent game rather than none — and the Windows
 build needs no DLL beside it, which is the one promise the engine makes.
 `--sound` is the mixer's answer to `--triangle`: it renders through OpenAL
-Soft's loopback device, so the mix comes back as samples and the distance law
-can be asserted on with nothing played at anyone. A level's
-`OBJ_AMBIENTSOUND` objects become looping sources at their own places, with
-the payload's near and far distances driving DirectSound3D's model exactly.
+Soft's loopback device, so the mix comes back as samples and both the distance
+law and the reverb tail can be asserted on with nothing played at anyone. A
+level's `OBJ_AMBIENTSOUND` objects become looping sources at their own places,
+with the payload's near and far distances driving DirectSound3D's model
+exactly, and crossing into a room switches the EFX reverb to that room's **EAX
+2.0 environment** — one listener slot, swapped on entry, which is all EAX 2.0
+has.
 
 **Scripts**: all 89 shipped `.lua`, which are Lua **3** run on a Lua 5.1 the
 engine carries itself (`mlua`, vendored — nothing to install). Three things

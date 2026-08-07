@@ -699,7 +699,8 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
             .cloned()
             .ok_or_else(|| format!("level {number} has no checkpoint {checkpoint}"))?;
         let collision = Collision::load(&mut install, &w);
-        (api::Visibility { names, boxes, visible }, collision, spawn)
+        let env = boot.rooms.iter().map(|r| r.env).collect();
+        (api::Visibility { names, boxes, visible, env }, collision, spawn)
     };
 
     let frames = install
@@ -920,13 +921,20 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         let decoded = goodomen::audio::decodable(&ambient, &mut read);
         (None, format!("{decoded} of {} ambient sounds decode", ambient.len()))
     };
+    // the room's EAX 2.0 environment, named rather than numbered: a wrong
+    // table shows up here as a wrong room
+    let standing_in = here
+        .first()
+        .and_then(|&i| rooms.env[i])
+        .map(|e| goodomen::audio::reverb::NAMES[(e as usize).min(25)])
+        .unwrap_or("GENERIC");
 
     let mut yaw = spawn.facing;
     let mut pitch = 0.0f64;
     let summary = format!(
         "l{number} cp{checkpoint}: {} objects, {} placed ({} by their type), {} triangles, \
          {} posed, {} lights, {} refused, in {} \
-         ({} rooms visible from it), {sounding}",
+         ({} rooms visible from it, {standing_in}), {sounding}",
         loaded.objects,
         loaded.placed,
         loaded.by_type,
@@ -960,6 +968,8 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         );
         let mut at = body.position;
         let mut cull = true;
+        // -1 is not an environment, so the first frame always sets one
+        let mut listening = -1i32;
         let started = std::time::Instant::now();
         let mut last = std::time::Instant::now();
         loop {
@@ -1050,6 +1060,13 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
             // the room under the camera decides what is drawn, every frame
             let here = rooms.at(at);
             let visible = here.first().map(|&i| rooms.visible[i].clone());
+            // and what it sounds like: EAX 2.0 has one listener environment,
+            // and the original swaps it on entry rather than blending
+            let env = here.first().and_then(|&i| rooms.env[i]).unwrap_or(0.0) as i32;
+            if let (Some(a), true) = (&heard, env != listening) {
+                a.audio.environment(env);
+                listening = env;
+            }
             // Third person when walking: the player has a body now, so the
             // camera stands behind it. `BEHIND` and `ABOVE` are chosen here
             // and not taken from the game -- the original's camera is an

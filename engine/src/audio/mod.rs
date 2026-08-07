@@ -18,6 +18,8 @@
 //! as samples that can be asserted on, with nothing played on anyone's
 //! speakers and no sound card required.
 
+pub mod reverb;
+
 use std::ffi::{c_char, c_void, CString};
 
 /// The prefix an error carries when it means "there is no audio here", as
@@ -42,6 +44,28 @@ const AL_FORMAT_MONO16: i32 = 0x1101;
 const AL_FORMAT_STEREO16: i32 = 0x1103;
 const AL_NO_ERROR: i32 = 0;
 const AL_INVERSE_DISTANCE_CLAMPED: i32 = 0xD002;
+
+// AL/efx.h. The effect functions are an extension and have to come through
+// `alGetProcAddress`: OpenAL Soft exports them, but Creative's router does
+// not, and the router is what a Windows player is likely to have.
+const AL_EFFECT_TYPE: i32 = 0x8001;
+const AL_EFFECT_REVERB: i32 = 0x0001;
+const AL_EFFECTSLOT_EFFECT: i32 = 0x0001;
+const AL_FILTER_NULL: i32 = 0;
+const AL_AUXILIARY_SEND_FILTER: i32 = 0x20006;
+const AL_REVERB_DENSITY: i32 = 0x0001;
+const AL_REVERB_DIFFUSION: i32 = 0x0002;
+const AL_REVERB_GAIN: i32 = 0x0003;
+const AL_REVERB_GAINHF: i32 = 0x0004;
+const AL_REVERB_DECAY_TIME: i32 = 0x0005;
+const AL_REVERB_DECAY_HFRATIO: i32 = 0x0006;
+const AL_REVERB_REFLECTIONS_GAIN: i32 = 0x0007;
+const AL_REVERB_REFLECTIONS_DELAY: i32 = 0x0008;
+const AL_REVERB_LATE_REVERB_GAIN: i32 = 0x0009;
+const AL_REVERB_LATE_REVERB_DELAY: i32 = 0x000A;
+const AL_REVERB_AIR_ABSORPTION_GAINHF: i32 = 0x000B;
+const AL_REVERB_ROOM_ROLLOFF_FACTOR: i32 = 0x000C;
+const AL_REVERB_DECAY_HFLIMIT: i32 = 0x000D;
 
 // AL/alc.h and AL/alext.h, for the loopback device
 const ALC_FREQUENCY: i32 = 0x1007;
@@ -71,9 +95,11 @@ struct Api {
     alGetSourcei: unsafe extern "C" fn(u32, i32, *mut i32),
     alSourcePlay: unsafe extern "C" fn(u32),
     alSourceStop: unsafe extern "C" fn(u32),
+    alSource3i: unsafe extern "C" fn(u32, i32, i32, i32, i32),
     alListener3f: unsafe extern "C" fn(i32, f32, f32, f32),
     alListenerfv: unsafe extern "C" fn(i32, *const f32),
     alDistanceModel: unsafe extern "C" fn(i32),
+    alGetProcAddress: unsafe extern "C" fn(*const c_char) -> *mut c_void,
 
     /// `ALC_SOFT_loopback`, present only when the extension is. Used by the
     /// self-check and nothing else.
@@ -140,14 +166,30 @@ impl Api {
             alGetSourcei: entry!(lib, "alGetSourcei"),
             alSourcePlay: entry!(lib, "alSourcePlay"),
             alSourceStop: entry!(lib, "alSourceStop"),
+            alSource3i: entry!(lib, "alSource3i"),
             alListener3f: entry!(lib, "alListener3f"),
             alListenerfv: entry!(lib, "alListenerfv"),
             alDistanceModel: entry!(lib, "alDistanceModel"),
+            alGetProcAddress: entry!(lib, "alGetProcAddress"),
             alcLoopbackOpenDeviceSOFT: loopback,
             alcRenderSamplesSOFT: render,
             _lib: lib,
         })
     }
+}
+
+/// The four EFX entry points a single listener reverb needs, and the effect
+/// and slot they made. Absent on a device without `ALC_EXT_EFX`, which is a
+/// game without reverb and not a broken one.
+#[allow(non_snake_case)]
+struct Efx {
+    alEffecti: unsafe extern "C" fn(u32, i32, i32),
+    alEffectf: unsafe extern "C" fn(u32, i32, f32),
+    alAuxiliaryEffectSloti: unsafe extern "C" fn(u32, i32, i32),
+    alDeleteEffects: unsafe extern "C" fn(i32, *const u32),
+    alDeleteAuxiliaryEffectSlots: unsafe extern "C" fn(i32, *const u32),
+    effect: u32,
+    slot: u32,
 }
 
 /// An open device with a current context.
@@ -159,6 +201,7 @@ pub struct Audio {
     sources: Vec<u32>,
     /// Set for a loopback device; the mix has to be pulled by hand.
     loopback: Option<i32>,
+    efx: Option<Efx>,
 }
 
 /// A decoded sound, uploaded once and shared by every source that plays it.
@@ -226,7 +269,45 @@ impl Audio {
         // DirectSound3D's model, which is what the payload's near and far
         // distances mean
         unsafe { (api.alDistanceModel)(AL_INVERSE_DISTANCE_CLAMPED) };
-        Ok(Audio { api, device, context, buffers: Vec::new(), sources: Vec::new(), loopback })
+        let efx = Efx::open(&api);
+        Ok(Audio {
+            api,
+            device,
+            context,
+            buffers: Vec::new(),
+            sources: Vec::new(),
+            loopback,
+            efx,
+        })
+    }
+
+    /// Set the one listener reverb, the way `chSndSetEnvironment` does: a
+    /// room's `env` and nothing else. False when the device has no EFX.
+    ///
+    /// **A single slot for the whole listener**, not one per room — EAX 2.0
+    /// has exactly one listener environment, and the original swaps it on
+    /// room entry rather than blending between them.
+    pub fn environment(&self, index: i32) -> bool {
+        let Some(e) = &self.efx else { return false };
+        let r = reverb::environment(index);
+        unsafe {
+            (e.alEffectf)(e.effect, AL_REVERB_DENSITY, r.density);
+            (e.alEffectf)(e.effect, AL_REVERB_DIFFUSION, r.diffusion);
+            (e.alEffectf)(e.effect, AL_REVERB_GAIN, r.gain);
+            (e.alEffectf)(e.effect, AL_REVERB_GAINHF, r.gain_hf);
+            (e.alEffectf)(e.effect, AL_REVERB_DECAY_TIME, r.decay);
+            (e.alEffectf)(e.effect, AL_REVERB_DECAY_HFRATIO, r.decay_hf);
+            (e.alEffectf)(e.effect, AL_REVERB_REFLECTIONS_GAIN, r.reflections);
+            (e.alEffectf)(e.effect, AL_REVERB_REFLECTIONS_DELAY, r.reflections_delay);
+            (e.alEffectf)(e.effect, AL_REVERB_LATE_REVERB_GAIN, r.late);
+            (e.alEffectf)(e.effect, AL_REVERB_LATE_REVERB_DELAY, r.late_delay);
+            (e.alEffectf)(e.effect, AL_REVERB_AIR_ABSORPTION_GAINHF, r.air);
+            (e.alEffectf)(e.effect, AL_REVERB_ROOM_ROLLOFF_FACTOR, r.rolloff);
+            (e.alEffecti)(e.effect, AL_REVERB_DECAY_HFLIMIT, r.hf_limit as i32);
+            // the slot only picks the effect up when it is handed it again
+            (e.alAuxiliaryEffectSloti)(e.slot, AL_EFFECTSLOT_EFFECT, e.effect as i32);
+        }
+        true
     }
 
     /// True when the device carries an extension, by its ALC name.
@@ -269,6 +350,20 @@ impl Audio {
         self.error("alGenSources")?;
         unsafe { (self.api.alSourcei)(id, AL_BUFFER, sound.0 as i32) };
         self.error("alSourcei(AL_BUFFER)")?;
+        // every voice feeds the one listener reverb, since that is what an
+        // EAX 2.0 environment is
+        if let Some(e) = &self.efx {
+            unsafe {
+                (self.api.alSource3i)(
+                    id,
+                    AL_AUXILIARY_SEND_FILTER,
+                    e.slot as i32,
+                    0,
+                    AL_FILTER_NULL,
+                )
+            };
+            self.error("alSource3i(AL_AUXILIARY_SEND_FILTER)")?;
+        }
         self.sources.push(id);
         Ok(Voice(id))
     }
@@ -340,9 +435,67 @@ impl Audio {
     }
 }
 
+impl Efx {
+    /// Fetch the extension and make the one effect and slot, or `None`.
+    ///
+    /// A context has to be current before this: `alGetProcAddress` answers
+    /// out of the current device's extension list.
+    fn open(api: &Api) -> Option<Efx> {
+        let address = |name: &str| -> Option<*mut c_void> {
+            let c = CString::new(name).ok()?;
+            let p = unsafe { (api.alGetProcAddress)(c.as_ptr()) };
+            (!p.is_null()).then_some(p)
+        };
+        // SAFETY: each name is fetched with the signature EFX gives it.
+        unsafe {
+            let gen_effects: unsafe extern "C" fn(i32, *mut u32) =
+                std::mem::transmute(address("alGenEffects")?);
+            let gen_slots: unsafe extern "C" fn(i32, *mut u32) =
+                std::mem::transmute(address("alGenAuxiliaryEffectSlots")?);
+            let efx = Efx {
+                alEffecti: std::mem::transmute(address("alEffecti")?),
+                alEffectf: std::mem::transmute(address("alEffectf")?),
+                alAuxiliaryEffectSloti: std::mem::transmute(
+                    address("alAuxiliaryEffectSloti")?,
+                ),
+                alDeleteEffects: std::mem::transmute(address("alDeleteEffects")?),
+                alDeleteAuxiliaryEffectSlots: std::mem::transmute(
+                    address("alDeleteAuxiliaryEffectSlots")?,
+                ),
+                effect: {
+                    let mut id = 0u32;
+                    gen_effects(1, &mut id);
+                    id
+                },
+                slot: {
+                    let mut id = 0u32;
+                    gen_slots(1, &mut id);
+                    id
+                },
+            };
+            if efx.effect == 0 || efx.slot == 0 {
+                return None;
+            }
+            // EAX 2.0's listener properties are the **standard** reverb's
+            // thirteen; EAXREVERB's extra ten are EAX 3.0 and later, which
+            // this game never had
+            (efx.alEffecti)(efx.effect, AL_EFFECT_TYPE, AL_EFFECT_REVERB);
+            if (api.alGetError)() != AL_NO_ERROR {
+                return None;
+            }
+            Some(efx)
+        }
+    }
+}
+
 impl Drop for Audio {
     fn drop(&mut self) {
         unsafe {
+            if let Some(e) = &self.efx {
+                (e.alAuxiliaryEffectSloti)(e.slot, AL_EFFECTSLOT_EFFECT, 0);
+                (e.alDeleteAuxiliaryEffectSlots)(1, &e.slot);
+                (e.alDeleteEffects)(1, &e.effect);
+            }
             for &s in &self.sources {
                 (self.api.alSourceStop)(s);
             }
@@ -583,6 +736,46 @@ pub fn selfcheck() -> Result<String, String> {
                 .join(", ")
         ));
     }
+
+    // and the reverb, by the one thing a reverb does: sound after the sound
+    // has stopped. A short preset and a long one on the same tone must leave
+    // very different tails, which checks the effect slot, the send, and that
+    // the preset table's decay times actually arrive.
+    let mut tails = Vec::new();
+    for &env in &[1usize, 9] {
+        if !audio.environment(env as i32) {
+            tails.clear();
+            break;
+        }
+        let v = audio.voice(sound)?;
+        // at the reference distance, so nothing but the reverb is in play
+        audio.place(v, [0.0, 0.0, -near], near, far);
+        audio.play(v);
+        // Past the end of the quarter-second tone, then a further quarter
+        // second, and only then listen. Measuring right after the tone stops
+        // would find both presets loud: PADDEDCELL decays in 0.17 s, so the
+        // window has to start after that or the two look alike.
+        audio.render(RATE as usize / 2)?;
+        let tail = audio.render(RATE as usize / 4)?;
+        audio.stop(v);
+        let peak = tail.iter().map(|s| s.unsigned_abs() as f32).fold(0.0, f32::max);
+        tails.push((reverb::NAMES[env], peak / AMPLITUDE as f32));
+    }
+    let reverberation = match tails.as_slice() {
+        [] => ", no EFX".to_string(),
+        [(short, quiet), (long, loud)] => {
+            // ARENA decays for 7.24 s and PADDEDCELL for 0.17; a third of a
+            // second after the sound stops they cannot be alike
+            if *loud < 0.01 || *loud < quiet * 3.0 {
+                return Err(format!(
+                    "the reverb tails do not differ: {short} {quiet:.4}, {long} {loud:.4}"
+                ));
+            }
+            format!(", tail {quiet:.3} {short} against {loud:.3} {long}")
+        }
+        _ => ", the reverb answered once".to_string(),
+    };
+
     Ok(format!(
         "OpenAL loopback: {} rendered at {RATE} Hz, gain {} — clamped inverse to {worst:.3}{}",
         measured.len(),
@@ -591,7 +784,7 @@ pub fn selfcheck() -> Result<String, String> {
             .map(|&(d, g)| format!("{g:.2}@{d:.0}u"))
             .collect::<Vec<_>>()
             .join(" "),
-        if audio.has("ALC_EXT_EFX") { ", EFX present" } else { ", no EFX" }
+        reverberation
     ))
 }
 

@@ -37,6 +37,9 @@ pub struct Visibility {
     pub names: Vec<String>,
     pub boxes: Vec<Option<[f64; 6]>>,
     pub visible: Vec<std::collections::BTreeSet<usize>>,
+    /// The room's EAX 2.0 environment, from `mdkRoomSetEnv`. One number is
+    /// all the game ever says about reverb — see `crate::audio::reverb`.
+    pub env: Vec<Option<f64>>,
 }
 
 impl Visibility {
