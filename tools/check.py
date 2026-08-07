@@ -49,6 +49,8 @@ CORPUS = [
      "base/stars.sta"),
     ("recorded demo parses", ["omn.py", "extracted/base/demo1_5.omn"],
      "base/demo1_5.omn"),
+    ("sound headers are WAVC over Interplay ACM",
+     ["wavc.py", "extracted", "--validate"], "sounds"),
     ("checkpoints stand in open space",
      ["spawn.py", "extracted", "--all", "--expect", "126"],
      "scripts/level1.lua"),

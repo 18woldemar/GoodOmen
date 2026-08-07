@@ -19,6 +19,7 @@ scratch. The model is OpenMW and devilutionX.
 | `tools/mod2html.py` | Packs a model — or, with `--scene`, a whole level and everything standing in it — into a single self-contained WebGL viewer. With `--walk` the collision trees come too and you can walk the level instead of flying it. No libraries, no server. |
 | `tools/bsp.py` | Reads and validates the `.bsp` collision trees; point-in-solid and drop queries. **692/692 validate.** |
 | `tools/scene.py` | Reads the level scene graphs — every object's type, position, parent and resource. **54 files, 5633 objects, 0 complaints.** |
+| `tools/wavc.py` | The sounds. **992 of the 998 `.wav` files are not RIFF** — they are `WAVCV1.0` over Interplay ACM, the Baldur's Gate codec. All 992 decode to exactly the length their header states. |
 | `tools/walksim.py` | The viewer's controller, in Python, over every level. **2557 spawn points: 2556 stay standing, 2 ever inside geometry.** |
 | `tools/spawn.py` | The checkpoints a level starts you at, pulled by running its script, and whether each one stands in open space. **127 checkpoints, 126 clear.** |
 | `tools/luarun.py` | Runs the shipped Lua on a stock `lua5.1`. **All 31 scripts run to the end**, and the scene graphs they register match `scene.py` exactly — 5633 objects, no disagreement. |
@@ -57,6 +58,7 @@ Hence the name: the engine is called Omen, so ours is a good one.
 | `.lua` | Plain text, and **Lua 3.x** — the `$if` / `$end` pragmas, and two lines of syntax 5.x cannot parse (`%upvalue`, `break` as a name). `base/l*.lua` are the level scene graphs: 5633 `mdkRegisterObject` calls placing every object in the game. |
 | `.str` | 686 entries of `{id, text, sound}`. Text is **UTF-16LE**, so one file per language is enough; `sound` names the `.wav` that speaks the line. |
 | `.sta` | 3141 records of `{ra, dec, magnitude}` in radians — an actual star catalogue, Sirius first. The southern declinations are off by up to a degree, in the shipped game. |
+| `.wav` | Mostly a lie: 992 of 998 are `WAVCV1.0`, a 28-byte header over an **Interplay ACM** stream — the same codec the Infinity Engine used. Mono 16-bit at 22050 or 11025 Hz. `ffmpeg` decodes the payload. |
 | `.omn` | A recorded demo: `{command, value}` pairs, 0xFFFFFFFF ending each frame and carrying its delta time. 30 fps, controller input rather than positions. |
 
 Details, and the hypotheses that turned out to be wrong, live in
