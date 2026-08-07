@@ -152,9 +152,24 @@ function startAudio(){
   if (audio || !SOUND) return;
   audio = new (window.AudioContext || window.webkitAudioContext)();
   for (const s of SOUND.sources){
+    // A real 3D source, because the original's was one: mdk2Main.exe carries
+    // IID_IDirectSound3DBuffer and IID_IDirectSound3DListener. DirectSound3D
+    // attenuates by *inverse* distance between min and max and clamps
+    // outside them, which is what 'inverse' with a rolloff of 1 does here --
+    // not the straight line an earlier reading of the payload assumed.
+    s.pan = audio.createPanner();
+    s.pan.panningModel = 'HRTF';
+    s.pan.distanceModel = 'inverse';
+    s.pan.refDistance = s.near || 1;
+    s.pan.maxDistance = s.far || 100;
+    s.pan.rolloffFactor = 1;
+    s.pan.positionX.value = s.pos[0];
+    s.pan.positionY.value = s.pos[1];
+    s.pan.positionZ.value = s.pos[2];
     s.gainNode = audio.createGain();
     s.gainNode.gain.value = 0;
-    s.gainNode.connect(audio.destination);
+    s.gainNode.connect(s.pan);
+    s.pan.connect(audio.destination);
     fetch(SOUND.clips[s.clip]).then(r => r.arrayBuffer())
       .then(b => audio.decodeAudioData(b))
       .then(buf => {
@@ -167,17 +182,25 @@ function startAudio(){
 }
 addEventListener('pointerdown', startAudio, {once: true});
 addEventListener('keydown', startAudio, {once: true});
-function mixAudio(p){
+function mixAudio(p, fwd, up){
   if (!audio) return;
+  const L = audio.listener;
+  // the same frame the camera uses: model space is Z-up and right-handed,
+  // and WebAudio only ever works with relative vectors, so feeding it
+  // consistently is enough
+  if (L.positionX){
+    L.positionX.value = p[0]; L.positionY.value = p[1]; L.positionZ.value = p[2];
+    L.forwardX.value = fwd[0]; L.forwardY.value = fwd[1]; L.forwardZ.value = fwd[2];
+    L.upX.value = up[0]; L.upY.value = up[1]; L.upZ.value = up[2];
+  } else {
+    L.setPosition(p[0], p[1], p[2]);
+    L.setOrientation(fwd[0], fwd[1], fwd[2], up[0], up[1], up[2]);
+  }
+  // the panner does the distance curve; this only carries the object's own
+  // volume and the room cull
   for (const s of SOUND.sources){
     if (!s.gainNode) continue;
-    const d = Math.hypot(p[0]-s.pos[0], p[1]-s.pos[1], p[2]-s.pos[2]);
-    // full volume inside `near`, falling linearly to nothing at `far`
-    let g = 0;
-    if (d <= s.near) g = s.gain;
-    else if (d < s.far) g = s.gain * (1 - (d - s.near) / (s.far - s.near));
-    if (shown && !shown.has(s.room)) g = 0;
-    s.gainNode.gain.value = g;
+    s.gainNode.gain.value = (shown && !shown.has(s.room)) ? 0 : s.gain;
   }
 }
 
@@ -521,7 +544,7 @@ function frame(){
       gl.bindTexture(gl.TEXTURE_2D, textures[d.tex] || blank);
       gl.drawArrays(gl.TRIANGLES, d.first, d.count);
     }
-  mixAudio(pos);
+  mixAudio(pos, fwd, up);
   drawMovers(mvp, now, false);
   gl.enable(gl.BLEND); gl.depthMask(false);
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
