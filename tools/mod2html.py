@@ -15,9 +15,8 @@ chain, one texture per node named by the byte at +0x87.
 
 With `--scene` it packs a whole level instead of one model: every object the
 scene graph places, geometry merged into one buffer. See tools/scene.py for
-the graph itself, and `place()` below for the one thing that is still a
-judgement call -- whether a model is authored in world space or has to be
-moved to its object.
+the graph itself, and `place()` below for how an object's model is put where
+the object stands.
 
 Usage:
     python3 tools/mod2html.py extracted/base/ml7z_castle.mod -o castle.html
@@ -178,7 +177,7 @@ def _rotate(q, p):
             p[2] + w * tz + (x * ty - y * tx))
 
 
-def place(obj: dict, verts: list) -> list:
+def place(obj: dict, verts: list, node_local: bool) -> list:
     """Put one object's vertices where the object stands.
 
     Some models are authored in world space and are already standing where
@@ -187,24 +186,19 @@ def place(obj: dict, verts: list) -> list:
     reused: `dr1.mod` is one door mesh placed at 21 different doorways. The
     first kind must not be moved and the second must be.
 
-    Nothing in the scene graph says which is which. `flag`, `group`, the
-    parent, and the model's own root translation were all checked against the
-    2845 objects that name a model, and none of them separates the two; the
-    engine must be deciding it somewhere else. What does separate them cleanly
-    is the geometry: 1741 models sit around the origin and 960 sit around
-    their object's position already, with 144 in between. So the rule here is
-    to measure it -- move the model only when it is not already there.
-
-    This is a stand-in for a fact not yet recovered, and it is only ever wrong
-    by a whole object's displacement, which is obvious on sight in the viewer.
+    Nothing in the *scene graph* says which is which -- `flag`, `group`, the
+    parent and the model's root translation were all cross-tabulated and none
+    of them separates the two. The model says it instead: **a model with an
+    animation section is authored in node-local space and has to be placed; a
+    static one is already in world space.** That is the same distinction
+    `Model.posed()` already makes for the vertices themselves, and it holds:
+    **all 126 models that more than one object uses are animated**, which is
+    what a prototype has to be, and 1626 of the 1666 animated models sit
+    around the origin while 913 of the 917 static ones sit at their object's
+    position already.
     """
-    box_lo = [min(v[0][c] for v in verts) for c in range(3)]
-    box_hi = [max(v[0][c] for v in verts) for c in range(3)]
-    centre = [(box_lo[c] + box_hi[c]) / 2 for c in range(3)]
-    span = max(box_hi[c] - box_lo[c] for c in range(3)) or 1.0
-    here = sum((centre[c] - obj["position"][c]) ** 2 for c in range(3))
-    if here < span * span:
-        return verts                                   # already in place
+    if not node_local:
+        return verts
     return [(tuple(_rotate(obj["rotation"], v[0])[c] + obj["position"][c]
                    for c in range(3)), v[1], v[2]) for v in verts]
 
@@ -216,13 +210,13 @@ def selftest() -> None:
     quarter_turn = (0.70710678, 0.0, 0.0, 0.70710678)   # 90 degrees about z
 
     at_origin = {"position": [10.0, 0.0, 0.0], "rotation": (1.0, 0, 0, 0)}
-    assert place(at_origin, unit)[0][0] == (10.0, 0.0, 0.0), "prototype"
+    assert place(at_origin, unit, True)[0][0] == (10.0, 0.0, 0.0), "prototype"
 
-    already_there = {"position": [10.5, 0.5, 0.5], "rotation": quarter_turn}
-    assert place(already_there, far) is far, "world-authored, leave it"
+    world = {"position": [10.5, 0.5, 0.5], "rotation": quarter_turn}
+    assert place(world, far, False) is far, "static, already in place"
 
     turned = place({"position": [0.0, 0.0, 0.0],
-                 "rotation": quarter_turn}, far)[0][0]
+                    "rotation": quarter_turn}, far, True)[0][0]
     assert max(abs(turned[c] - (0.0, 10.0, 0.0)[c]) for c in range(3)) < 1e-6, \
         turned
     print("mod2html.py: self-test passed")
@@ -248,7 +242,7 @@ def scene_geometry(path: Path, resources: Path) -> tuple[list, list, int]:
         if not v:
             continue
         base = len(verts)
-        verts += place(o, v)
+        verts += place(o, v, model._sec(1) is not None)
         tris += [(a + base, b + base, c + base) for a, b, c in t]
         placed += 1
     return verts, tris, placed
