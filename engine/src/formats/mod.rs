@@ -8,3 +8,4 @@ pub mod container;
 pub mod model;
 pub mod omn;
 pub mod tex;
+pub mod wavc;

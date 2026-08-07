@@ -21,6 +21,7 @@ fn main() {
     let models = args.iter().any(|a| a == "--mod");
     let trees = args.iter().any(|a| a == "--bsp");
     let scripts = args.iter().any(|a| a == "--lua");
+    let audio = args.iter().any(|a| a == "--wav");
     let graphs = args.iter().any(|a| a == "--scene");
 
     // the renderer needs no game files, so it is answered before the
@@ -199,7 +200,7 @@ fn main() {
         }
     };
 
-    if tex || models || trees || scripts || graphs {
+    if tex || models || trees || scripts || graphs || audio {
         // `--expect N`, the same convention the Python tools use: a check
         // that silently found nothing is the failure mode worth guarding
         let expect = args
@@ -217,8 +218,10 @@ fn main() {
             ("trees", collision(&mut install, expect.is_none()))
         } else if scripts {
             ("scripts", compile_scripts(&mut install, expect.is_none()))
-        } else {
+        } else if graphs {
             ("objects", scene_graphs(&mut install, expect.is_none()))
+        } else {
+            ("sounds", sounds(&mut install, expect.is_none()))
         };
         if let Some(n) = expect {
             if found != n {
@@ -1343,6 +1346,62 @@ fn scene_graphs(install: &mut Install, list: bool) -> usize {
     }
     eprintln!("{files} scene graphs run, {total} objects registered");
     total
+}
+
+/// Parse every `.wav` wrapper and say what is inside it.
+///
+/// The ACM payload is not decoded yet — that is the engine's one remaining
+/// format debt — but everything around it checks: the magic, the size
+/// identity `28 + compressed == filesize`, the ACM magic at offset 28, and
+/// the two codec parameters, which are **the same pair for every stream the
+/// game ships**.
+fn sounds(install: &mut Install, list: bool) -> usize {
+    use goodomen::formats::wavc;
+    let found = entries_named(install, ".wav");
+    let (mut wrapped, mut riff, mut pcm_bytes) = (0usize, 0usize, 0u64);
+    let mut parameters: std::collections::BTreeSet<(u8, u8)> = Default::default();
+    let mut rates: std::collections::BTreeMap<u16, usize> = Default::default();
+
+    for (name, i, j) in &found {
+        let data = match install.containers[*i].read_at(*j) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("goodomen: {name}: {e}");
+                std::process::exit(1);
+            }
+        };
+        // the six genuine RIFF files are footsteps, short enough that
+        // compressing them was not worth it
+        if data.starts_with(b"RIFF") {
+            riff += 1;
+            continue;
+        }
+        match wavc::parse(&data) {
+            Ok(s) => {
+                wrapped += 1;
+                pcm_bytes += s.decompressed as u64;
+                parameters.insert((s.levels, s.rows));
+                *rates.entry(s.rate).or_insert(0) += 1;
+                if list {
+                    println!(
+                        "{name} {} {} {} {} {}",
+                        s.decompressed, s.channels, s.rate, s.levels, s.rows
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("goodomen: {name}: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    eprintln!(
+        "{} sounds: {wrapped} WAVC over Interplay ACM, {riff} RIFF, \
+         {:.1} MiB of PCM behind them, codec parameters {parameters:?}, rates {rates:?}",
+        found.len(),
+        pcm_bytes as f64 / (1024.0 * 1024.0)
+    );
+    found.len()
 }
 
 /// Every container member with this extension, lowercased and sorted, so that
