@@ -45,7 +45,10 @@ It reads the game out of its own directory — `data/*.zip` first and then
   a single key — so a level only comes alive when `omAnimPlay` chooses
   another, which the driver now does. **The player is on screen**: the level
   names its own player object through `mdkSetPlayModeGobs`, and `OBJ_KURT`
-  wears `kurt.mod`.
+  wears `kurt.mod`, and the engine drives his locomotion the way the
+  original's `mdkWalkerAnimUpdate` does — **every one of `kurt.mod`'s 61
+  animation ids is a constant the binary names `ANIM_*`**, and 6292 of the
+  corpus's 6311 are.
 
 **Linux and Windows are both tested**, and the Windows build is
 cross-compiled and run under Wine inside a real installation as part of the

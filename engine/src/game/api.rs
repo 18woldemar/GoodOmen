@@ -802,6 +802,48 @@ pub fn model_for_type(kind: f64) -> Option<String> {
     type_name(kind).map(|n| n[4..].to_ascii_lowercase())
 }
 
+/// Which animation a walker should be playing, from where it is going.
+///
+/// The original has a name for this — `mdkWalkerAnimUpdate` — so the
+/// **engine** drives a character's locomotion, not the scripts. The names
+/// are the game's own: every one of `kurt.mod`'s 61 animations carries an id
+/// the binary names `ANIM_*`, and 6292 of the corpus's 6311 do.
+///
+/// `forward` and `right` are the movement in the body's own frame.
+pub fn walk_animation(forward: f64, right: f64) -> &'static str {
+    const STILL: f64 = 0.1;
+    let (f, r) = (forward > STILL, right > STILL);
+    let (b, l) = (forward < -STILL, right < -STILL);
+    match (f, b, l, r) {
+        (true, _, true, _) => "ANIM_RUNFL",
+        (true, _, _, true) => "ANIM_RUNFR",
+        (true, ..) => "ANIM_RUNF",
+        (_, true, true, _) => "ANIM_RUNBL",
+        (_, true, _, true) => "ANIM_RUNBR",
+        (_, true, ..) => "ANIM_RUNB",
+        (_, _, true, _) => "ANIM_RUNL",
+        (_, _, _, true) => "ANIM_RUNR",
+        // `ANIM_DEFAULT` is the still pose, and it is first in every one of
+        // the 1146 animated models — which is why animation 0 never moves.
+        _ => "ANIM_DEFAULT",
+    }
+}
+
+/// Tell an object to play a named animation, the way `omAnimPlay` does.
+pub fn play_named(scripts: &Scripts, gob: &str, animation: &str) -> Result<(), Error> {
+    let Some(id) = crate::game::constants::CONSTANTS
+        .iter()
+        .find(|(n, _)| *n == animation)
+        .map(|(_, v)| *v)
+    else {
+        return Ok(());
+    };
+    if let Some(mut boot) = scripts.lua.app_data_mut::<Boot>() {
+        boot.playing.insert(gob.to_string(), id);
+    }
+    Ok(())
+}
+
 /// A gob's name, from the table the scripts hold it by.
 fn gob_name(v: &Value) -> Option<String> {
     match v {
@@ -1081,4 +1123,39 @@ pub fn tick(
     boot_mut(&scripts.lua)?.clock = state.clock;
     boot_mut(&scripts.lua)?.delta = dt;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The names are the game's own, and the eight directions are the eight
+    /// `ANIM_RUN*` the models carry.
+    #[test]
+    fn locomotion_picks_the_direction_it_is_going() {
+        assert_eq!(walk_animation(1.0, 0.0), "ANIM_RUNF");
+        assert_eq!(walk_animation(-1.0, 0.0), "ANIM_RUNB");
+        assert_eq!(walk_animation(0.0, 1.0), "ANIM_RUNR");
+        assert_eq!(walk_animation(0.0, -1.0), "ANIM_RUNL");
+        assert_eq!(walk_animation(1.0, 1.0), "ANIM_RUNFR");
+        assert_eq!(walk_animation(-1.0, -1.0), "ANIM_RUNBL");
+        assert_eq!(walk_animation(0.0, 0.0), "ANIM_DEFAULT");
+        // a twitch is not a walk
+        assert_eq!(walk_animation(0.01, -0.01), "ANIM_DEFAULT");
+    }
+
+    /// Every one of the eight has to exist in the table the binary
+    /// registers, or the engine is naming animations the game does not have.
+    #[test]
+    fn every_locomotion_name_is_one_the_binary_defines() {
+        for name in [
+            "ANIM_DEFAULT", "ANIM_RUNF", "ANIM_RUNB", "ANIM_RUNL", "ANIM_RUNR",
+            "ANIM_RUNFL", "ANIM_RUNFR", "ANIM_RUNBL", "ANIM_RUNBR",
+        ] {
+            assert!(
+                crate::game::constants::CONSTANTS.iter().any(|(n, _)| *n == name),
+                "{name} is not a constant the game defines"
+            );
+        }
+    }
 }

@@ -673,6 +673,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     let steps = (seconds / dt) as usize;
 
     for step in 0..steps {
+        let was = body.position;
         match &frames {
             Some(f) if step < f.len() => body.replay(&collision, &f[step..step + 1], 1.0, WALK),
             // forwards, which is enough to cross a room
@@ -680,6 +681,24 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
                 let d = [body.yaw.cos(), body.yaw.sin()];
                 body.step(&collision, d, false, WALK, dt);
             }
+        }
+        // the same locomotion the window drives, so it can be checked
+        // without one
+        if let Some(name) = scripts
+            .lua
+            .app_data_ref::<api::Boot>()
+            .and_then(|b| b.player.clone())
+        {
+            let (fx, fy) = (body.yaw.cos(), body.yaw.sin());
+            let moved = [
+                body.position[0] - was[0],
+                body.position[1] - was[1],
+            ];
+            let _ = api::play_named(
+                &scripts,
+                &name,
+                api::walk_animation(moved[0] * fx + moved[1] * fy, moved[0] * -fy + moved[1] * fx),
+            );
         }
         api::tick(&scripts, &rooms, body.position, body.yaw, dt, &mut state)
             .map_err(|e| e.to_string())?;
@@ -902,6 +921,22 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                     dt,
                 );
                 at = body.position;
+                // the engine drives the player's locomotion, which is what
+                // the original calls `mdkWalkerAnimUpdate`
+                if let Some(player) = level_scripts
+                    .lua
+                    .app_data_ref::<goodomen::game::api::Boot>()
+                    .and_then(|b| b.player.clone())
+                {
+                    let (fx, fy) = (yaw.cos(), yaw.sin());
+                    let forward = d[0] * fx + d[1] * fy;
+                    let right = d[0] * -fy + d[1] * fx;
+                    let _ = goodomen::game::api::play_named(
+                        &level_scripts,
+                        &player,
+                        goodomen::game::api::walk_animation(forward, right),
+                    );
+                }
             } else {
                 let speed = if fast { 40.0 } else { 12.0 };
                 let length = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1.0);
