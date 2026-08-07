@@ -19,6 +19,9 @@ scratch. The model is OpenMW and devilutionX.
 | `tools/bsp.py` | Reads and validates the `.bsp` collision trees; point-in-solid and drop queries. **692/692 validate.** |
 | `tools/scene.py` | Reads the level scene graphs — every object's type, position, parent and resource. **54 files, 5633 objects, 0 complaints.** |
 | `tools/luaapi.py` | Catalogues the engine functions the shipped Lua calls — **438 of them**, which is the specification the engine has to meet. See [`docs/lua-api.md`](docs/lua-api.md). |
+| `tools/strfile.py` | Reads `.str` — every line of text and the `.wav` that speaks it. **686 entries, 348 voiced, byte-exact.** |
+| `tools/stars.py` | Reads `.sta`, the sky. **3141 real stars**, and the shipped southern declinations are wrong; `--fix` corrects them. |
+| `tools/omn.py` | Reads `.omn`, the recorded attract-mode demo: 1348 frames of controller input at 30 fps. |
 | `tools/refdec.py` | Reference decoder: runs the original's block codec under emulation. A research oracle, not engine code. |
 | `tools/exe_recon.py` | PE reconnaissance: toolchain, imports, RTTI, source paths. |
 | `tools/inventory.py` | Catalogues an installation: sizes, SHA-1, entropy. |
@@ -48,6 +51,9 @@ Hence the name: the engine is called Omen, so ours is a good one.
 | `.mod` | Node hierarchy with per-node bounding boxes, **triangle strips over consecutive vertices — there is no index list**, 32-byte vertices (position + UV), animation as (time, key) pairs at 18 fps, and a 21-byte resource table naming the model's texture and sounds. |
 | `.bsp` | Not geometry: a flat array of 24-byte BSP nodes (unit plane + two child indices), no header at all. A point is solid when the descent reaches a leaf through the *front* child — **with the point negated**, since the tree is authored in a mirrored frame. **692/692 trees validate.** |
 | `.lua` | Plain text, and **Lua 3.x** — the scripts use the `$if` / `$end` pragmas that only Lua 3 had. `base/l*.lua` are the level scene graphs: 5633 `mdkRegisterObject` calls placing every object in the game. |
+| `.str` | 686 entries of `{id, text, sound}`. Text is **UTF-16LE**, so one file per language is enough; `sound` names the `.wav` that speaks the line. |
+| `.sta` | 3141 records of `{ra, dec, magnitude}` in radians — an actual star catalogue, Sirius first. The southern declinations are off by up to a degree, in the shipped game. |
+| `.omn` | A recorded demo: `{command, value}` pairs, 0xFFFFFFFF ending each frame and carrying its delta time. 30 fps, controller input rather than positions. |
 
 Details, and the hypotheses that turned out to be wrong, live in
 [`docs/journal.md`](docs/journal.md). Reconnaissance through Wine — file
