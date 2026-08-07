@@ -269,6 +269,8 @@ fn boot(root: &std::path::Path, n: u32, cp: u32, work_list: bool) -> Result<Stri
     // the sweep asks each level once and then starts each checkpoint it named
     let levels: Vec<u32> = if n > 0 { vec![n] } else { (1..=10).collect() };
     let (mut started, mut rooms, mut checkpoints) = (0usize, 0usize, 0usize);
+    let (mut commands, mut bindings, mut stasis, mut timers) = (0usize, 0usize, 0usize, 0usize);
+    let mut faults: std::collections::BTreeSet<u32> = Default::default();
     let mut resources = std::collections::BTreeSet::new();
     let mut sounds = std::collections::BTreeSet::new();
     let mut work: std::collections::BTreeMap<String, usize> = Default::default();
@@ -295,6 +297,11 @@ fn boot(root: &std::path::Path, n: u32, cp: u32, work_list: bool) -> Result<Stri
         // so they are counted once per level rather than once per boot
         rooms += first.rooms.len();
         checkpoints += first.checkpoints.len();
+        commands = commands.max(first.input.commands.len());
+        bindings = bindings.max(first.input.bindings.len());
+        faults.extend(first.input.faults());
+        stasis += first.stasis.len();
+        timers += first.timers.len();
         for number in numbers {
             match run_one(&sources, level, number, "sectionA") {
                 Ok(b) => {
@@ -338,6 +345,7 @@ fn boot(root: &std::path::Path, n: u32, cp: u32, work_list: bool) -> Result<Stri
         ("boots", started, args_expect()),
         ("resources", resources.len(), expect_flag("--expect-resources")),
         ("rooms", rooms, expect_flag("--expect-rooms")),
+        ("bindings", bindings, expect_flag("--expect-bindings")),
     ] {
         if let Some(want) = want {
             if got != want {
@@ -348,9 +356,16 @@ fn boot(root: &std::path::Path, n: u32, cp: u32, work_list: bool) -> Result<Stri
     if missing > 0 {
         return Err(format!("{missing} named resources are not in the game"));
     }
+    // every bound id must be a DirectInput scancode or one of the six mouse
+    // ids, which is the same check `tools/walksim.py --keys` makes
+    if !faults.is_empty() {
+        return Err(format!("{} bound ids are neither: {faults:?}", faults.len()));
+    }
     Ok(format!(
         "{started} boots, {} resources and {} hard-coded sounds named \
          ({missing} missing), {rooms} rooms, {checkpoints} checkpoints, \
+         {commands} commands over {bindings} bindings (0 faults), \
+         {stasis} objects in stasis, {timers} timers, \
          {} functions called with no behaviour yet",
         resources.len(),
         sounds.len(),

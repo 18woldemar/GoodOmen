@@ -110,7 +110,7 @@ ENGINE = [
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG", "--boot",
       "--expect", "129", "--expect-resources", "2093",
-      "--expect-rooms", "677"], None),
+      "--expect-rooms", "677", "--expect-bindings", "59"], None),
     ("the engine's controller replays the demo like walksim.py",
      ["walksim.py", "extracted/base/l1.lua", "--resources", "extracted",
       "--demo", "extracted/base/demo1_5.omn", "--engine", "$MDK2_GOG"],
