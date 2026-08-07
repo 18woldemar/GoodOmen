@@ -18,6 +18,7 @@ scratch. The model is OpenMW and devilutionX.
 | `tools/mod2html.py` | Packs a model — or, with `--scene`, a whole level and everything standing in it — into a single self-contained WebGL viewer. Geometry and textures inlined, no libraries, no server. |
 | `tools/bsp.py` | Reads and validates the `.bsp` collision trees; point-in-solid and drop queries. **692/692 validate.** |
 | `tools/scene.py` | Reads the level scene graphs — every object's type, position, parent and resource. **54 files, 5633 objects, 0 complaints.** |
+| `tools/luaapi.py` | Catalogues the engine functions the shipped Lua calls — **438 of them**, which is the specification the engine has to meet. See [`docs/lua-api.md`](docs/lua-api.md). |
 | `tools/refdec.py` | Reference decoder: runs the original's block codec under emulation. A research oracle, not engine code. |
 | `tools/exe_recon.py` | PE reconnaissance: toolchain, imports, RTTI, source paths. |
 | `tools/inventory.py` | Catalogues an installation: sizes, SHA-1, entropy. |
