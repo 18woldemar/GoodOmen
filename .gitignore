@@ -1,4 +1,9 @@
-# Game assets and binaries NEVER enter this repository
+# Game assets and binaries NEVER enter this repository.
+#
+# Directory patterns are anchored with a leading slash on purpose: without
+# one git matches them at ANY depth, and an unanchored `game/` silently
+# swallowed the whole of `engine/src/game/` -- eight source files that were
+# never committed and would have made a published checkout not compile.
 *.exe
 *.dll
 *.mdl
@@ -10,13 +15,13 @@
 *.tga
 *.bik
 *.smk
-game/
-gamedata/
-extracted/
-prefixes/
-testdata/*
-!testdata/*.json
-!testdata/README.md
+/game/
+/gamedata/
+/extracted/
+/prefixes/
+/testdata/*
+!/testdata/*.json
+!/testdata/README.md
 
 # Local paths to the Wine prefixes
 .env.local
@@ -25,7 +30,7 @@ testdata/*
 *.log
 *.trace
 *.bin
-dumps/
+/dumps/
 
 # Ghidra
 *.gpr
@@ -35,10 +40,10 @@ ghidra_projects/
 # Python
 __pycache__/
 *.pyc
-.venv/
+/.venv/
 
 # unpacked assets
-extracted/
+/extracted/
 *.tex
 *.mod
 *.bsp
@@ -50,13 +55,13 @@ extracted/
 *.acm
 
 # derived assets
-png/
+/png/
 
 # reference decoder needs unicorn
-.venv/
+/.venv/
 
 # generated viewers embed assets
-view/
+/view/
 
 # the engine's build output
 engine/target/
