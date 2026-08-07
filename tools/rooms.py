@@ -61,6 +61,13 @@ design: `ApplySceneGraph` has `if (gob) then ... else` with a commented-out
 another scene: l10 lists `zizroom`, which `zizzyroom.lua` registers -- the
 Zizzy arena, loaded as a scene of its own.
 
+**Rooms are also where the script logic hangs.** `handlers()` reads the
+level script for `NAME.OnX = function` and finds 447 objects carrying one,
+**182 of them rooms**, and 119 of those with `OnEnterRoom` -- so crossing a
+room boundary is the single commonest thing that runs game logic in MDK2.
+`tools/mod2html.py` puts that in the viewer's HUD: walk into a room and it
+prints what the engine would dispatch there.
+
 Usage:
     python3 tools/rooms.py extracted --check        # all ten levels
     python3 tools/rooms.py extracted --level 1
@@ -72,6 +79,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -141,6 +149,27 @@ def rooms(graph: dict, objects: dict, others: dict | None = None) -> dict:
             "env": v.get("env"),
             "checkpoint": v.get("checkpoint"),
         }
+    return out
+
+
+HANDLER = re.compile(r"^\s*([A-Za-z_]\w*)\.(On\w+)\s*=\s*function", re.M)
+
+
+def handlers(level: int, tree: Path, override: Path | None = None) -> dict:
+    """Which events each object has a handler for. -> {object: [event, ...]}.
+
+    Read out of the level script's text rather than by running it, because
+    what is wanted is the static shape: the engine dispatches `OnEnterRoom`
+    to the room's own object, and this says which rooms would answer. The
+    dynamic form, `mdkSetLuaEvent(gob, "OnX", fn)`, is not here.
+    """
+    script = Path(override or "") / f"level{level}.lua"
+    if not script.is_file():
+        script = tree / "scripts" / f"level{level}.lua"
+    out: dict[str, list[str]] = {}
+    for m in HANDLER.finditer(script.read_text(errors="replace")):
+        if m.group(1) != "Level":
+            out.setdefault(m.group(1), []).append(m.group(2))
     return out
 
 

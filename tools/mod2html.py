@@ -23,6 +23,14 @@ camera can stop being a camera: **G** switches between flying and walking,
 space jumps. The controller is in the page, roughly forty lines of it, and
 what it does and does not do is written down there.
 
+For one of the ten levels it also embeds the **room graph** (`tools/rooms.py`)
+and uses the level's own visibility: standing in a room, only that room and
+the rooms it lists are drawn, which at the game's own spawn points is a median
+11.3% of the level's triangles. **C** turns it off. The HUD names the room you
+are in, and when you cross into a new one it prints the handlers the engine
+would dispatch there -- `l1_r1.OnEnterRoom` and the rest -- which is the level
+script's logic answering the player rather than a viewer's idea of one.
+
 Usage:
     python3 tools/mod2html.py extracted/base/ml7z_castle.mod -o castle.html
     python3 tools/mod2html.py extracted/base/kurt.mod -o kurt.html --png png/
@@ -53,11 +61,13 @@ canvas:active{cursor:grabbing}
 #hud{position:fixed;left:12px;top:12px;color:#9aa;font:12px/1.5 system-ui,sans-serif;
      background:#0d0f12cc;padding:8px 11px;border-radius:7px;pointer-events:none}
 b{color:#dde}
+#events{margin:6px 0 0;color:#7c9;font:11px/1.5 ui-monospace,monospace;white-space:pre-wrap}
 </style>
 <canvas id=c></canvas>
 <div id=hud><b>__TITLE__</b><br>__STATS__<br>drag to look &middot; WASD &middot;
 R/F up-down &middot; shift faster<span id=walkhelp></span><br>
-mode: <b id=mode>flying</b><span id=roomline></span></div>
+mode: <b id=mode>flying</b><span id=roomline></span>
+<pre id=events></pre></div>
 <script>
 const MESH = __MESH__, TEX = __TEX__;
 const gl = document.getElementById('c').getContext('webgl');
@@ -126,6 +136,8 @@ const SPAWNS = __SPAWNS__;
 // drawn, which is what the engine does with a gob it never put in one.
 const ROOMS = __ROOMS__;
 let culling = !!ROOMS, shown = null, hereName = '';
+let lastRoom = null;
+const log = [];
 function visibleRooms(p){
   if (!ROOMS) return null;
   let here = [];
@@ -306,6 +318,17 @@ function frame(){
   // with it read-only -- glass and gradients then show what is behind them
   // instead of being punched out by an alpha test.
   shown = culling ? visibleRooms(pos) : null;
+  if (ROOMS && hereName !== lastRoom){
+    // what the engine would dispatch on crossing into this room: the level
+    // script hangs handlers on the room's own object, and OnEnterRoom is the
+    // commonest of them all -- 125 of them across the ten levels
+    const on = hereName.split(' + ')
+      .filter(r => ROOMS[r] && ROOMS[r].on.length)
+      .map(r => r + '.' + ROOMS[r].on.join(', ' + r + '.'));
+    if (on.length) log.unshift('→ ' + on.join(' · '));
+    lastRoom = hereName;
+    document.getElementById('events').textContent = log.slice(0, 4).join('\n');
+  }
   if (ROOMS)
     document.getElementById('roomline').textContent =
       ' · room: ' + (hereName || 'none')
@@ -409,11 +432,15 @@ def _rooms(graph_path: Path, resources: Path) -> dict | None:
         return None
     try:
         import rooms as rm
-        table, _, _ = rm.load(int(m.group(1)), resources, rm._override(resources))
+        level = int(m.group(1))
+        over = rm._override(resources)
+        table, _, _ = rm.load(level, resources, over)
+        hooks = rm.handlers(level, resources, over)
     except Exception:
         return None
     return {name: {"box": (r["box"][0] + r["box"][1]) if r["box"] else None,
-                   "vis": rm.visible_from(table, name)}
+                   "vis": rm.visible_from(table, name),
+                   "on": hooks.get(name, [])}
             for name, r in table.items() if r["live"]}
 
 
