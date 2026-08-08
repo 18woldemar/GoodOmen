@@ -920,12 +920,18 @@ fn replay(
 fn load_animation_keys(install: &mut Install, scripts: &Scripts) -> usize {
     use goodomen::formats::model::Model;
     use goodomen::game::{api, world};
-    let wanted: std::collections::BTreeSet<String> = {
-        let Some(w) = world::world(&scripts.lua) else { return 0 };
-        w.iter()
-            .filter_map(|(_, g)| api::model_for_type(g.kind))
-            .collect()
-    };
+    // every model on the level **and every model an enemy wears**. The
+    // second half is not redundant: a spawner's enemies do not exist yet when
+    // this runs, and they are exactly the things whose `ANIM_SHOOT` key makes
+    // a projectile. Without them level 7's one fighting poopsy plays the
+    // animation and nothing comes out.
+    let mut wanted: std::collections::BTreeSet<String> = goodomen::game::world::BASE_HITPOINTS
+        .iter()
+        .map(|(_, name, _)| name.to_string())
+        .collect();
+    if let Some(w) = world::world(&scripts.lua) {
+        wanted.extend(w.iter().filter_map(|(_, g)| api::model_for_type(g.kind)));
+    }
     let mut found = 0;
     let mut keys = std::collections::BTreeMap::new();
     for name in wanted {
@@ -1089,7 +1095,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     }
 
     // what the scripts actually did to the world while it ran
-    let (moved, playing, what, fired_sounds, spawned, jumped, shots, landed, struck) = {
+    let (moved, playing, what, fired_sounds, spawned, jumped, shots, landed, struck, fighting) = {
         let w = world::world(&scripts.lua).expect("a world");
         let boot = scripts.lua.app_data_ref::<api::Boot>().expect("boot state");
         let what: Vec<String> = boot
@@ -1100,7 +1106,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         // what the run asked to be heard: `omGobGSPlay` calls that reached a
         // sound the scripts had hung on an object
         let sounds: usize = boot.gob_sounds.iter().map(|g| g.played).sum();
-        (w.generation(), boot.playing.len(), what, sounds, boot.spawned.len(), boot.jumped, boot.fired, boot.hits, boot.keys_fired)
+        (w.generation(), boot.playing.len(), what, sounds, boot.spawned.len(), boot.jumped, boot.fired, boot.hits, boot.keys_fired, boot.fighting.len())
     };
     let (fired, survived) = state.total();
     let mut stopped: Vec<(&String, &usize)> = state.why.iter().collect();
@@ -1125,6 +1131,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         ("shots fired", shots, expect_flag("--expect-shots")),
         ("shots that hit", landed, expect_flag("--expect-hits")),
         ("animation keys", struck, expect_flag("--expect-keys")),
+        ("enemies fighting", fighting, expect_flag("--expect-fighting")),
     ] {
         if let Some(want) = want {
             if got != want {
@@ -1139,7 +1146,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
          {moved} object moves, {playing} animations chosen, \
          {fired_sounds} sounds fired, {spawned} objects spawned, \
          {jumped} walkers launched, {shots} shots fired ({landed} hit), \
-         {anim_keys} keys in {struck} struck, \
+         {anim_keys} keys in {struck} struck, {fighting} enemies fighting, \
          {} objects touched and {} of them \
          scripted{}{} [{}]{}",
         if recorded { "the game's own recorded" } else { "held-forwards" },

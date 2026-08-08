@@ -334,6 +334,9 @@ pub struct Boot {
     /// Rounds left in a walker's burst — `walker + 0x9c` while state 0 has
     /// it. Loaded from the behaviour record's first column.
     pub burst: BTreeMap<String, f64>,
+    /// Objects that have been told to fight at least once. `mdkDoganboyAttack`
+    /// is a *task*, so this counts the enemies whose script got that far.
+    pub fighting: BTreeSet<String>,
     /// **The animation keys**, by model name: `(animation, time, code)`.
     /// A channel whose target kind is 23 carries no geometry — its values are
     /// key codes, and 0x42bf80 splits them four ways:
@@ -1012,6 +1015,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         lua.create_function(|lua, args: Variadic<Value>| {
             let Some(who) = args.first().and_then(gob_name) else { return Ok(0.0) };
             let Some((at, _)) = stance(lua, &who) else { return Ok(0.0) };
+            boot_mut(lua)?.fighting.insert(who.clone());
             let kind = {
                 let Some(w) = world::world(lua) else { return Ok(0.0) };
                 w.find(&who).and_then(|i| w.get(i)).map(|g| g.kind).unwrap_or(0.0)
