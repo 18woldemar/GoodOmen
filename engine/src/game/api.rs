@@ -1032,7 +1032,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             };
             let d = [to[0] - at[0], to[1] - at[1], to[2] - at[2]];
             let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-            let near = crate::game::world::ai(kind).map(|r| r.2).unwrap_or(0.0);
+            let near = crate::game::world::ai(kind).map(|r| r.3).unwrap_or(0.0);
             let mut boot = boot_mut(lua)?;
             boot.heading.insert(who.clone(), d[1].atan2(d[0]));
             let cool = boot.cooldown.get(&who).copied().unwrap_or(0.0);
@@ -1047,27 +1047,43 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             // it has none already in the air (`walker + 0x3c` is -1), and it
             // comes out of the slot the definition names at `def + 0x68` —
             // `DOGGNBOY_TARGET`, which is the engine's stand-in for the hand.
-            let reach = crate::game::world::ai(kind).map(|r| r.4).unwrap_or(0.0);
+            let reach = crate::game::world::ai(kind).map(|r| r.5).unwrap_or(0.0);
             let rounds = crate::game::world::ai(kind).map(|r| r.0).unwrap_or(0.0);
             let left = boot.burst.get(&who).copied().unwrap_or(0.0);
+            let interval = crate::game::world::ai(kind).map(|r| r.1).unwrap_or(0.0);
             if cool <= 0.0 {
-                /// A round of a burst takes a second, from 0x43346b.
-                const RELOAD: f64 = 1.0;
                 if left > 0.0 {
                     boot.burst.insert(who.clone(), left - 1.0);
-                    boot.cooldown.insert(who.clone(), RELOAD);
+                    // **the record's own second column** is the wait between
+                    // rounds — 0x433219 writes `record[+0x04]` straight into
+                    // `walker + 0x64` after every shot. Half a second for a
+                    // doganboy, two for a hans.
+                    boot.cooldown.insert(who.clone(), interval);
                     /// The band a doganboy throws a grenade in, and how often.
                     const THROW: std::ops::Range<f64> = 25.0..45.0;
                     const OFTEN: f64 = 0.7;
                     let roll = boot.random.next();
                     if kind == DOGANBOY && left == 1.0 && THROW.contains(&dist) && roll < OFTEN {
+                        // ANIM_THROW, and the grenade comes straight out
+                        boot.playing.insert(who.clone(), ANIM_THROW);
+                        boot.since.insert(who.clone(), 0.0);
                         drop(boot);
                         fire_key_object(lua, &who, DBGRENADE).ok();
                         return Ok(0.0);
                     }
+                    // **and this is how an enemy shoots.** 0x4331f8 plays
+                    // `ANIM_SHOOT` and nothing else: the projectile comes off
+                    // the animation's own key channel, which is why no column
+                    // of the enemy table names a shot. See [`Boot::keys`].
+                    //
+                    // The hurt variant (animation 0x4f when the hitpoints are
+                    // under `def[0x40]`) is left out — that threshold is not
+                    // one of the columns the engine keeps.
+                    boot.playing.insert(who.clone(), ANIM_SHOOT);
+                    boot.since.insert(who.clone(), 0.0);
                 } else if dist < reach && rounds > 0.0 {
                     boot.burst.insert(who.clone(), rounds);
-                    boot.cooldown.insert(who.clone(), RELOAD);
+                    boot.cooldown.insert(who.clone(), interval);
                 }
             }
             let gait = if dist < near && cool <= 0.0 { 3 } else { 0 };
@@ -2368,6 +2384,12 @@ fn fire_key_object(lua: &Lua, who: &str, kind: f64) -> Result<(), Error> {
 const DOGANBOY: f64 = 207.0;
 const DBGRENADE: f64 = 417.0;
 
+/// `ANIM_SHOOT` and `ANIM_THROW`. 0x4331f8 plays the first for every round of
+/// a burst and 0x433185 the second for a grenade; the projectile in both
+/// cases comes off the animation's key channel.
+const ANIM_SHOOT: f64 = 56.0;
+const ANIM_THROW: f64 = 57.0;
+
 /// How near a heading counts as facing it, from the double at 0x490198.
 /// Three walker functions share the constant and the angle-wrap idiom around
 /// it — 0x4318a0, 0x431b80 and 0x431f70, all with 0x48f618 PI, 0x48f61c -PI
@@ -3463,6 +3485,50 @@ mod tests {
         scripts.lua.load("mdkDoganboyAttack(d)").exec().unwrap();
         let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
         assert_eq!(boot.gait["d"], 3, "five is inside a doganboy's ten");
+    }
+
+    /// **An enemy shoots**, and the whole chain runs: the AI loads a burst
+    /// from the behaviour record, each round plays `ANIM_SHOOT`, and the
+    /// model's own key channel on that animation makes the projectile. A
+    /// hoser fires `hosershot` — which its `hoser.mod` names at t = 0.742 of
+    /// animation 56 and nothing else in the game does.
+    #[test]
+    fn an_enemy_shoots_what_its_own_animation_names() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                // OBJ_HOSER is 205; its reach is 75, so twenty out is well in
+                "mdkRegisterObject('h', 205, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkRegisterObject('kurt', 100, scene, nil, -1, 0,20,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkSetPlayModeGobs(0, kurt)",
+            )
+            .exec()
+            .unwrap();
+        {
+            // the one key hoser.mod actually carries
+            let mut boot = scripts.lua.app_data_mut::<Boot>().unwrap();
+            boot.keys.insert("hoser".into(), vec![(56.0, 0.742, 428.0)]);
+        }
+        let rooms = Visibility::default();
+        let mut ticking = Ticking::default();
+        for _ in 0..90 {
+            scripts.lua.load("mdkDoganboyAttack(h)").exec().unwrap();
+            let eye = [0.0, 20.0, crate::game::body::EYE];
+            tick(&scripts, &rooms, eye, 0.0, 1.0 / 30.0, &mut ticking).unwrap();
+        }
+        let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
+        assert!(boot.fired > 0, "it should have fired by now");
+        assert_eq!(boot.playing["h"], 56.0, "and it is playing ANIM_SHOOT");
+        drop(boot);
+        let w = world::world(&scripts.lua).unwrap();
+        assert!(
+            w.iter().any(|(_, g)| g.kind == 428.0),
+            "and a hosershot exists, which only hoser.mod could have named"
+        );
     }
 
     /// **The doganboy throws a grenade**, and every gate on it is the

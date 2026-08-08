@@ -310,6 +310,8 @@ pub fn table_model(kind: f64) -> Option<&'static str> {
 /// |---|---|
 /// | +0x00 | **the burst**: how many shots in a row (0x4328e6 loads it into
 /// `walker + 0x9c` and state 0 counts it down, one a second) |
+/// | +0x04 | **the seconds between rounds of a burst** — 0x433219 writes it
+/// straight into `walker + 0x64` after each shot |
 /// | +0x08 | the melee distance |
 /// | +0x1c | the near distance: inside it the thing backs away |
 /// | +0x20 | the far distance |
@@ -321,16 +323,16 @@ pub fn table_model(kind: f64) -> Option<&'static str> {
 /// branches of the state machine that are not built, and a number nothing
 /// reads is a number that rots. `tools/health.py --ai` prints the whole
 /// record.
-pub const AI: [(f64, f64, f64, f64, f64, f64, bool); 9] = [
-    (3.0, 0.9, 10.0, 15.0, 100.0, 1.047198, true),
-    (5.0, 0.9, 10.0, 15.0, 75.0, 1.570796, true),
-    (3.0, 0.15, 15.0, 25.0, 150.0, 0.785398, false),
-    (3.0, 0.9, 8.0, 13.0, 50.0, 1.047198, false),
-    (1.0, 0.2, 25.0, 35.0, 150.0, 1.047198, false),
-    (1.0, 0.2, 25.0, 35.0, 200.0, 1.047198, true),
-    (3.0, 1.0, 20.0, 30.0, 50.0, 1.570796, false),
-    (0.0, 1.0, 5.0, 5.0, 6.0, 0.392699, false),
-    (1.0, 0.0, 15.0, 25.0, 150.0, 0.785398, false),
+pub const AI: [(f64, f64, f64, f64, f64, f64, f64, bool); 9] = [
+    (3.0, 0.5, 0.9, 10.0, 15.0, 100.0, 1.047198, true),
+    (5.0, 0.8, 0.9, 10.0, 15.0, 75.0, 1.570796, true),
+    (3.0, 2.0, 0.15, 15.0, 25.0, 150.0, 0.785398, false),
+    (3.0, 0.5, 0.9, 8.0, 13.0, 50.0, 1.047198, false),
+    (1.0, 2.0, 0.2, 25.0, 35.0, 150.0, 1.047198, false),
+    (1.0, 2.0, 0.2, 25.0, 35.0, 200.0, 1.047198, true),
+    (3.0, 0.0, 1.0, 20.0, 30.0, 50.0, 1.570796, false),
+    (0.0, 0.5, 1.0, 5.0, 5.0, 6.0, 0.392699, false),
+    (1.0, 3.0, 0.0, 15.0, 25.0, 150.0, 0.785398, false),
 ];
 
 /// Which behaviour an enemy type uses, out of `def + 0x84`. Nine of the 19
@@ -341,7 +343,7 @@ pub const AI_OF: [(f64, usize); 10] = [
 ];
 
 /// The behaviour a type fights with, if it has one.
-pub fn ai(kind: f64) -> Option<(f64, f64, f64, f64, f64, f64, bool)> {
+pub fn ai(kind: f64) -> Option<(f64, f64, f64, f64, f64, f64, f64, bool)> {
     let i = AI_OF.iter().find(|(k, _)| *k == kind)?.1;
     Some(AI[i])
 }
