@@ -331,6 +331,9 @@ pub struct Boot {
     /// What each walker has left before it may act again — `walker + 0x64`.
     /// Counted down by the tick.
     pub cooldown: BTreeMap<String, f64>,
+    /// Rounds left in a walker's burst — `walker + 0x9c` while state 0 has
+    /// it. Loaded from the behaviour record's first column.
+    pub burst: BTreeMap<String, f64>,
     /// **The animation keys**, by model name: `(animation, time, code)`.
     /// A channel whose target kind is 23 carries no geometry — its values are
     /// key codes, and 0x42bf80 splits them four ways:
@@ -1034,6 +1037,39 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             boot.heading.insert(who.clone(), d[1].atan2(d[0]));
             let cool = boot.cooldown.get(&who).copied().unwrap_or(0.0);
             // too close and off cooldown: give ground, still facing
+            // **the burst**, states 4 and 0. State 4 loads `record[+0x00]`
+            // into `walker + 0x9c` (0x4328e6) and state 0 counts it down one
+            // a second (0x43345e, cooldown 0x3f800000), firing on each round.
+            //
+            // And on the **last** round a doganboy throws a grenade instead
+            // (0x433094): type 0xcf, distance **between 25 and 45**
+            // (0x48fb54 and 0x48f7e0), `chRand() < 0.7` (0x48f6bc), only when
+            // it has none already in the air (`walker + 0x3c` is -1), and it
+            // comes out of the slot the definition names at `def + 0x68` —
+            // `DOGGNBOY_TARGET`, which is the engine's stand-in for the hand.
+            let reach = crate::game::world::ai(kind).map(|r| r.4).unwrap_or(0.0);
+            let rounds = crate::game::world::ai(kind).map(|r| r.0).unwrap_or(0.0);
+            let left = boot.burst.get(&who).copied().unwrap_or(0.0);
+            if cool <= 0.0 {
+                /// A round of a burst takes a second, from 0x43346b.
+                const RELOAD: f64 = 1.0;
+                if left > 0.0 {
+                    boot.burst.insert(who.clone(), left - 1.0);
+                    boot.cooldown.insert(who.clone(), RELOAD);
+                    /// The band a doganboy throws a grenade in, and how often.
+                    const THROW: std::ops::Range<f64> = 25.0..45.0;
+                    const OFTEN: f64 = 0.7;
+                    let roll = boot.random.next();
+                    if kind == DOGANBOY && left == 1.0 && THROW.contains(&dist) && roll < OFTEN {
+                        drop(boot);
+                        fire_key_object(lua, &who, DBGRENADE).ok();
+                        return Ok(0.0);
+                    }
+                } else if dist < reach && rounds > 0.0 {
+                    boot.burst.insert(who.clone(), rounds);
+                    boot.cooldown.insert(who.clone(), RELOAD);
+                }
+            }
             let gait = if dist < near && cool <= 0.0 { 3 } else { 0 };
             if gait == 3 {
                 /// What giving ground costs, from the float 0x432af4 writes
@@ -2298,8 +2334,7 @@ fn spawn(lua: &Lua, spawner: &str) -> mlua::Result<Option<mlua::Table>> {
 /// object playing it (0x42c02e). When the type is one the shot table names,
 /// the new object is a projectile and it leaves along the shooter's own yaw —
 /// which is ours; the original gives it the muzzle node's orientation.
-fn fire_key_object(scripts: &Scripts, who: &str, kind: f64) -> Result<(), Error> {
-    let lua = &scripts.lua;
+fn fire_key_object(lua: &Lua, who: &str, kind: f64) -> Result<(), Error> {
     let Some((at, yaw)) = stance(lua, who) else { return Ok(()) };
     let Some((_, filter, damage, life, speed)) = crate::game::world::bullet(kind) else {
         return Ok(()); // an effect or a prop, and the engine has nowhere to put it
@@ -2329,6 +2364,10 @@ fn fire_key_object(scripts: &Scripts, who: &str, kind: f64) -> Result<(), Error>
 }
 
 /// A gob's name, from the table the scripts hold it by.
+/// `OBJ_DOGANBOY` and the grenade it throws, both out of the tables.
+const DOGANBOY: f64 = 207.0;
+const DBGRENADE: f64 = 417.0;
+
 /// How near a heading counts as facing it, from the double at 0x490198.
 /// Three walker functions share the constant and the angle-wrap idiom around
 /// it — 0x4318a0, 0x431b80 and 0x431f70, all with 0x48f618 PI, 0x48f61c -PI
@@ -3042,7 +3081,7 @@ pub fn tick_touching(
     for (name, code) in struck {
         boot_mut(&scripts.lua)?.keys_fired += 1;
         if code >= 100.0 {
-            fire_key_object(scripts, &name, code)?;
+            fire_key_object(&scripts.lua, &name, code)?;
         } else if (1.0..20.0).contains(&code) {
             if let Ok(gob) = globals.get::<mlua::Table>(name.as_str()) {
                 if let Ok(h) = gob.get::<mlua::Function>("OnCustomKey") {
@@ -3402,14 +3441,69 @@ mod tests {
             assert_eq!(boot.gait["d"], 0, "forty out is not crowded");
             assert!((boot.heading["d"] - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
         }
-        // now stand on top of it, with the cooldown spent
+        // now stand on top of it. It is mid-burst, so it holds its ground
+        // until the round's second is up — which is itself the original's
+        // shape, not an accident of the test.
         scripts
             .lua
             .load("mdkGobSetPositionXYZ(kurt, 0, 5, 0)\n mdkDoganboyAttack(d)")
             .exec()
             .unwrap();
+        assert_eq!(
+            scripts.lua.app_data_ref::<Boot>().unwrap().gait["d"],
+            0,
+            "a walker in the middle of a burst does not step back"
+        );
+        let rooms = Visibility::default();
+        let mut ticking = Ticking::default();
+        for _ in 0..40 {
+            let eye = [0.0, 5.0, crate::game::body::EYE];
+            tick(&scripts, &rooms, eye, 0.0, 1.0 / 30.0, &mut ticking).unwrap();
+        }
+        scripts.lua.load("mdkDoganboyAttack(d)").exec().unwrap();
         let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
         assert_eq!(boot.gait["d"], 3, "five is inside a doganboy's ten");
+    }
+
+    /// **The doganboy throws a grenade**, and every gate on it is the
+    /// original's: a burst of three (the record's first column), one round a
+    /// second, and on the **last** round — between 25 and 45 units out, seven
+    /// times in ten — a `dbgrenade` instead.
+    #[test]
+    fn a_doganboy_ends_its_burst_with_a_grenade() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                // thirty-five units apart, which is inside the throwing band
+                "mdkRegisterObject('d', 207, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkRegisterObject('kurt', 100, scene, nil, -1, 0,35,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkSetPlayModeGobs(0, kurt)",
+            )
+            .exec()
+            .unwrap();
+        let rooms = Visibility::default();
+        let mut ticking = Ticking::default();
+        let mut thrown = 0;
+        // four seconds is one burst of three and a little over
+        for _ in 0..120 {
+            scripts.lua.load("mdkDoganboyAttack(d)").exec().unwrap();
+            // the tick warps the player gob to where the body is, so the body
+            // has to stand where the test put the gob
+            let eye = [0.0, 35.0, crate::game::body::EYE];
+            tick(&scripts, &rooms, eye, 0.0, 1.0 / 30.0, &mut ticking).unwrap();
+            let w = world::world(&scripts.lua).unwrap();
+            thrown = w.iter().filter(|(_, g)| g.kind == 417.0).count();
+            if thrown > 0 {
+                break;
+            }
+        }
+        assert!(thrown > 0, "the last round of the burst should be a grenade");
+        let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
+        assert!(boot.fired > 0, "and it is a real shot, with the table's numbers");
     }
 
     /// Giving ground is not something a crowded walker does every frame:
