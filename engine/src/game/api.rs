@@ -174,6 +174,80 @@ impl Input {
     }
 }
 
+/// The arc a walker was launched along, as **0x4301f0** works it out.
+///
+/// The original is a *solver*, not a mover: it computes three numbers, writes
+/// them to the walker block, and lets the physics fly the thing. Those three
+/// are `rise` (`walker + 0x20`), `speed` (`+0x28`) and `heading` (`+0x14`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Launch {
+    /// Vertical speed at the launch, `sqrt(2 g apex)`.
+    pub rise: f64,
+    /// Ground speed, the horizontal distance divided by the flight time.
+    pub speed: f64,
+    /// Bearing to the destination, radians.
+    pub heading: f64,
+    /// How long the whole arc takes: up to the apex, then down to the target.
+    pub time: f64,
+}
+
+/// A walker in the air: where it left from, along what, and how long ago.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Jump {
+    pub from: [f64; 3],
+    pub arc: Launch,
+    pub elapsed: f64,
+}
+
+impl Jump {
+    /// Where the walker is `t` seconds after the launch. Past the flight time
+    /// it stays where it landed, so the last tick puts it exactly on the
+    /// waypoint rather than a little beyond.
+    pub fn at(&self, t: f64) -> [f64; 3] {
+        let t = t.min(self.arc.time);
+        [
+            self.from[0] + self.arc.heading.cos() * self.arc.speed * t,
+            self.from[1] + self.arc.heading.sin() * self.arc.speed * t,
+            self.from[2] + self.arc.rise * t - 0.5 * crate::game::body::GRAVITY * t * t,
+        ]
+    }
+}
+
+/// Work out the arc from `from` to `to` that peaks `apex` above the launch.
+///
+/// This is 0x4301f0 line for line. Three things in it are read rather than
+/// guessed, and all three would be easy to invent wrongly:
+///
+/// - **The third argument is a height, not a speed.** `[esi+0x20]` is
+///   `sqrt(g * apex * -2)` — the -2 is the constant at 0x48f2ec and the
+///   gravity is the world's, kept negative — which is the launch speed that
+///   peaks at `apex`. The scripts pass 7, 10, 12, 75 and 100, and 100 is a
+///   leap rather than a sprint.
+/// - **The apex is clamped up to the destination**, not down to the distance:
+///   0x430258 compares the argument against `dz` and takes the larger. A jump
+///   cannot peak below where it is going.
+/// - **The flight time is the two halves added**, `sqrt(2 apex / g)` up and
+///   `sqrt(2 (apex - dz) / g)` down, and the ground speed is the horizontal
+///   distance over that. When the time is zero the speed stays zero (the
+///   `fcom` against 0 at 0x4302ae), rather than dividing.
+///
+/// Gravity is [`crate::game::body::GRAVITY`], positive here where the
+/// original keeps it negative in the world at `[0x5d2700] + 0xc`; the sign
+/// cancels against the -2 and the arithmetic is the same.
+pub fn launch(from: [f64; 3], to: [f64; 3], apex: f64) -> Launch {
+    let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+    let dist = (d[0] * d[0] + d[1] * d[1]).sqrt();
+    let apex = apex.max(d[2]);
+    let g = crate::game::body::GRAVITY;
+    let time = (2.0 * apex / g).sqrt() + (2.0 * (apex - d[2]) / g).sqrt();
+    Launch {
+        rise: (2.0 * g * apex).sqrt(),
+        speed: if time > 0.0 { dist / time } else { 0.0 },
+        heading: d[1].atan2(d[0]),
+        time,
+    }
+}
+
 /// What a level start asked the engine for.
 #[derive(Default)]
 pub struct Boot {
@@ -220,6 +294,12 @@ pub struct Boot {
     /// variant. It is a *want*: nothing turns toward it until there is a
     /// walker update.
     pub heading: BTreeMap<String, f64>,
+    /// Walkers currently in the air, from `mdkWalkerJumpToPoint`. See
+    /// [`launch`] for the arc and [`tick_touching`] for what flies it.
+    pub jumps: BTreeMap<String, Jump>,
+    /// How many launches a run has ordered. `jumps` only holds the ones still
+    /// in the air, so it is empty by the time anyone reads it.
+    pub jumped: usize,
     /// Walkers that have been alerted. `mdkWalkerAlert` is idempotent —
     /// 0x431760 tests the flag before setting it — so the shout that goes
     /// with it happens exactly once per walker.
@@ -745,18 +825,8 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                         None => return Ok(0.0),
                     }
                 } else {
-                    let point = args
-                        .get(1)
-                        .and_then(text)
-                        .and_then(|n| {
-                            lua.globals().get::<mlua::Table>("points").ok()?.get::<mlua::Table>(n).ok()
-                        });
-                    let Some(p) = point else { return Ok(0.0) };
-                    [
-                        p.get::<f64>("x").unwrap_or(0.0),
-                        p.get::<f64>("y").unwrap_or(0.0),
-                        p.get::<f64>("z").unwrap_or(0.0),
-                    ]
+                    let Some(p) = point_at(lua, args.get(1)) else { return Ok(0.0) };
+                    p
                 };
                 let (at, yaw) = {
                     let Some(w) = world::world(lua) else { return Ok(0.0) };
@@ -782,6 +852,54 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             })?,
         )?;
     }
+
+    // `mdkWalkerJumpToPoint(gob, point, apex)` — 0x43f980 into **0x430360**,
+    // which is four lines: copy the waypoint into `walker + 0x80`, then call
+    // **0x4301f0** to solve the arc. The binding takes the three arguments in
+    // that order and the third really is a height — see [`launch`], where the
+    // arithmetic is.
+    //
+    // Two effects beyond the arc, and both are in the launch rather than
+    // added here. It **writes the heading** to `walker + 0x14`, the same
+    // field `mdkWalkerHeadToPoint` writes, from `0x470930`'s bearing. And it
+    // **turns the gob outright** — 0x4302e5 calls 0x46fd20 on `gob + 0x24`
+    // with that bearing, so unlike the heading this one is not a want. A
+    // walker faces its jump the instant it is told to make it.
+    globals.set(
+        "mdkWalkerJumpToPoint",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(who) = args.first().and_then(gob_name) else { return Ok(0.0) };
+            let Some(to) = point_at(lua, args.get(1)) else { return Ok(0.0) };
+            let apex = args.get(2).map(number).unwrap_or(0.0);
+            let Some((id, from)) = ({
+                let w = world::world(lua);
+                w.and_then(|w| {
+                    let id = w.find(&who)?;
+                    Some((id, w.get(id)?.position))
+                })
+            }) else {
+                return Ok(0.0);
+            };
+            let arc = launch(from, to, apex);
+            // a negative apex would take the square root of a negative and
+            // poison the position with a NaN; the original would too, and no
+            // script asks for one, so refuse it rather than fly it
+            if !arc.time.is_finite() || arc.time <= 0.0 {
+                return Ok(0.0);
+            }
+            {
+                let mut boot = boot_mut(lua)?;
+                boot.heading.insert(who.clone(), arc.heading);
+                boot.jumps.insert(who.clone(), Jump { from, arc, elapsed: 0.0 });
+                boot.jumped += 1;
+            }
+            if let Some(mut w) = lua.app_data_mut::<world::World>() {
+                let half = arc.heading / 2.0;
+                w.set_rotation(id, [half.cos(), 0.0, 0.0, half.sin()]);
+            }
+            Ok(1.0)
+        })?,
+    )?;
 
     // `mdkAILineOfSight(watcher, target, fov, range)` — 0x43c840 into
     // **0x402950**, and three things in it are read rather than guessed.
@@ -1900,6 +2018,21 @@ fn spawn(lua: &Lua, spawner: &str) -> mlua::Result<Option<mlua::Table>> {
 }
 
 /// A gob's name, from the table the scripts hold it by.
+/// A named waypoint out of the `points` table the scene graph fills.
+fn point_at(lua: &Lua, v: Option<&Value>) -> Option<[f64; 3]> {
+    let p: mlua::Table = lua
+        .globals()
+        .get::<mlua::Table>("points")
+        .ok()?
+        .get(v.and_then(text)?)
+        .ok()?;
+    Some([
+        p.get::<f64>("x").unwrap_or(0.0),
+        p.get::<f64>("y").unwrap_or(0.0),
+        p.get::<f64>("z").unwrap_or(0.0),
+    ])
+}
+
 fn gob_name(v: &Value) -> Option<String> {
     match v {
         Value::Table(t) => t.get::<String>("name").ok(),
@@ -2326,6 +2459,29 @@ pub fn tick_touching(
         }
     }
 
+    // the walkers in the air. `mdkWalkerJumpToPoint` only *aims* — the
+    // original hands the walker a rise, a ground speed and a bearing and the
+    // physics flies it — so this is that arc, sampled at the tick rate, and
+    // the numbers are the launch's rather than anything chosen here.
+    //
+    // ponytail: nothing is swept along the way, so a jump through a wall
+    // still arrives; give it `Collision` when non-player gobs have a body.
+    let hops: Vec<(String, [f64; 3])> = {
+        let mut boot = boot_mut(&scripts.lua)?;
+        let mut out = Vec::new();
+        boot.jumps.retain(|name, j| {
+            j.elapsed += dt;
+            out.push((name.clone(), j.at(j.elapsed)));
+            j.elapsed < j.arc.time
+        });
+        out
+    };
+    for (name, at) in hops {
+        if let Ok(gob) = globals.get::<mlua::Table>(name.as_str()) {
+            place(&scripts.lua, &gob, at)?;
+        }
+    }
+
     // and the scripted sequences. 0x42bd60 tests bit 0x800000 on each gob
     // and calls the Lua global `ScriptUpdate` for the ones that have it —
     // **not a handler on the object**, a global taking the object, which is
@@ -2394,6 +2550,36 @@ mod tests {
         assert_eq!(walk_animation(0.01, -0.01), "ANIM_DEFAULT");
     }
 
+    /// The launch is a solver, so the check is that it solves: sampled at the
+    /// flight time the arc is **on** the waypoint, and its peak is the height
+    /// the script asked for. The sampler is the tick's own, so the two cannot
+    /// drift apart.
+    #[test]
+    fn a_launch_arrives_and_peaks_where_it_was_told_to() {
+        let (from, to) = ([0.0, 0.0, 0.0], [30.0, 40.0, 5.0]);
+        let jump = Jump { from, arc: launch(from, to, 12.0), elapsed: 0.0 };
+        let end = jump.at(jump.arc.time);
+        for c in 0..3 {
+            assert!((end[c] - to[c]).abs() < 1e-9, "{end:?} should be {to:?}");
+        }
+        // the apex comes when the rise has been spent, and it is a height
+        // above the *launch*, not above the ground
+        let peak = jump.at(jump.arc.rise / crate::game::body::GRAVITY)[2];
+        assert!((peak - 12.0).abs() < 1e-9, "peaked at {peak}, asked for 12");
+    }
+
+    /// **The apex is clamped up to the destination, never down.** 0x430258
+    /// takes the larger of the argument and the climb, so a 2-unit hop onto a
+    /// 10-unit ledge becomes a 10-unit one — and lands with nothing left,
+    /// because the ledge *is* the apex.
+    #[test]
+    fn a_jump_cannot_peak_below_where_it_is_going() {
+        let g = crate::game::body::GRAVITY;
+        let arc = launch([0.0; 3], [10.0, 0.0, 10.0], 2.0);
+        assert!((arc.rise - (2.0 * g * 10.0).sqrt()).abs() < 1e-9);
+        assert!((arc.time - (2.0 * 10.0 / g).sqrt()).abs() < 1e-9, "no fall to make");
+    }
+
     /// Heading is a *want* and an answer, not a turn: it records where the
     /// walker should look and says whether it already does, to within the
     /// 0.17 radians the original allows.
@@ -2426,6 +2612,43 @@ mod tests {
         // and the last call left the want behind, pointing at the waypoint
         let want = scripts.lua.app_data_ref::<Boot>().unwrap().heading["w"];
         assert!((want - std::f64::consts::FRAC_PI_2).abs() < 1e-9, "due +y");
+    }
+
+    /// What the binding leaves behind: the arc, the heading, and a gob that
+    /// has **turned**. The turn is the part a heading alone never does.
+    #[test]
+    fn a_walker_faces_the_jump_it_is_told_to_make() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "points.ledge = {x = 0, y = 10, z = 4, f = 0}\n\
+                 mdkRegisterObject('w', OBJ_NONE, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 went = mdkWalkerJumpToPoint(w, 'ledge', 10)",
+            )
+            .exec()
+            .unwrap();
+        assert_eq!(scripts.lua.globals().get::<f64>("went").unwrap(), 1.0);
+        let jump = {
+            let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
+            assert!(
+                (boot.heading["w"] - std::f64::consts::FRAC_PI_2).abs() < 1e-9,
+                "the waypoint is due +y"
+            );
+            boot.jumps["w"]
+        };
+        let end = jump.at(jump.arc.time);
+        assert!((end[1] - 10.0).abs() < 1e-9 && (end[2] - 4.0).abs() < 1e-9, "{end:?}");
+        // a quarter turn about Z, which is half of it in the quaternion
+        let w = world::world(&scripts.lua).unwrap();
+        let q = w.get(w.find("w").unwrap()).unwrap().rotation;
+        let half = std::f64::consts::FRAC_PI_4;
+        assert!(
+            (q[0] - half.cos()).abs() < 1e-9 && (q[3] - half.sin()).abs() < 1e-9,
+            "{q:?} is not a quarter turn"
+        );
     }
 
     /// The cone is `cos(fov * 0.5)`, so the angle a script passes is the

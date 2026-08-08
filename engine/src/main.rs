@@ -1012,7 +1012,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     }
 
     // what the scripts actually did to the world while it ran
-    let (moved, playing, what, fired_sounds, spawned) = {
+    let (moved, playing, what, fired_sounds, spawned, jumped) = {
         let w = world::world(&scripts.lua).expect("a world");
         let boot = scripts.lua.app_data_ref::<api::Boot>().expect("boot state");
         let what: Vec<String> = boot
@@ -1023,7 +1023,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         // what the run asked to be heard: `omGobGSPlay` calls that reached a
         // sound the scripts had hung on an object
         let sounds: usize = boot.gob_sounds.iter().map(|g| g.played).sum();
-        (w.generation(), boot.playing.len(), what, sounds, boot.spawned.len())
+        (w.generation(), boot.playing.len(), what, sounds, boot.spawned.len(), boot.jumped)
     };
     let (fired, survived) = state.total();
     let mut stopped: Vec<(&String, &usize)> = state.why.iter().collect();
@@ -1044,6 +1044,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         ("collisions", state.collisions, expect_flag("--expect-collisions")),
         ("objects touched", state.touched.len(), expect_flag("--expect-touched")),
         ("objects spawned", spawned, expect_flag("--expect-spawned")),
+        ("walkers launched", jumped, expect_flag("--expect-jumps")),
     ] {
         if let Some(want) = want {
             if got != want {
@@ -1057,6 +1058,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
          {} rooms entered, {survived} of {fired} handler calls ran to the end, \
          {moved} object moves, {playing} animations chosen, \
          {fired_sounds} sounds fired, {spawned} objects spawned, \
+         {jumped} walkers launched, \
          {} objects touched and {} of them \
          scripted{}{} [{}]{}",
         if recorded { "the game's own recorded" } else { "held-forwards" },

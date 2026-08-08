@@ -145,6 +145,14 @@ ENGINE = [
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--run", "2", "1", "30", "--expect-spawned", "17"], None),
+    # level 7's task lists jump the sniper pilots onto their perches
+    # (`{ mdkWalkerJumpToPoint, { "l7r6pilot12", 50 } }`), which is the first
+    # thing in the game that moves a gob the player is not standing in.
+    ("a run launches a walker along the arc the original solves for",
+     ["cargo", "run", "--quiet", "--release",
+      "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
+      "--run", "7", "1", "30", "--expect-jumps", "2",
+      "--expect-events", "7334", "--expect-survived", "7334"], None),
     ("walking drives the player's own animation, and reaches the scripts",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
