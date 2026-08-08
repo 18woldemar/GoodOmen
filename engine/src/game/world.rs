@@ -301,6 +301,50 @@ pub fn table_model(kind: f64) -> Option<&'static str> {
         .or_else(|| BASE_HITPOINTS.iter().find(|(k, ..)| *k == kind).map(|(_, m, _)| *m))
 }
 
+
+/// **The AI behaviour table**, at 0x48ff78: 9 records of 0x34, indexed by
+/// `def + 0x84` — which is 0xffffffff for the nine enemy types that have no
+/// AI at all. The columns kept here are the ones 0x4324f0 reads:
+///
+/// | offset | what |
+/// |---|---|
+/// | +0x00 | the ready pose — `ANIM_DEFAULT`, `READY1`, `READY3`, `READY5` |
+/// | +0x08 | the melee distance |
+/// | +0x1c | the near distance: inside it the thing backs away |
+/// | +0x20 | the far distance |
+/// | +0x24 | the reach |
+/// | +0x28 | the field of view — PI/3, PI/2, PI/4, PI/8 |
+/// | +0x30 | whether it leads a moving target |
+///
+/// The three probabilities at +0x0c, +0x10 and +0x14 are left out: they gate
+/// branches of the state machine that are not built, and a number nothing
+/// reads is a number that rots. `tools/health.py --ai` prints the whole
+/// record.
+pub const AI: [(f64, f64, f64, f64, f64, f64, bool); 9] = [
+    (3.0, 0.9, 10.0, 15.0, 100.0, 1.047198, true),
+    (5.0, 0.9, 10.0, 15.0, 75.0, 1.570796, true),
+    (3.0, 0.15, 15.0, 25.0, 150.0, 0.785398, false),
+    (3.0, 0.9, 8.0, 13.0, 50.0, 1.047198, false),
+    (1.0, 0.2, 25.0, 35.0, 150.0, 1.047198, false),
+    (1.0, 0.2, 25.0, 35.0, 200.0, 1.047198, true),
+    (3.0, 1.0, 20.0, 30.0, 50.0, 1.570796, false),
+    (0.0, 1.0, 5.0, 5.0, 6.0, 0.392699, false),
+    (1.0, 0.0, 15.0, 25.0, 150.0, 0.785398, false),
+];
+
+/// Which behaviour an enemy type uses, out of `def + 0x84`. Nine of the 19
+/// have none at all and simply stand there.
+pub const AI_OF: [(f64, usize); 10] = [
+    (203.0, 6), (200.0, 2), (204.0, 5), (205.0, 1), (202.0, 3),
+    (219.0, 7), (207.0, 0), (214.0, 4), (217.0, 1), (260.0, 8),
+];
+
+/// The behaviour a type fights with, if it has one.
+pub fn ai(kind: f64) -> Option<(f64, f64, f64, f64, f64, f64, bool)> {
+    let i = AI_OF.iter().find(|(k, _)| *k == kind)?.1;
+    Some(AI[i])
+}
+
 /// The base hitpoints for a type, if it is one the table names.
 pub fn base_hitpoints(kind: f64) -> Option<i32> {
     BASE_HITPOINTS.iter().find(|(k, _, _)| *k == kind).map(|(_, _, hp)| *hp)

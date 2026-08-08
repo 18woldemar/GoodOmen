@@ -166,7 +166,7 @@ ENGINE = [
     # level 7's task lists jump the sniper pilots onto their perches
     # (`{ mdkWalkerJumpToPoint, { "l7r6pilot12", 50 } }`), which is the first
     # thing in the game that moves a gob the player is not standing in.
-    # ...and its walkers walk and its shots fly: 2509 object moves against the 901 a run makes
+    # ...and its walkers walk and its shots fly: 1826 object moves against the 901 a run makes
     # when only the player is moving, all of it non-player gobs turning toward
     # a waypoint and running at their own type's speed out of 0x4ab2e8.
     ("a run launches a walker along the arc the original solves for",
@@ -174,8 +174,8 @@ ENGINE = [
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--run", "7", "1", "30", "--expect-jumps", "2",
       "--expect-keys", "0",
-      "--expect-moves", "2509",
-      "--expect-events", "7423", "--expect-survived", "7423"], None),
+      "--expect-moves", "1826",
+      "--expect-events", "8104", "--expect-survived", "8104"], None),
     # level 10's zizzy turrets shoot: nine bullets in thirty seconds, each one
     # carrying its damage, damage type, lifetime and speed out of the shot
     # table at 0x497388 rather than out of the call.

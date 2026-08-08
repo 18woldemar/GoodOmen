@@ -328,6 +328,9 @@ pub struct Boot {
     /// How long each object's current animation has been playing. Reset by
     /// `omAnimPlay`, advanced by the tick, and read against [`Boot::keys`].
     pub since: BTreeMap<String, f64>,
+    /// What each walker has left before it may act again — `walker + 0x64`.
+    /// Counted down by the tick.
+    pub cooldown: BTreeMap<String, f64>,
     /// **The animation keys**, by model name: `(animation, time, code)`.
     /// A channel whose target kind is 23 carries no geometry — its values are
     /// key codes, and 0x42bf80 splits them four ways:
@@ -972,6 +975,68 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             boot.heading.insert(who.clone(), yaw);
             boot.gait.insert(who, 0);
             Ok(1.0)
+        })?,
+    )?;
+
+    // `mdkDoganboyAttack(gob)` — 0x440380 into **0x4324f0**, class 4's slot
+    // +0x2c and the enemy AI: a twelve-state machine on `walker + 0x7c` whose
+    // jump table is at 0x433a38. Every one of the 41 script sites has it as
+    // the **last** task in a list, and it returns 0 forever, which is how a
+    // task list ends in something rather than finishing.
+    //
+    // Three of the twelve are built, and they are the three an enemy spends
+    // most of its time in:
+    //
+    // - **no target at all** (0x42a850 answers nothing): gait 0, strafe 0,
+    //   state 3, cooldown **0.3** (the float at 0x43254c), and return.
+    // - **state 4**, stand ready and aim: the heading goes to the bearing to
+    //   the target and the gait to 0, so the walker turns on the spot.
+    // - **state 2**, back away: inside the record's near distance and with
+    //   the cooldown spent, the gait goes to **3** — backwards, the negative
+    //   speed in the enemy table — while the heading stays on the target. It
+    //   walks backwards facing you.
+    //
+    // What is *not* built is the firing, and the reason is honest rather than
+    // tidy: the branches that fire are states 0, 1, 5, 7, 8 and 11, which are
+    // unread. What state 3 picks in the branches that *are* read is a taunt
+    // (`ANIM_TAUNT0`, 0x70) or `ANIM_SCARED` (0x12), not an attack.
+    //
+    // The lead is left out too. 0x432d90 aims at `target + velocity * (dist *
+    // 0.025)` when the record's flag is set, and the arena keeps no velocity
+    // for a gob.
+    globals.set(
+        "mdkDoganboyAttack",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(who) = args.first().and_then(gob_name) else { return Ok(0.0) };
+            let Some((at, _)) = stance(lua, &who) else { return Ok(0.0) };
+            let kind = {
+                let Some(w) = world::world(lua) else { return Ok(0.0) };
+                w.find(&who).and_then(|i| w.get(i)).map(|g| g.kind).unwrap_or(0.0)
+            };
+            let target = lua
+                .named_registry_value::<mlua::Table>("player")
+                .ok()
+                .and_then(|p| p.get::<String>("name").ok())
+                .and_then(|n| stance(lua, &n).map(|(p, _)| p));
+            /// The cooldown a walker with nothing to fight falls back to,
+            /// from the float stored at 0x43254c.
+            const IDLE: f64 = 0.3;
+            let Some(to) = target else {
+                let mut boot = boot_mut(lua)?;
+                boot.gait.insert(who.clone(), 0);
+                boot.cooldown.insert(who, IDLE);
+                return Ok(0.0);
+            };
+            let d = [to[0] - at[0], to[1] - at[1], to[2] - at[2]];
+            let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            let near = crate::game::world::ai(kind).map(|r| r.2).unwrap_or(0.0);
+            let mut boot = boot_mut(lua)?;
+            boot.heading.insert(who.clone(), d[1].atan2(d[0]));
+            let cool = boot.cooldown.get(&who).copied().unwrap_or(0.0);
+            // too close and off cooldown: give ground, still facing
+            let gait = if dist < near && cool <= 0.0 { 3 } else { 0 };
+            boot.gait.insert(who, gait);
+            Ok(0.0)
         })?,
     )?;
 
@@ -2914,6 +2979,15 @@ pub fn tick_touching(
         }
     }
 
+    // the walkers' cooldowns, `walker + 0x64`, which every AI branch tests
+    // before it does anything
+    {
+        let mut boot = boot_mut(&scripts.lua)?;
+        for left in boot.cooldown.values_mut() {
+            *left -= dt;
+        }
+    }
+
     // the animation clock, and the keys it passes.
     //
     // A key channel is target kind **23** in the model, its values are codes,
@@ -3290,6 +3364,45 @@ mod tests {
         let w = world::world(&scripts.lua).unwrap();
         let id = w.find("h_key421").expect("the key made a bullet");
         assert_eq!(w.get(id).unwrap().kind, 421.0);
+    }
+
+    /// The enemy AI, in the three states that are built: a doganboy with
+    /// something to fight **turns to face it**, and once it is closer than
+    /// the behaviour record's near distance it **gives ground backwards**
+    /// while still facing — gait 3, which is the negative speed in the enemy
+    /// table.
+    #[test]
+    fn an_enemy_faces_what_it_is_fighting_and_backs_off_when_crowded() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                // OBJ_DOGANBOY is 207 and uses behaviour 0, whose near
+                // distance is 10. Put the player due +y, well outside it.
+                "mdkRegisterObject('d', 207, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkRegisterObject('kurt', 100, scene, nil, -1, 0,40,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkSetPlayModeGobs(0, kurt)\n\
+                 far = mdkDoganboyAttack(d)",
+            )
+            .exec()
+            .unwrap();
+        assert_eq!(scripts.lua.globals().get::<f64>("far").unwrap(), 0.0, "never done");
+        {
+            let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
+            assert_eq!(boot.gait["d"], 0, "forty out is not crowded");
+            assert!((boot.heading["d"] - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+        }
+        // now stand on top of it, with the cooldown spent
+        scripts
+            .lua
+            .load("mdkGobSetPositionXYZ(kurt, 0, 5, 0)\n mdkDoganboyAttack(d)")
+            .exec()
+            .unwrap();
+        let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
+        assert_eq!(boot.gait["d"], 3, "five is inside a doganboy's ten");
     }
 
     /// A stop is not an order to face forwards: 0x431870 writes the heading
