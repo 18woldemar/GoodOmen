@@ -67,6 +67,11 @@ CORPUS = [
     # them. 39 of the 625 sit inside a tree, which is the number a walker's
     # collision has to survive before it can be a point query -- see the
     # docstring on `waypoints()`.
+    # the map of the binary: every assert pushes its own source path, so the
+    # push sites bracket the file. 39 of them, from mdkAI.c to omConsole.c.
+    ("the binary still says which file each function came from",
+     ["exe_recon.py", "$MDK2_GOG/mdk2Main.exe", "--files",
+      "--expect-files", "39"], None),
     ("waypoints stand where a body would fit",
      ["spawn.py", "extracted", "--all", "--waypoints", "--expect", "586"],
      "scripts/level1.lua"),

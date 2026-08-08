@@ -111,6 +111,50 @@ def report_rich(pe) -> dict:
     return out
 
 
+def source_map(args) -> int:
+    """Where each `.c` lives, from the asserts that name it.
+
+    Every assert in this binary pushes the address of its own source path
+    before calling the handler, so the *push sites* of a path bracket the
+    file that contains them. Finding them needs no disassembler: `push imm32`
+    is one byte, 0x68, followed by the address, and a false positive would
+    have to be four bytes of data that happen to spell a path address inside
+    executable code.
+
+    The result is a map of the engine. It is the cheapest structural thing in
+    the binary and it was sitting there for months: `mdkBullet.c`,
+    `mdkWalker.c`, `mdkKurt.c`, `mdkInventory.c`, `omCollision.c` and the rest,
+    each with the address range to read when that subsystem is the question.
+    """
+    pe = pefile.PE(str(args.exe), fast_load=True)
+    base = pe.OPTIONAL_HEADER.ImageBase
+    paths = {}
+    for s in pe.sections:
+        va, data = s.VirtualAddress + base, s.get_data()
+        for m in re.finditer(rb"[A-Za-z]:\\[^\x00]{3,60}\.(c|cpp)\x00", data):
+            paths[va + m.start()] = m.group(0)[:-1].decode("latin1")
+
+    text = next(s for s in pe.sections if s.Name.startswith(b".text"))
+    code, code_va = text.get_data(), text.VirtualAddress + base
+    sites: dict[str, list[int]] = {}
+    for i in range(len(code) - 5):
+        if code[i] != 0x68:
+            continue
+        v = int.from_bytes(code[i + 1:i + 5], "little")
+        if v in paths:
+            sites.setdefault(paths[v], []).append(code_va + i)
+
+    rows = sorted(sites.items(), key=lambda kv: min(kv[1]))
+    for name, at in rows:
+        print(f"0x{min(at):08x}..0x{max(at):08x}  {len(at):3d}  "
+              f"{name.rsplit(chr(92), 1)[-1]}")
+    print(f"{len(paths)} source paths in the binary, {len(rows)} of them "
+          f"asserted from code", file=sys.stderr)
+    if args.expect_files is not None:
+        return 0 if len(rows) == args.expect_files else 1
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -118,7 +162,15 @@ def main() -> int:
     ap.add_argument("--json", type=Path, help="save the full result")
     ap.add_argument("--min-str", type=int, default=5)
     ap.add_argument("--max-show", type=int, default=40)
+    ap.add_argument("--files", action="store_true",
+                    help="map each surviving source path to the address range "
+                         "of the code that asserts with it")
+    ap.add_argument("--expect-files", type=int, metavar="N",
+                    help="succeed only if exactly N paths are mapped")
     args = ap.parse_args()
+
+    if args.files:
+        return source_map(args)
 
     raw = args.exe.read_bytes()
     pe = pefile.PE(data=raw, fast_load=False)
