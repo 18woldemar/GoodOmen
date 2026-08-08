@@ -220,6 +220,87 @@ pub fn bullet(kind: f64) -> Option<(&'static str, i16, i16, f64, f64)> {
     BULLET.iter().find(|(k, ..)| *k == kind).map(|(_, m, f, d, l, s)| (*m, *f, *d, *l, *s))
 }
 
+
+/// **The item table**, at 0x49f2c0: 49 records of 0x34 bytes — the third of
+/// the three the stride scan found, and the inventory. +0x00 is the type,
+/// **+0x04 an inline name of up to 16 bytes which is the model** (the
+/// constructor at 0x416310 walks the table for a matching type and hands
+/// `record + 4` straight to the loader at 0x4609a0), and **+0x14 an index
+/// into `mdk2.str`** for what the inventory calls it.
+///
+/// That last one is checked against the real world rather than asserted: 18
+/// is "Magnum", 21 "Uzi", 16 "Gatling Gun", 20 "Shotgun", **567 "Raygun"**
+/// for the thing the table calls `lasergatgun`, 2 "+25 Health" for the apple
+/// and 7 "+50 Health" for the ham. A column that lands on seven sensible
+/// names in a row is the column.
+///
+/// The rest of the record is not kept here because it is not read yet: +0x1c
+/// and +0x20 look like a category and an owner, +0x2c is a float that reads
+/// like a fire interval (0.2 magnum, 0.6 shotgun, 1.5 guided rockets) and
+/// +0x30 an int that reads like a magazine (50, 200, 15). Guesses, so out.
+pub const ITEM: [(f64, &str, i32); 49] = [
+    (300.0, "magnum", 18),
+    (301.0, "uzi", 21),
+    (304.0, "magnum", -1),
+    (305.0, "gatgun", 16),
+    (306.0, "shotgun", 20),
+    (307.0, "lasergatgun", 567),
+    (309.0, "guidedrocket", 17),
+    (311.0, "doublea", 23),
+    (312.0, "carbattery", 22),
+    (318.0, "jetpack", 24),
+    (352.0, "jetpackatm", 212),
+    (313.0, "apple", 2),
+    (314.0, "ham", 7),
+    (316.0, "blackhole", 3),
+    (317.0, "grenade", 6),
+    (319.0, "decoygrenade", 5),
+    (320.0, "cloak", 4),
+    (347.0, "snipershield", 14),
+    (321.0, "sniperbullet", 189),
+    (322.0, "snipergrenade", 12),
+    (323.0, "sniperhoming", 11),
+    (325.0, "snipermortar", 10),
+    (326.0, "sniperbounce", 13),
+    (327.0, "lighter", 33),
+    (328.0, "loaf", 34),
+    (329.0, "toaster", 41),
+    (330.0, "booze", 25),
+    (332.0, "ducttape", 27),
+    (333.0, "fishbowl", 30),
+    (336.0, "plutonium", 37),
+    (340.0, "magnet", 35),
+    (341.0, "pop", 38),
+    (343.0, "leafer", 42),
+    (344.0, "atomictoaster", 43),
+    (345.0, "moltov", 44),
+    (346.0, "towels", 45),
+    (349.0, "ladder", 174),
+    (351.0, "pipes", 178),
+    (350.0, "cord", 177),
+    (353.0, "dimdes", 213),
+    (354.0, "kurtcoord", 214),
+    (355.0, "posdoo", 215),
+    (356.0, "schaingun", 225),
+    (357.0, "fballgun", 226),
+    (358.0, "toast", 227),
+    (359.0, "handdryer", 239),
+    (360.0, "loafbaguette", 324),
+    (361.0, "loafpumper", 374),
+    (362.0, "fishbowle", 29),
+];
+
+/// The model a type wears, if one of the three tables names it — and they
+/// name 137 types between them, where guessing from the `OBJ_*` name covers
+/// 67 of 149. See [`crate::game::api::model_for_type`], which asks this first.
+pub fn table_model(kind: f64) -> Option<&'static str> {
+    ITEM.iter()
+        .find(|(k, ..)| *k == kind)
+        .map(|(_, m, _)| *m)
+        .or_else(|| BULLET.iter().find(|(k, ..)| *k == kind).map(|(_, m, ..)| *m))
+        .or_else(|| BASE_HITPOINTS.iter().find(|(k, ..)| *k == kind).map(|(_, m, _)| *m))
+}
+
 /// The base hitpoints for a type, if it is one the table names.
 pub fn base_hitpoints(kind: f64) -> Option<i32> {
     BASE_HITPOINTS.iter().find(|(k, _, _)| *k == kind).map(|(_, _, hp)| *hp)

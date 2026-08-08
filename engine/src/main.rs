@@ -232,6 +232,13 @@ fn main() {
     // Any bases after it are scaled too, which is how the rule that keeps a
     // non-zero base off zero gets checked: the table has no record small
     // enough to reach it.
+    if args.iter().any(|a| a == "--items") {
+        for (kind, model, string) in goodomen::game::world::ITEM {
+            println!("{} {model} {string}", kind as i64);
+        }
+        return;
+    }
+
     // the shot table, the same way: one row per record so a tool can diff it
     if args.iter().any(|a| a == "--bullets") {
         for (kind, model, filter, damage, life, speed) in goodomen::game::world::BULLET {

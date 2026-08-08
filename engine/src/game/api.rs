@@ -1900,7 +1900,15 @@ pub fn type_name(kind: f64) -> Option<&'static str> {
 /// `OBJ_*` types have a model named after them**, and the rest do not.
 /// Everything it does not cover simply goes undrawn, which is the honest
 /// failure.
+/// **The three definition tables name their own models**, so ask them before
+/// guessing. Between them they cover 137 types — 49 items, 69 shots, 19
+/// enemies — and they disagree with the convention where it matters:
+/// `OBJ_LASERCANNON` wears `lasergatgun.mod`, not `lasercannon.mod`. The
+/// naming convention stays as the fallback for everything else.
 pub fn model_for_type(kind: f64) -> Option<String> {
+    if let Some(m) = crate::game::world::table_model(kind) {
+        return Some(m.to_string());
+    }
     type_name(kind).map(|n| n[4..].to_ascii_lowercase())
 }
 

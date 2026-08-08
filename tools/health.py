@@ -179,6 +179,54 @@ def bullets(args) -> int:
     return 0
 
 
+# The item table -- the inventory. +0x04 is an inline name of up to 16 bytes
+# and it is the model (0x416310 hands `record + 4` to the loader); +0x14 is an
+# index into `mdk2.str` for what the inventory calls the thing.
+ITEMS = 0x0049F2C0
+ITEM_STRIDE = 0x34
+
+
+def items(args) -> int:
+    """Compare the engine's item table against the binary's."""
+    secs = _sections(args.exe)
+    want = []
+    i = 0
+    while True:
+        r = _read(secs, ITEMS + i * ITEM_STRIDE, ITEM_STRIDE)
+        key = struct.unpack_from("<I", r, 0)[0]
+        if not 100 <= key <= 999:
+            break
+        want.append([str(key), r[4:0x14].split(b"\0")[0].decode("latin1"),
+                     str(struct.unpack_from("<i", r, 0x14)[0])])
+        i += 1
+
+    if not args.engine:
+        print("type model string")
+        for row in want:
+            print(" ".join(row))
+        return 0
+
+    out = subprocess.run(
+        ["cargo", "run", "--quiet", "--release", "--manifest-path",
+         str(Path(__file__).resolve().parent.parent / "engine/Cargo.toml"),
+         "--", "--items"],
+        capture_output=True, text=True, check=True).stdout
+    got = [l.split() for l in out.strip().splitlines() if l.strip()]
+    if got != want:
+        for i, (a, b) in enumerate(zip(got, want)):
+            if a != b:
+                print(f"MISMATCH at item {i}: the engine says {a}, "
+                      f"the original {b}", file=sys.stderr)
+                break
+        print(f"{len(want)} items from the binary, {len(got)} from the engine, "
+              "and they differ", file=sys.stderr)
+        return 1
+    named = sum(1 for r in want if int(r[2]) >= 0)
+    print(f"{len(want)} item types, {named} of them with a name in mdk2.str",
+          file=sys.stderr)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     # positional, because `check.py` decides whether a tool can run by asking
@@ -189,6 +237,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--bullets", action="store_true",
                     help="the shot table at 0x497388 instead of the enemy "
                          "table, and compare that")
+    ap.add_argument("--items", action="store_true",
+                    help="the item table at 0x49f2c0 instead, and compare "
+                         "its names against mdk2.str")
     ap.add_argument("--engine", action="store_true",
                     help="compare the engine's own table against this one")
     args = ap.parse_args(argv)
@@ -199,6 +250,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.bullets:
         return bullets(args)
+    if args.items:
+        return items(args)
 
     rows = table(args.exe)
     # bases too small for the doubling to survive truncation. The table has no
