@@ -215,6 +215,11 @@ pub struct Boot {
     /// Objects frozen until the player arrives — a level holds its encounters
     /// this way, and a boot of all ten puts hundreds there.
     pub stasis: BTreeSet<String>,
+    /// What each walker has been told to face, in radians — the original's
+    /// `walker + 0x14`, written by `mdkWalkerHeadToGob` and its point
+    /// variant. It is a *want*: nothing turns toward it until there is a
+    /// walker update.
+    pub heading: BTreeMap<String, f64>,
     /// Walkers that have been alerted. `mdkWalkerAlert` is idempotent —
     /// 0x431760 tests the flag before setting it — so the shout that goes
     /// with it happens exactly once per walker.
@@ -709,6 +714,74 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             Ok(1.0)
         })?,
     )?;
+
+    // `mdkWalkerHeadToGob(gob, target)` — 0x43fcd0 into **0x431940** — and
+    // `mdkWalkerHeadToPoint(gob, point)`, which is 0x4318a0 and the same
+    // shape. Both do two things and only two:
+    //
+    //     walker.heading = bearing(gob -> target)     ; written to +0x14
+    //     return |yaw(gob) - walker.heading| < 0.17   ; the double at 0x490198
+    //
+    // **They do not turn anything.** The heading is a *want*, stored for the
+    // walker update to steer toward, and the return value says whether the
+    // walker is already looking there — 0.17 radians, 9.7 degrees, is the
+    // whole tolerance. Ten script sites test that return against 1.
+    //
+    // With no walker update yet a gob never turns, so this answers 1 only
+    // when the scene graph already put it facing the right way. That is the
+    // correct answer for an engine whose walkers do not move, and it is a
+    // computed one rather than the `nil` a recorder gave.
+    for name in ["mdkWalkerHeadToGob", "mdkWalkerHeadToPoint"] {
+        let to_gob = name == "mdkWalkerHeadToGob";
+        globals.set(
+            name,
+            lua.create_function(move |lua, args: Variadic<Value>| {
+                let Some(who) = args.first().and_then(gob_name) else { return Ok(0.0) };
+                let to = if to_gob {
+                    let Some(target) = args.get(1).and_then(gob_name) else { return Ok(0.0) };
+                    let Some(w) = world::world(lua) else { return Ok(0.0) };
+                    match w.find(&target).and_then(|id| w.get(id)) {
+                        Some(g) => g.position,
+                        None => return Ok(0.0),
+                    }
+                } else {
+                    let point = args
+                        .get(1)
+                        .and_then(text)
+                        .and_then(|n| {
+                            lua.globals().get::<mlua::Table>("points").ok()?.get::<mlua::Table>(n).ok()
+                        });
+                    let Some(p) = point else { return Ok(0.0) };
+                    [
+                        p.get::<f64>("x").unwrap_or(0.0),
+                        p.get::<f64>("y").unwrap_or(0.0),
+                        p.get::<f64>("z").unwrap_or(0.0),
+                    ]
+                };
+                let (at, yaw) = {
+                    let Some(w) = world::world(lua) else { return Ok(0.0) };
+                    let Some(g) = w.find(&who).and_then(|id| w.get(id)) else { return Ok(0.0) };
+                    let q = g.rotation;
+                    (
+                        g.position,
+                        (2.0 * (q[0] * q[3] + q[1] * q[2]))
+                            .atan2(1.0 - 2.0 * (q[2] * q[2] + q[3] * q[3])),
+                    )
+                };
+                let heading = (to[1] - at[1]).atan2(to[0] - at[0]);
+                boot_mut(lua)?.heading.insert(who, heading);
+                let mut d = yaw - heading;
+                if d < -std::f64::consts::PI {
+                    d += std::f64::consts::TAU;
+                } else if d > std::f64::consts::PI {
+                    d -= std::f64::consts::TAU;
+                }
+                /// How near counts as facing, from the double at 0x490198.
+                const FACING: f64 = 0.17;
+                Ok(if d.abs() < FACING { 1.0 } else { 0.0 })
+            })?,
+        )?;
+    }
 
     // `mdkAILineOfSight(watcher, target, fov, range)` — 0x43c840 into
     // **0x402950**, and three things in it are read rather than guessed.
@@ -2302,6 +2375,40 @@ mod tests {
         assert_eq!(walk_animation(0.0, 0.0), "ANIM_DEFAULT");
         // a twitch is not a walk
         assert_eq!(walk_animation(0.01, -0.01), "ANIM_DEFAULT");
+    }
+
+    /// Heading is a *want* and an answer, not a turn: it records where the
+    /// walker should look and says whether it already does, to within the
+    /// 0.17 radians the original allows.
+    #[test]
+    fn heading_records_the_want_and_answers_whether_it_is_met() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                // the walker faces +x; one target is ahead of it, one is at
+                // right angles, one is eight degrees off -- inside the 9.7
+                "points.side = {x = 0, y = 10, z = 0, f = 0}\n\
+                 mdkRegisterObject('w',     OBJ_NONE, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkRegisterObject('ahead', OBJ_NONE, scene, nil, -1, 10,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkRegisterObject('askew', OBJ_NONE, scene, nil, -1, 10,1.4,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 facing    = mdkWalkerHeadToGob(w, ahead)\n\
+                 nearly    = mdkWalkerHeadToGob(w, askew)\n\
+                 sideways  = mdkWalkerHeadToPoint(w, 'side')",
+            )
+            .exec()
+            .unwrap();
+        let g = scripts.lua.globals();
+        assert_eq!(g.get::<f64>("facing").unwrap(), 1.0);
+        assert_eq!(g.get::<f64>("nearly").unwrap(), 1.0, "8 degrees is inside 9.7");
+        assert_eq!(g.get::<f64>("sideways").unwrap(), 0.0, "a right angle is not");
+        // and the last call left the want behind, pointing at the waypoint
+        let want = scripts.lua.app_data_ref::<Boot>().unwrap().heading["w"];
+        assert!((want - std::f64::consts::FRAC_PI_2).abs() < 1e-9, "due +y");
     }
 
     /// The cone is `cos(fov * 0.5)`, so the angle a script passes is the
