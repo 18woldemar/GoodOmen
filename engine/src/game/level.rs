@@ -31,7 +31,11 @@ pub struct Started {
     pub loaded: Loaded,
     pub rooms: Visibility,
     pub checkpoints: Vec<crate::game::api::Checkpoint>,
-    pub collision: crate::game::body::Collision,
+    /// `Rc` because two owners need it: the body, and the Lua closures that
+    /// answer line of sight. Immutable once loaded — no `RefCell` — so this
+    /// is a shared read-only resource rather than the mutable object graph
+    /// the arena exists to avoid.
+    pub collision: std::rc::Rc<crate::game::body::Collision>,
 }
 
 pub struct Loaded {
@@ -170,9 +174,13 @@ pub unsafe fn start(
         .collect();
     let objects = w.len();
     let checkpoints = boot.checkpoints.clone();
-    let collision = crate::game::body::Collision::load(install, &w);
+    let collision = std::rc::Rc::new(crate::game::body::Collision::load(install, &w));
     drop(w);
     drop(boot);
+    // and the scripts can ask it what they can see. After both guards: this
+    // takes a *mutable* borrow of the app-data container, so any live
+    // `app_data_ref` -- of any type -- would stop it.
+    scripts.lua.set_app_data(collision.clone());
     let visible: Vec<std::collections::BTreeSet<usize>> = visible;
 
     let mut placed = 0;

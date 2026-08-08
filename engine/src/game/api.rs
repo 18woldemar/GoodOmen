@@ -710,6 +710,87 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         })?,
     )?;
 
+    // `mdkAILineOfSight(watcher, target, fov, range)` — 0x43c840 into
+    // **0x402950**, and three things in it are read rather than guessed.
+    // Both ends are lifted by an **eye height taken from `omgob + 8`**, which
+    // is per type and which the engine does not hold: [`EYE`] stands in for
+    // it, and that is ours. The cone is **`cos(fov * 0.5)`** — the 0.5 is the
+    // constant at 0x48f2fc — so the angle a script passes is the *full*
+    // width, and `2*PI` really does mean all round. And the occlusion test
+    // comes last, after the range and the cone, because it is the expensive
+    // one.
+    //
+    // `mdkWalkerCanSeeGob(watcher, target)` is the same question with the
+    // walker's own cone and reach, which the engine has no walker to ask —
+    // so it is all round and unlimited, and only the geometry answers.
+    for name in ["mdkAILineOfSight", "mdkWalkerCanSeeGob"] {
+        let bounded = name == "mdkAILineOfSight";
+        globals.set(
+            name,
+            lua.create_function(move |lua, args: Variadic<Value>| {
+                let (Some(a), Some(b)) =
+                    (args.first().and_then(gob_name), args.get(1).and_then(gob_name))
+                else {
+                    return Ok(0.0);
+                };
+                let fov = if bounded {
+                    args.get(2).map(number).unwrap_or(std::f64::consts::TAU)
+                } else {
+                    std::f64::consts::TAU
+                };
+                let range =
+                    if bounded { args.get(3).map(number).unwrap_or(f64::MAX) } else { f64::MAX };
+                let (from, to, facing) = {
+                    let Some(w) = world::world(lua) else { return Ok(0.0) };
+                    let Some(watcher) = w.find(&a).and_then(|id| w.get(id)) else {
+                        return Ok(0.0);
+                    };
+                    let Some(target) = w.find(&b).and_then(|id| w.get(id)) else {
+                        return Ok(0.0);
+                    };
+                    let q = watcher.rotation;
+                    let yaw = (2.0 * (q[0] * q[3] + q[1] * q[2]))
+                        .atan2(1.0 - 2.0 * (q[2] * q[2] + q[3] * q[3]));
+                    (watcher.position, target.position, yaw)
+                };
+                let to_target = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+                let far = to_target.iter().map(|c| c * c).sum::<f64>().sqrt();
+                if far > range || far <= 0.0 {
+                    return Ok(0.0);
+                }
+                // the cone, against the watcher's own facing
+                let mut off = to_target[1].atan2(to_target[0]) - facing;
+                while off > std::f64::consts::PI {
+                    off -= std::f64::consts::TAU;
+                }
+                while off < -std::f64::consts::PI {
+                    off += std::f64::consts::TAU;
+                }
+                // `cos` is only monotonic over a half-angle of 0..PI, so an
+                // `fov` past 2*PI *narrows* this cone rather than widening
+                // it. That is the original's arithmetic and not a slip here;
+                // the widest the scripts ever ask for is exactly `2*PI`.
+                if off.cos() < (fov * 0.5).cos() {
+                    return Ok(0.0);
+                }
+                // and only then the geometry. With no collision world loaded
+                // -- a boot never builds one -- nothing can block the view,
+                // which is the honest answer for a world that has no walls.
+                let clear = match lua.app_data_ref::<std::rc::Rc<crate::game::body::Collision>>() {
+                    Some(c) => {
+                        let eye = crate::game::body::EYE;
+                        c.sees(
+                            [from[0], from[1], from[2] + eye],
+                            [to[0], to[1], to[2] + eye],
+                        )
+                    }
+                    None => true,
+                };
+                Ok(if clear { 1.0 } else { 0.0 })
+            })?,
+        )?;
+    }
+
     // Four more getters the scripts compare against a *number*, which is the
     // shape that makes a recorder's `nil` actively wrong rather than merely
     // absent — see `omGobIsStasis`, which cost every cutscene in the game.
@@ -2221,6 +2302,50 @@ mod tests {
         assert_eq!(walk_animation(0.0, 0.0), "ANIM_DEFAULT");
         // a twitch is not a walk
         assert_eq!(walk_animation(0.01, -0.01), "ANIM_DEFAULT");
+    }
+
+    /// The cone is `cos(fov * 0.5)`, so the angle a script passes is the
+    /// **full** width and `2*PI` means all round. With no collision world —
+    /// which is a boot, and this test — nothing can block the view, so what
+    /// is being checked here is the range and the cone.
+    #[test]
+    fn line_of_sight_is_a_full_angle_and_a_range() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                // the watcher faces +x (identity quaternion); one target is
+                // straight ahead, one straight behind
+                "mdkRegisterObject('eye',    OBJ_NONE, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkRegisterObject('ahead',  OBJ_NONE, scene, nil, -1, 10,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkRegisterObject('behind', OBJ_NONE, scene, nil, -1, -10,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 -- PI is a global the game's own mdk2.lua defines, not an
+                 -- engine constant, so the literals are spelled out -- and
+                 -- 2*PI has to be exact: the comparison is `cos(off) <
+                 -- cos(fov/2)` and a target exactly behind sits exactly on
+                 -- the boundary, so 6.2832 would round the cone shut
+                 narrow_ahead  = mdkAILineOfSight(eye, ahead,  0.3927, 100)\n\
+                 narrow_behind = mdkAILineOfSight(eye, behind, 0.3927, 100)\n\
+                 all_round     = mdkAILineOfSight(eye, behind, 6.283185307179586, 100)\n\
+                 out_of_range  = mdkAILineOfSight(eye, ahead,  6.283185307179586, 5)\n\
+                 can_see       = mdkWalkerCanSeeGob(eye, behind)",
+            )
+            .exec()
+            .unwrap();
+        let g = scripts.lua.globals();
+        assert_eq!(g.get::<f64>("narrow_ahead").unwrap(), 1.0);
+        assert_eq!(g.get::<f64>("narrow_behind").unwrap(), 0.0, "PI/8 is the whole cone");
+        assert_eq!(g.get::<f64>("all_round").unwrap(), 1.0, "2*PI really is all round");
+        assert_eq!(g.get::<f64>("out_of_range").unwrap(), 0.0, "ten units, five of range");
+        assert_eq!(
+            g.get::<f64>("can_see").unwrap(),
+            1.0,
+            "the walker's own cone is not something the engine has, so it is all round"
+        );
     }
 
     /// A shout reaches everything within 100 units and nothing outside it,

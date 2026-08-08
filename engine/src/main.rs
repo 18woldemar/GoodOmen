@@ -936,11 +936,18 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
             .find(|c| c.index as u32 == checkpoint)
             .cloned()
             .ok_or_else(|| format!("level {number} has no checkpoint {checkpoint}"))?;
-        let collision = Collision::load(&mut install, &w);
+        // `Rc` and not a borrow because two owners need it: the body, and
+        // the Lua closures that answer line of sight. It is **immutable once
+        // loaded** — no `RefCell` — so this is a shared read-only resource
+        // rather than the mutable object graph the project's arena exists to
+        // avoid.
+        let collision = std::rc::Rc::new(Collision::load(&mut install, &w));
         let env = boot.rooms.iter().map(|r| r.env).collect();
         let music = boot.rooms.iter().map(|r| r.music).collect();
         (api::Visibility { names, boxes, visible, env, music }, collision, spawn)
     };
+    // and the scripts can ask it what they can see
+    scripts.lua.set_app_data(collision.clone());
 
     let frames = install
         .read(&format!("demo{number}_{checkpoint}.omn"))
