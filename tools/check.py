@@ -211,6 +211,12 @@ SLOW = [
      ["health.py", "$MDK2_GOG/mdk2Main.exe", "--engine"], None),
     ("the shot table is the original's",
      ["health.py", "$MDK2_GOG/mdk2Main.exe", "--bullets", "--engine"], None),
+    # the fourth table: nine AI behaviours, and which of the 19 enemy types
+    # index one. Kept in the tool rather than the engine, because nothing in
+    # the engine reads it yet.
+    ("nine AI behaviours, and nine enemies with none",
+     ["health.py", "$MDK2_GOG/mdk2Main.exe", "--ai", "--expect-ai", "10"],
+     None),
     ("the item table is the original's",
      ["health.py", "$MDK2_GOG/mdk2Main.exe", "--items", "--engine"], None),
     ("the controller walks every level",

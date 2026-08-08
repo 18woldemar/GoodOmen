@@ -245,6 +245,51 @@ def items(args) -> int:
     return 0 if len(twins) == 9 else 1
 
 
+# The AI behaviour table. `mdkDoganboyAttack` (0x440380) is class 4's slot
+# +0x2c, 0x4324f0, a twelve-state machine on `walker + 0x7c` whose jump table
+# is at 0x433a38; 0x432520 indexes this table by **`def + 0x84`**, which is
+# 0xffffffff for the enemy types that have no AI at all.
+#
+# It stays a tool table rather than an engine one on purpose: the engine has
+# nothing that reads it yet, and a copy nobody reads is a copy that rots. The
+# columns are named as far as the code names them and no further.
+AI = 0x0048FF78
+AI_STRIDE = 0x34
+AI_RECORDS = 9
+
+
+def ai(args) -> int:
+    """The nine behaviours, and which of the 19 enemy types use each."""
+    secs = _sections(args.exe)
+    users = {}
+    n = 0
+    while True:
+        r = _read(secs, TABLE + n * STRIDE, STRIDE)
+        if struct.unpack_from("<I", r, KEY)[0] == 0:
+            break
+        which = struct.unpack_from("<I", r, 0x84)[0]
+        if which != 0xFFFFFFFF:
+            users.setdefault(which, []).append(
+                r[NAME:BASE].split(b"\0")[0].decode("latin1"))
+        n += 1
+
+    print("  #  anim  melee   p_far  p_melee  p_hurt   near    far   reach"
+          "    fov   c11  lead  who")
+    for i in range(AI_RECORDS):
+        r = _read(secs, AI + i * AI_STRIDE, AI_STRIDE)
+        f = struct.unpack("<13f", r)
+        v = struct.unpack("<13i", r)
+        print(f"  {i}  {v[0]:4d}  {f[2]:5g}  {f[3]:6g}  {f[4]:7g}  {f[5]:6g}  "
+              f"{f[7]:5g}  {f[8]:5g}  {f[9]:6g}  {f[10]:5.3f}  {f[11]:4g}  "
+              f"{v[12]:4d}  {', '.join(users.get(i, []))}")
+    have = sum(len(u) for u in users.values())
+    print(f"{AI_RECORDS} behaviours, {have} of the {n} enemy types use one "
+          f"and {n - have} have no AI at all", file=sys.stderr)
+    if args.expect_ai is not None:
+        return 0 if have == args.expect_ai else 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     # positional, because `check.py` decides whether a tool can run by asking
@@ -258,6 +303,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--items", action="store_true",
                     help="the item table at 0x49f2c0 instead, and compare "
                          "its names against mdk2.str")
+    ap.add_argument("--expect-ai", type=int, metavar="N",
+                    help="succeed only if exactly N enemy types have AI")
+    ap.add_argument("--ai", action="store_true",
+                    help="the AI behaviour table at 0x48ff78, and which "
+                         "enemies index it")
     ap.add_argument("--engine", action="store_true",
                     help="compare the engine's own table against this one")
     args = ap.parse_args(argv)
@@ -270,6 +320,8 @@ def main(argv: list[str] | None = None) -> int:
         return bullets(args)
     if args.items:
         return items(args)
+    if args.ai:
+        return ai(args)
 
     rows = table(args.exe)
     # bases too small for the doubling to survive truncation. The table has no
