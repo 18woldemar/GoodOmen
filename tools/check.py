@@ -35,6 +35,12 @@ SELFTESTS = ["scene", "mod2obj", "mod2html", "texdec", "luaapi", "luarun",
 CORPUS = [
     ("models parse", ["mod2obj.py", "extracted/base", "--stats"],
      "base"),
+    # the animation key channel (target kind 23): what a model fires, shakes
+    # and spawns as it plays. 229 of the 2207 models carry one, and 819 of the
+    # 1313 keys create an object -- which is where an enemy's shot comes from.
+    ("animation keys carry what a model fires",
+     ["mod2obj.py", "extracted/base", "--keys", "--expect-keys", "1313"],
+     "base"),
     ("collision trees validate", ["bsp.py", "extracted/base", "--validate"],
      "base"),
     ("scene graphs validate",

@@ -607,6 +607,69 @@ def turntable(m: Model, path: Path, texture: Path | None = None,
                   duration=80, loop=0, optimize=True)
 
 
+# The **animation key channel**. A channel whose target kind is 23 carries no
+# geometry at all: its values are key codes, and 0x478ad8 hands each one to
+# 0x42bf80 as the animation passes it. What that does with the code is a
+# four-way split, and it is the whole system:
+#
+#     code >= 100   create an object of that `OBJ_*` type at the node
+#     30..99        ScreenFlash(code - 29)
+#     20..29        Earthquake(code - 19)
+#     1..19         fire OnCustomKey(gob, slot, code) on the object
+#
+# The first line is where an enemy's shot comes from. `hans.mod` animation 56
+# carries **421** at t = 0.513 and 421 is `hansshot`; `hoser.mod` 56 carries
+# **428**, `hosershot`. Nothing in the enemy's definition names a projectile
+# because the *animation* does.
+#
+# The value is not the key entry's second word -- that is an index into the
+# model's value pool -- but the **raw bits** of the first float of the entry it
+# points at, which is how the engine reads it (`mov eax, [edx]`).
+KEY_KIND = 23
+
+
+def keys(args) -> int:
+    """Every animation key in a directory of models, split by what it does."""
+    import collections
+    files = sorted(args.src.glob("*.mod")) if args.src.is_dir() else [args.src]
+    codes: collections.Counter = collections.Counter()
+    carriers = []
+    for f in files:
+        try:
+            model = Model(f.read_bytes())
+        except Exception:
+            continue
+        found = []
+        for anim in model.animations():
+            for ch in anim["channels"]:
+                if ch["kind"] != KEY_KIND:
+                    continue
+                for when, index in ch["keys"]:
+                    raw = struct.unpack("<I", struct.pack(
+                        "<f", model._value(index)[0]))[0]
+                    codes[raw] += 1
+                    found.append((anim["id"], round(when, 3), raw))
+        if found:
+            carriers.append((f.name, found))
+
+    def total(lo, hi):
+        return sum(v for k, v in codes.items() if lo <= k < hi)
+
+    for name, found in carriers[:12]:
+        spawns = sorted({c for _, _, c in found if c >= 100})
+        print(f"  {name:22s} {len(found):3d} keys"
+              + (f"  spawns {spawns[:6]}" if spawns else ""))
+    made = {k: v for k, v in codes.items() if k >= 100}
+    print(f"{len(files)} models, {len(carriers)} carry key channels, "
+          f"{sum(codes.values())} keys: {total(1, 20)} OnCustomKey, "
+          f"{total(20, 30)} earthquakes, {total(30, 100)} screen flashes, "
+          f"{sum(made.values())} objects of {len(made)} types",
+          file=sys.stderr)
+    if args.expect_keys is not None:
+        return 0 if sum(codes.values()) == args.expect_keys else 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("src", type=Path, nargs="?")
@@ -625,12 +688,20 @@ def main(argv: list[str] | None = None) -> int:
                          "place instead of spinning the model")
     ap.add_argument("--stats", action="store_true",
                     help="parse a whole directory and report")
+    ap.add_argument("--keys", action="store_true",
+                    help="the animation key channels: what the models fire, "
+                         "shake and spawn as an animation plays")
+    ap.add_argument("--expect-keys", type=int, metavar="N",
+                    help="succeed only if exactly N keys are found")
     args = ap.parse_args(argv)
     if args.selftest:
         selftest()
         return 0
     if args.src is None:
         ap.error("a .mod file or a directory is required")
+
+    if args.keys:
+        return keys(args)
 
     if args.stats:
         files = sorted(args.src.glob("*.mod"))
