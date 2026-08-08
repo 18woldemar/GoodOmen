@@ -1177,18 +1177,14 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         "mdkGobSetPosition",
         lua.create_function(|lua, args: Variadic<Value>| {
             let at = match args.get(1) {
-                Some(Value::String(name)) => {
-                    let points = lua.globals().get::<mlua::Table>("points")?;
-                    points
-                        .get::<Option<mlua::Table>>(name.to_string_lossy().to_string())?
-                        .map(|p| {
-                            [
-                                p.get::<f64>(1).unwrap_or(0.0),
-                                p.get::<f64>(2).unwrap_or(0.0),
-                                p.get::<f64>(3).unwrap_or(0.0),
-                            ]
-                        })
-                }
+                // **by name, and the fields are named too.** The scene graphs
+                // write `points.l1_bwp01 = {x=78.4479, y=147.954, z=-27.5037,
+                // f=0}` — 5633 of them — so reading `[1]`, `[2]`, `[3]` gets
+                // three nils and puts the object at the origin. It did, for
+                // every scripted placement in the game, until a walker asked
+                // the collision world whether it could step forward and was
+                // told no because it was standing inside the level.
+                Some(Value::String(_)) => point_at(lua, args.get(1)),
                 other => position(other),
             };
             if let (Some(Value::Table(gob)), Some(at)) = (args.first(), at) {
@@ -2602,10 +2598,23 @@ pub fn tick_touching(
     // spent along the **gob's own facing**, not along the heading, which is
     // why the turn has to come first and why a walker corners in an arc.
     //
-    // ponytail: no collision and no ground. The original hands the velocity
-    // to 0x46de70, which sweeps it and projects it onto the surface normal at
-    // `omgob + 0x30`; here it is a flat slide, so a walker crosses a wall and
-    // ignores a slope. Give it `Collision` when a non-player gob has a body.
+    // ponytail: no collision. The original hands the velocity to 0x46de70,
+    // which sweeps it and slides it along the surface normal at `omgob +
+    // 0x30`; here it is a flat slide through walls.
+    //
+    // A point refusal was tried and taken out, and what it found is worth
+    // more than what it fixed. Exactly **one** walker in a thirty-second run
+    // of level 7 is ever refused — `l7r2_spn1_spawn`, at (-346.7, -140.5,
+    // 29.3), inside the tree owned by `c9` — and that one is enough to stall
+    // the level: it is a spawner's grunt at the head of a sequence, it is
+    // *already* inside the geometry when it appears, so all three slide
+    // candidates are refused too, and every sequence behind it waits. A
+    // walker with `avoid` off (which is every call the game makes) and no
+    // sweep cannot get out of anything it starts inside.
+    //
+    // So the order is: find out why a spawn lands inside `c9` first, then
+    // give a non-player gob a body. Refusing steps before that trades walking
+    // through walls for standing still, which is the worse of the two.
     let steps: Vec<(world::Id, String, [f64; 3], f64)> = {
         let boot = boot_ref(&scripts.lua)?;
         let Some(w) = crate::game::world::world(&scripts.lua) else {

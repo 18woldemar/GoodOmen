@@ -148,15 +148,15 @@ ENGINE = [
     # level 7's task lists jump the sniper pilots onto their perches
     # (`{ mdkWalkerJumpToPoint, { "l7r6pilot12", 50 } }`), which is the first
     # thing in the game that moves a gob the player is not standing in.
-    # ...and its walkers walk: 1727 object moves against the 901 a run makes
+    # ...and its walkers walk: 1729 object moves against the 901 a run makes
     # when only the player is moving, all of it non-player gobs turning toward
     # a waypoint and running at their own type's speed out of 0x4ab2e8.
     ("a run launches a walker along the arc the original solves for",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--run", "7", "1", "30", "--expect-jumps", "2",
-      "--expect-moves", "1727",
-      "--expect-events", "6653", "--expect-survived", "6653"], None),
+      "--expect-moves", "1729",
+      "--expect-events", "7423", "--expect-survived", "7423"], None),
     ("walking drives the player's own animation, and reaches the scripts",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
