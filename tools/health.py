@@ -222,9 +222,27 @@ def items(args) -> int:
               "and they differ", file=sys.stderr)
         return 1
     named = sum(1 for r in want if int(r[2]) >= 0)
-    print(f"{len(want)} item types, {named} of them with a name in mdk2.str",
+    # **The item-to-shot link is by name for the throwables.** The jump table
+    # at 0x41a508 maps the five sniper ammunitions onto the five shots of the
+    # same name -- item 321 `sniperbullet` fires shot 406 `sniperbullet`, and
+    # so on -- and exactly nine item names have a shot twin, the other four
+    # being grenade, decoygrenade, blackhole and moltov. The guns have no twin
+    # and pick their shot somewhere else. Counted here so that a wrong reading
+    # of either table breaks it.
+    shots = set()
+    i = 0
+    while True:
+        r = _read(secs, SHOTS + i * SHOT_STRIDE, SHOT_STRIDE)
+        if not 100 <= struct.unpack_from("<I", r, 0)[0] <= 999:
+            break
+        model = _read(secs, struct.unpack_from("<I", r, 0x30)[0], 40)
+        shots.add(model.split(b"\0")[0].decode("latin1"))
+        i += 1
+    twins = sorted({r[1] for r in want} & shots)
+    print(f"{len(want)} item types, {named} of them with a name in mdk2.str, "
+          f"{len(twins)} with a shot of the same name ({', '.join(twins[:3])}...)",
           file=sys.stderr)
-    return 0
+    return 0 if len(twins) == 9 else 1
 
 
 def main(argv: list[str] | None = None) -> int:
