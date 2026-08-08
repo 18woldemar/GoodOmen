@@ -162,6 +162,59 @@ class Collision:
                        for h in (0.1, 0.5, 1.0, 1.4, EYE))
 
 
+def waypoints(args) -> int:
+    """The same body test, asked of every waypoint the scene graphs place.
+
+    A waypoint is where the game **walks a character to**, so it is as much a
+    statement about the collision reading as a checkpoint is -- and there are
+    five times as many of them. The number that matters is the exceptions:
+    **39 of the 625 waypoints across the ten levels sit inside a tree**, and
+    they are not spread evenly. Levels 1, 6 and 10 have none at all; level 3
+    has 19 and level 7 has 13, and in both the walkable surface is a separate
+    object embedded in a larger mesh (`l3_piperoom`, `c9`), so a *point* query
+    has nothing to prefer between them. Several of the rest are pens --
+    `l2_penwp`, `l4_r2poopsypen`, `l5r3bbpen` -- which is a name for exactly
+    this: a spot inside a thing.
+
+    That is why a walker cannot be given collision as a point test. The
+    original sweeps a body and resolves against the surface it actually
+    touches (0x46de70), which is indifferent to being inside something else;
+    a point test refuses the step and the character never moves again. This
+    counts the ground that has to be made up first.
+    """
+    total = clear = 0
+    worst: dict[str, int] = {}
+    for n in range(1, 11) if args.all else [args.level or 1]:
+        try:
+            graph, _ = checkpoints(args.root, n)
+        except Exception as e:
+            print(f"level {n}: {e}", file=sys.stderr)
+            continue
+        path = args.root / "base" / f"{graph}.lua"
+        if not path.is_file():
+            continue
+        points = _lua(args.root, path, "points") or {}
+        coll = Collision(path, args.root)
+        bad = []
+        for name, p in sorted(points.items()):
+            x, y, z = (float(p.get(k, 0.0)) for k in ("x", "y", "z"))
+            total += 1
+            if coll.clear(x, y, z):
+                clear += 1
+            else:
+                bad.append(name)
+        for name in bad:
+            worst[f"l{n}"] = worst.get(f"l{n}", 0) + 1
+        print(f"  l{n}: {len(points) - len(bad)} of {len(points)} clear"
+              + (f"  ({', '.join(bad[:4])}{'...' if len(bad) > 4 else ''})"
+                 if bad else ""))
+    print(f"{total} waypoints: {clear} a body would stand clear at, "
+          f"{total - clear} inside a tree", file=sys.stderr)
+    if args.expect is not None:
+        return 0 if clear == args.expect else 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("root", type=Path, help="the extraction root")
@@ -171,7 +224,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--expect", type=int, metavar="N",
                     help="succeed only if exactly N checkpoints are in open "
                          "space; pins the one known exception, l7 cp3")
+    ap.add_argument("--waypoints", action="store_true",
+                    help="ask the same question of every waypoint instead: "
+                         "how many of the scene graph's own points would a "
+                         "body stand clear at")
     args = ap.parse_args(argv)
+
+    if args.waypoints:
+        return waypoints(args)
 
     levels = range(1, 11) if args.all else [args.level or 1]
     total = clear = floored = 0

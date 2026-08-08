@@ -63,6 +63,13 @@ CORPUS = [
     ("checkpoints stand in open space",
      ["spawn.py", "extracted", "--all", "--expect", "128"],
      "scripts/level1.lua"),
+    # the same body test over the waypoints instead, five times as many of
+    # them. 39 of the 625 sit inside a tree, which is the number a walker's
+    # collision has to survive before it can be a point query -- see the
+    # docstring on `waypoints()`.
+    ("waypoints stand where a body would fit",
+     ["spawn.py", "extracted", "--all", "--waypoints", "--expect", "586"],
+     "scripts/level1.lua"),
     ("every level starts at every checkpoint",
      ["boot.py", "extracted", "--resources", "--expect", "129",
       "--events", "--expect-handlers", "8690"],
