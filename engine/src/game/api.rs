@@ -297,6 +297,12 @@ pub struct Boot {
     /// Walkers currently in the air, from `mdkWalkerJumpToPoint`. See
     /// [`launch`] for the arc and [`tick_touching`] for what flies it.
     pub jumps: BTreeMap<String, Jump>,
+    /// What each walker has been told to do with its legs — `walker + 0xc`,
+    /// **0 still, 1 walk, 2 run** — written by `mdkWalkerGotoPoint`, its
+    /// direct variant and `mdkWalkerStop`. Nothing turns it into motion yet;
+    /// the only per-frame reader in the original is `mdkWalkerAnimUpdate`
+    /// (0x42f700, at 0x42f872), which is the piece still unread.
+    pub gait: BTreeMap<String, i64>,
     /// How many launches a run has ordered. `jumps` only holds the ones still
     /// in the air, so it is empty by the time anyone reads it.
     pub jumped: usize,
@@ -828,30 +834,39 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                     let Some(p) = point_at(lua, args.get(1)) else { return Ok(0.0) };
                     p
                 };
-                let (at, yaw) = {
-                    let Some(w) = world::world(lua) else { return Ok(0.0) };
-                    let Some(g) = w.find(&who).and_then(|id| w.get(id)) else { return Ok(0.0) };
-                    let q = g.rotation;
-                    (
-                        g.position,
-                        (2.0 * (q[0] * q[3] + q[1] * q[2]))
-                            .atan2(1.0 - 2.0 * (q[2] * q[2] + q[3] * q[3])),
-                    )
-                };
+                let Some((at, yaw)) = stance(lua, &who) else { return Ok(0.0) };
                 let heading = (to[1] - at[1]).atan2(to[0] - at[0]);
                 boot_mut(lua)?.heading.insert(who, heading);
-                let mut d = yaw - heading;
-                if d < -std::f64::consts::PI {
-                    d += std::f64::consts::TAU;
-                } else if d > std::f64::consts::PI {
-                    d -= std::f64::consts::TAU;
-                }
-                /// How near counts as facing, from the double at 0x490198.
-                const FACING: f64 = 0.17;
-                Ok(if d.abs() < FACING { 1.0 } else { 0.0 })
+                Ok(if facing(yaw, heading) { 1.0 } else { 0.0 })
             })?,
         )?;
     }
+
+    // `mdkWalkerStop(gob)` is 0x431870 and is three stores: gait 0, strafe 0,
+    // and **the heading set to where the gob already looks**, which is how a
+    // stop differs from an order to face forwards.
+    //
+    // Its two opposite numbers, `mdkWalkerGotoPoint` (0x431b80) and
+    // `mdkWalkerGotoPointDirectly` (0x431f70), are **read and deliberately
+    // still recorders** — see `CLAUDE.md` for both, down to the arguments.
+    // They return 0 until the walker arrives, and `script.lua`'s task loop is
+    // `while (res ~= 0 and self.stack)`, so a real one blocks its whole
+    // sequence until something obeys the gait. Implementing them cost level 7
+    // its two jumps: the sniper pilots sit behind a walking sequence that
+    // never finishes. A recorder's `nil` walks straight past, which is wrong
+    // but not stuck, and that is the better wrong answer until there is a
+    // mover. The moment there is one, both are ten lines.
+    globals.set(
+        "mdkWalkerStop",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(who) = args.first().and_then(gob_name) else { return Ok(0.0) };
+            let Some((_, yaw)) = stance(lua, &who) else { return Ok(0.0) };
+            let mut boot = boot_mut(lua)?;
+            boot.heading.insert(who.clone(), yaw);
+            boot.gait.insert(who, 0);
+            Ok(1.0)
+        })?,
+    )?;
 
     // `mdkWalkerJumpToPoint(gob, point, apex)` — 0x43f980 into **0x430360**,
     // which is four lines: copy the waypoint into `walker + 0x80`, then call
@@ -2018,6 +2033,34 @@ fn spawn(lua: &Lua, spawner: &str) -> mlua::Result<Option<mlua::Table>> {
 }
 
 /// A gob's name, from the table the scripts hold it by.
+/// How near a heading counts as facing it, from the double at 0x490198.
+/// Three walker functions share the constant and the angle-wrap idiom around
+/// it — 0x4318a0, 0x431b80 and 0x431f70, all with 0x48f618 PI, 0x48f61c -PI
+/// and 0x48f5a0 2*PI.
+const FACING: f64 = 0.17;
+
+fn facing(yaw: f64, heading: f64) -> bool {
+    let mut d = yaw - heading;
+    if d < -std::f64::consts::PI {
+        d += std::f64::consts::TAU;
+    } else if d > std::f64::consts::PI {
+        d -= std::f64::consts::TAU;
+    }
+    d.abs() < FACING
+}
+
+/// Where a gob is and which way it looks: its position and the yaw out of its
+/// quaternion, which is what `0x46faa0` hands back off `gob + 0x24`.
+fn stance(lua: &Lua, name: &str) -> Option<([f64; 3], f64)> {
+    let w = world::world(lua)?;
+    let g = w.find(name).and_then(|id| w.get(id))?;
+    let q = g.rotation;
+    Some((
+        g.position,
+        (2.0 * (q[0] * q[3] + q[1] * q[2])).atan2(1.0 - 2.0 * (q[2] * q[2] + q[3] * q[3])),
+    ))
+}
+
 /// A named waypoint out of the `points` table the scene graph fills.
 fn point_at(lua: &Lua, v: Option<&Value>) -> Option<[f64; 3]> {
     let p: mlua::Table = lua
@@ -2612,6 +2655,31 @@ mod tests {
         // and the last call left the want behind, pointing at the waypoint
         let want = scripts.lua.app_data_ref::<Boot>().unwrap().heading["w"];
         assert!((want - std::f64::consts::FRAC_PI_2).abs() < 1e-9, "due +y");
+    }
+
+    /// A stop is not an order to face forwards: 0x431870 writes the heading
+    /// **from the gob's own yaw**, so a walker halted mid-turn keeps looking
+    /// where it looks.
+    #[test]
+    fn stopping_a_walker_keeps_the_way_it_is_already_looking() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "points.wp = {x = 0, y = 10, z = 0, f = 0}\n\
+                 mdkRegisterObject('w', OBJ_NONE, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkWalkerGotoPoint(w, 'wp', 1, 0, 0, 0)\n\
+                 mdkWalkerStop(w)",
+            )
+            .exec()
+            .unwrap();
+        let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
+        assert_eq!(boot.gait["w"], 0);
+        // the goto had asked for +y; the stop replaced that with the gob's
+        // own facing, which is still +x
+        assert!(boot.heading["w"].abs() < 1e-9, "{}", boot.heading["w"]);
     }
 
     /// What the binding leaves behind: the arc, the heading, and a gob that
