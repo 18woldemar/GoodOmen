@@ -2144,11 +2144,18 @@ impl Ticking {
         let Ok(handler) = gob.get::<mlua::Function>(slot) else { return };
         let entry = self.fired.entry(slot.to_string()).or_insert((0, 0));
         entry.0 += 1;
-        if handler
-            .call::<Value>((gob.clone(), gob.clone(), 1, DAMAGE_GOODGUY, 1))
-            .is_ok()
-        {
-            entry.1 += 1;
+        match handler.call::<Value>((gob.clone(), gob.clone(), 1, DAMAGE_GOODGUY, 1)) {
+            Ok(_) => entry.1 += 1,
+            // **With** its position, unlike a boot's grouping. A boot fires
+            // every handler once and twenty scripts share one fault, so the
+            // position is noise there; a run fires the same few handlers
+            // every tick, so a count of 900 means *one* handler failing 900
+            // times and the line number is the whole answer.
+            Err(e) => {
+                let text = e.to_string();
+                let line = text.lines().next().unwrap_or("").trim().to_string();
+                *self.why.entry(line).or_insert(0) += 1;
+            }
         }
     }
 
