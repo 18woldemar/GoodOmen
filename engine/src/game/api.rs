@@ -2334,7 +2334,17 @@ pub fn tick_touching(
     // The clock has to be written first: `ScriptUpdate` opens with
     // `chGetDeltaT()` and every wait in every cutscene counts down by it.
     boot_mut(&scripts.lua)?.delta = dt;
-    let running: Vec<String> = boot_ref(&scripts.lua)?.scripted.iter().cloned().collect();
+    // **and not while in stasis.** 0x46d505 tests bit 3 of `gob + 0xa6` —
+    // the bit `omGobEnterStasis` sets (0x46e329) — and skips the object's
+    // *whole* update, the `ScriptUpdate` call at 0x46d5b1 included. That is
+    // exactly why `StopScript`'s `omGobIsStasis(self) == 0` guard is safe in
+    // the original: a script that ends while its object is frozen simply
+    // stops being ticked, so the flag it could not clear never matters.
+    // Without this, level 9 walked off the end of a task list 897 times.
+    let running: Vec<String> = {
+        let boot = boot_ref(&scripts.lua)?;
+        boot.scripted.iter().filter(|n| !boot.stasis.contains(*n)).cloned().collect()
+    };
     if !running.is_empty() {
         if let Ok(update) = globals.get::<mlua::Function>("ScriptUpdate") {
             for name in running {
