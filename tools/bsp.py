@@ -105,6 +105,57 @@ def contains(nodes: list, point) -> bool:
         i = child
 
 
+def crosses(nodes: list, a, b) -> bool:
+    """Does the segment a->b pass through solid geometry? Model coordinates.
+
+    The same descent as `contains`, split at the plane crossings instead of
+    following one side: when the two ends fall on opposite sides of a node's
+    plane the segment is cut there and both halves are tested. That makes it
+    *exact for the tree* rather than a sampling of it -- a wall thinner than
+    any step size still stops it.
+
+    The leaf convention is `contains`'s: reaching a leaf on the front side
+    (`side >= 0`) is solid, on the back side it is empty.
+
+    What the original does at 0x471dc0 is not this -- it is a query against
+    the engine's own world structure, reached from `mdkAILineOfSight`
+    (0x402950) after the field-of-view test. The trees are the same trees, so
+    this answers the same question; whether it answers it identically in every
+    corner is not claimed.
+
+    Iterative rather than recursive, like `contains`: the deepest tree in the
+    game is `l4_r9.bsp` at 107, so recursion would in fact be safe, but a
+    split pushes *two* halves and the branching is what would grow.
+    """
+    stack = [(0, tuple(a), tuple(b))]
+    while stack:
+        i, p, q = stack.pop()
+        (nx, ny, nz), dist, front, back = nodes[i]
+        dp = nx * -p[0] + ny * -p[1] + nz * -p[2] - dist
+        dq = nx * -q[0] + ny * -q[1] + nz * -q[2] - dist
+        if dp >= 0 and dq >= 0:
+            if front == LEAF:
+                return True
+            stack.append((front, p, q))
+        elif dp < 0 and dq < 0:
+            if back != LEAF:
+                stack.append((back, p, q))
+        else:
+            # the split point, on the plane
+            t = dp / (dp - dq)
+            m = tuple(p[c] + (q[c] - p[c]) * t for c in range(3))
+            # whichever half lies on the front side is the one that can be
+            # solid, and it is the first half when p is in front
+            fp, fq = (p, m) if dp >= 0 else (m, q)
+            bp, bq = (m, q) if dp >= 0 else (p, m)
+            if front == LEAF:
+                return True
+            stack.append((front, fp, fq))
+            if back != LEAF:
+                stack.append((back, bp, bq))
+    return False
+
+
 def drop(nodes: list, point, floor: float, step: float = 0.25):
     """Lower the point along -Z until it enters solid. -> z of contact, or None.
 
@@ -164,9 +215,16 @@ def digest(files: list[Path]) -> int:
     for f in sorted(files, key=lambda p: p.name.lower()):
         nodes = parse(f.read_bytes())
         validate(nodes)
-        answers = bytes(contains(nodes, p) for p in probe_points(nodes))
+        points = probe_points(nodes)
+        answers = bytes(contains(nodes, p) for p in points)
+        # and the same points taken in consecutive pairs as segments, which
+        # is what `crosses` is asked -- a line that starts on one plane and
+        # ends on another crosses every boundary the tree has
+        blocked = bytes(crosses(nodes, points[i], points[i + 1])
+                        for i in range(len(points) - 1))
         print(f"{f.name.lower()} {len(nodes)} {depth(nodes)} "
-              f"{sum(answers)} {zlib.crc32(answers):08x}")
+              f"{sum(answers)} {zlib.crc32(answers):08x} "
+              f"{sum(blocked)} {zlib.crc32(blocked):08x}")
     print(f"{len(files)} trees", file=sys.stderr)
     return 0
 
@@ -176,7 +234,9 @@ def compare(files: list[Path], gamedir: str) -> int:
 
     Not just the same parse: the `inside` answers come from points that lie
     exactly on the planes, so the `>= 0` boundary -- the one thing in this
-    format that can be quietly wrong -- is what is being compared.
+    format that can be quietly wrong -- is what is being compared. The second
+    pair of numbers is `crosses` over the same points taken as consecutive
+    segments, which walks the split path rather than one side of it.
     """
     import subprocess
     import zlib
@@ -188,17 +248,22 @@ def compare(files: list[Path], gamedir: str) -> int:
     theirs = {}
     for line in out.splitlines():
         f = line.split()
-        if len(f) == 5:
-            theirs[f[0]] = (int(f[1]), int(f[2]), int(f[3]), f[4])
+        if len(f) == 7:
+            theirs[f[0]] = (int(f[1]), int(f[2]), int(f[3]), f[4],
+                            int(f[5]), f[6])
 
     bad = []
     for f in files:
         name = f.name.lower()
         nodes = parse(f.read_bytes())
         validate(nodes)
-        answers = bytes(contains(nodes, p) for p in probe_points(nodes))
+        points = probe_points(nodes)
+        answers = bytes(contains(nodes, p) for p in points)
+        blocked = bytes(crosses(nodes, points[i], points[i + 1])
+                        for i in range(len(points) - 1))
         mine = (len(nodes), depth(nodes), sum(answers),
-                f"{zlib.crc32(answers):08x}")
+                f"{zlib.crc32(answers):08x}",
+                sum(blocked), f"{zlib.crc32(blocked):08x}")
         if theirs.get(name) != mine:
             bad.append(f"{name}: {mine} against the engine's "
                        f"{theirs.get(name)}")

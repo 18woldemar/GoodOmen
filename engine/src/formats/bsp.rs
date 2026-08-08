@@ -154,6 +154,63 @@ impl Bsp {
         }
     }
 
+    /// Does the segment `a`→`b` pass through solid geometry?
+    ///
+    /// The same descent as [`Bsp::contains`], split at the plane crossings
+    /// instead of following one side: where the ends fall on opposite sides
+    /// of a node's plane the segment is cut there and both halves are tested.
+    /// That makes it **exact for the tree** rather than a sampling of it — a
+    /// wall thinner than any step size still stops it, which is the whole
+    /// reason a line of sight cannot be done by marching points.
+    ///
+    /// The leaf convention is `contains`'s: a leaf reached on the front side
+    /// is solid, on the back side it is empty. Coordinates are negated the
+    /// same way and for the same reason.
+    ///
+    /// The original's own occlusion test (0x471dc0, reached from
+    /// `mdkAILineOfSight` at 0x402950 after the field-of-view check) is a
+    /// query against its world structure rather than this traversal. The
+    /// trees are the same trees, so the question is the same; identical
+    /// answers in every corner are **not** claimed.
+    pub fn crosses(&self, a: [f64; 3], b: [f64; 3]) -> bool {
+        let plane = |n: &Node, p: [f64; 3]| {
+            n.normal[0] as f64 * -p[0]
+                + n.normal[1] as f64 * -p[1]
+                + n.normal[2] as f64 * -p[2]
+                - n.dist as f64
+        };
+        let mut stack = vec![(0usize, a, b)];
+        while let Some((i, p, q)) = stack.pop() {
+            let node = self.nodes[i];
+            let (dp, dq) = (plane(&node, p), plane(&node, q));
+            if dp >= 0.0 && dq >= 0.0 {
+                if node.front == LEAF {
+                    return true;
+                }
+                stack.push((node.front as usize, p, q));
+            } else if dp < 0.0 && dq < 0.0 {
+                if node.back != LEAF {
+                    stack.push((node.back as usize, p, q));
+                }
+            } else {
+                let t = dp / (dp - dq);
+                let m = [0, 1, 2].map(|c| p[c] + (q[c] - p[c]) * t);
+                // whichever half lies on the front side is the one that can
+                // be solid, and it is the first half when p is in front
+                let (fp, fq) = if dp >= 0.0 { (p, m) } else { (m, q) };
+                let (bp, bq) = if dp >= 0.0 { (m, q) } else { (p, m) };
+                if node.front == LEAF {
+                    return true;
+                }
+                stack.push((node.front as usize, fp, fq));
+                if node.back != LEAF {
+                    stack.push((node.back as usize, bp, bq));
+                }
+            }
+        }
+        false
+    }
+
     /// Deepest path from the root, iteratively — these trees get deep enough
     /// that recursion is a real risk.
     pub fn depth(&self) -> usize {
@@ -196,6 +253,26 @@ mod tests {
         // the point is negated, so it is +z that lands behind the plane
         assert!(bsp.contains([0.0, 0.0, -1.0]));
         assert!(!bsp.contains([0.0, 0.0, 1.0]));
+    }
+
+    /// The point about a segment query is that it does not sample: a plane
+    /// has no thickness at all, and no number of probe points along the line
+    /// would ever land on it, yet a line straight through must be stopped.
+    #[test]
+    fn a_segment_crosses_a_plane_that_no_sample_would_land_on() {
+        let bsp = Bsp::parse(&one_plane()).unwrap();
+        // -z is the solid side once the negation is applied, so this line
+        // starts in the open and ends in solid
+        assert!(bsp.crosses([0.0, 0.0, 1.0], [0.0, 0.0, -1.0]));
+        assert!(bsp.crosses([0.0, 0.0, -1.0], [0.0, 0.0, 1.0]), "and the other way");
+        // wholly on the open side, however far it runs
+        assert!(!bsp.crosses([-500.0, 0.0, 1.0], [500.0, 0.0, 1.0]));
+        // wholly inside is still solid
+        assert!(bsp.crosses([-500.0, 0.0, -1.0], [500.0, 0.0, -1.0]));
+        // and a segment that only touches the plane counts, because the leaf
+        // convention is `side >= 0` and `contains` says the same of a point
+        assert!(bsp.crosses([0.0, 0.0, 1.0], [0.0, 0.0, 0.0]));
+        assert_eq!(bsp.contains([0.0, 0.0, 0.0]), true, "the boundary is solid for both");
     }
 
     #[test]

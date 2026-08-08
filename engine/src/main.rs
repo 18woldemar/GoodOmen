@@ -1942,19 +1942,26 @@ fn collision(install: &mut Install, list: bool) -> usize {
             eprintln!("goodomen: {name}: {e}");
             std::process::exit(1);
         }
-        let answers: Vec<u8> = probe_points(&bsp)
-            .into_iter()
-            .map(|p| bsp.contains(p) as u8)
+        let points = probe_points(&bsp);
+        let answers: Vec<u8> = points.iter().map(|&p| bsp.contains(p) as u8).collect();
+        // and the same points in consecutive pairs as segments, which is what
+        // `crosses` is asked: a line from one plane to another crosses every
+        // boundary the tree has
+        let blocked: Vec<u8> = points
+            .windows(2)
+            .map(|w| bsp.crosses(w[0], w[1]) as u8)
             .collect();
         nodes += bsp.nodes.len();
         deepest = deepest.max(bsp.depth());
         if list {
             println!(
-                "{name} {} {} {} {:08x}",
+                "{name} {} {} {} {:08x} {} {:08x}",
                 bsp.nodes.len(),
                 bsp.depth(),
                 answers.iter().map(|&a| a as usize).sum::<usize>(),
-                crc32(&answers)
+                crc32(&answers),
+                blocked.iter().map(|&b| b as usize).sum::<usize>(),
+                crc32(&blocked)
             );
         }
     }

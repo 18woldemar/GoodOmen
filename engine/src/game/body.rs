@@ -151,6 +151,24 @@ impl Collision {
         self.at([p[0], p[1], p[2] - EYE - 0.05])
     }
 
+    /// Is there anything solid between the two points?
+    ///
+    /// The first query in this engine that is a **line** rather than a point.
+    /// Every collision test until now sampled positions, which cannot see a
+    /// wall thinner than the sample spacing; [`Bsp::crosses`] splits at the
+    /// planes instead, so this is exact for the trees.
+    ///
+    /// The box test in front of it is a conservative reject — a tree whose
+    /// box does not overlap the segment's own box cannot be crossed — so it
+    /// only ever saves work.
+    pub fn sees(&self, a: [f64; 3], b: [f64; 3]) -> bool {
+        let lo = [0, 1, 2].map(|c| a[c].min(b[c]));
+        let hi = [0, 1, 2].map(|c| a[c].max(b[c]));
+        !self.trees.iter().any(|t| {
+            (0..3).all(|c| hi[c] >= t.lo[c] && lo[c] <= t.hi[c]) && t.bsp.crosses(a, b)
+        })
+    }
+
     /// Only the body above step height stops it; below is a kerb to walk over.
     pub fn blocked(&self, p: [f64; 3]) -> bool {
         let mut h = STEP;
