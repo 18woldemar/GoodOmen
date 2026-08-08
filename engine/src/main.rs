@@ -909,6 +909,51 @@ fn replay(
 /// The input is the game's own recording where there is one — `demoN_CP.omn`
 /// — and forwards otherwise, which is `tools/walksim.py`'s blunt measure and
 /// good enough to cross rooms.
+
+/// Fill `Boot::keys` from the models the level's objects wear.
+///
+/// A model's key channel is target kind **23** and its values are codes, not
+/// geometry — the animation is where an enemy's shot comes from. The arena has
+/// no models, so this is where the two meet: the driver has the install open,
+/// reads the `.mod` of every type on the level once, and hands the engine a
+/// flat `(animation, time, code)` list per model.
+fn load_animation_keys(install: &mut Install, scripts: &Scripts) -> usize {
+    use goodomen::formats::model::Model;
+    use goodomen::game::{api, world};
+    let wanted: std::collections::BTreeSet<String> = {
+        let Some(w) = world::world(&scripts.lua) else { return 0 };
+        w.iter()
+            .filter_map(|(_, g)| api::model_for_type(g.kind))
+            .collect()
+    };
+    let mut found = 0;
+    let mut keys = std::collections::BTreeMap::new();
+    for name in wanted {
+        let Ok(bytes) = install.read(&format!("{name}.mod")) else { continue };
+        let Ok(model) = Model::parse(&bytes) else { continue };
+        let mut list = Vec::new();
+        for anim in &model.animations {
+            for channel in &anim.channels {
+                if channel.kind != 23 {
+                    continue;
+                }
+                for &(at, index) in &channel.keys {
+                    let code = model.value(index)[0] as f32;
+                    list.push((anim.id as f64, at as f64, f32::to_bits(code) as f64));
+                }
+            }
+        }
+        if !list.is_empty() {
+            found += list.len();
+            keys.insert(name, list);
+        }
+    }
+    if let Some(mut boot) = scripts.lua.app_data_mut::<api::Boot>() {
+        boot.keys = keys;
+    }
+    found
+}
+
 fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Result<String, String> {
     use goodomen::formats::omn;
     use goodomen::game::api;
@@ -941,6 +986,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     let mdk2 = sources.get("mdk2.lua").ok_or("no mdk2.lua")?;
     scripts.run("mdk2.lua", mdk2).map_err(|e| e.to_string())?;
     api::level(&scripts, number, checkpoint, "sectionA").map_err(|e| e.to_string())?;
+    let anim_keys = load_animation_keys(&mut install, &scripts);
 
     let (rooms, collision, spawn) = {
         let boot = scripts.lua.app_data_ref::<api::Boot>().ok_or("no boot state")?;
@@ -1043,7 +1089,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     }
 
     // what the scripts actually did to the world while it ran
-    let (moved, playing, what, fired_sounds, spawned, jumped, shots, landed) = {
+    let (moved, playing, what, fired_sounds, spawned, jumped, shots, landed, struck) = {
         let w = world::world(&scripts.lua).expect("a world");
         let boot = scripts.lua.app_data_ref::<api::Boot>().expect("boot state");
         let what: Vec<String> = boot
@@ -1054,7 +1100,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         // what the run asked to be heard: `omGobGSPlay` calls that reached a
         // sound the scripts had hung on an object
         let sounds: usize = boot.gob_sounds.iter().map(|g| g.played).sum();
-        (w.generation(), boot.playing.len(), what, sounds, boot.spawned.len(), boot.jumped, boot.fired, boot.hits)
+        (w.generation(), boot.playing.len(), what, sounds, boot.spawned.len(), boot.jumped, boot.fired, boot.hits, boot.keys_fired)
     };
     let (fired, survived) = state.total();
     let mut stopped: Vec<(&String, &usize)> = state.why.iter().collect();
@@ -1078,6 +1124,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         ("walkers launched", jumped, expect_flag("--expect-jumps")),
         ("shots fired", shots, expect_flag("--expect-shots")),
         ("shots that hit", landed, expect_flag("--expect-hits")),
+        ("animation keys", struck, expect_flag("--expect-keys")),
     ] {
         if let Some(want) = want {
             if got != want {
@@ -1092,6 +1139,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
          {moved} object moves, {playing} animations chosen, \
          {fired_sounds} sounds fired, {spawned} objects spawned, \
          {jumped} walkers launched, {shots} shots fired ({landed} hit), \
+         {anim_keys} keys in {struck} struck, \
          {} objects touched and {} of them \
          scripted{}{} [{}]{}",
         if recorded { "the game's own recorded" } else { "held-forwards" },

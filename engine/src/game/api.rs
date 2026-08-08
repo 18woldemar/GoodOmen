@@ -325,6 +325,26 @@ pub struct Boot {
     /// because the scripts create them with `mdkCreateObjectLua("", ...)` and
     /// a bullet has none.
     pub shots: BTreeMap<world::Id, Shot>,
+    /// How long each object's current animation has been playing. Reset by
+    /// `omAnimPlay`, advanced by the tick, and read against [`Boot::keys`].
+    pub since: BTreeMap<String, f64>,
+    /// **The animation keys**, by model name: `(animation, time, code)`.
+    /// A channel whose target kind is 23 carries no geometry — its values are
+    /// key codes, and 0x42bf80 splits them four ways:
+    ///
+    /// | code | what |
+    /// |---|---|
+    /// | >= 100 | create an object of that `OBJ_*` type |
+    /// | 30..99 | `ScreenFlash(code - 29)` |
+    /// | 20..29 | `Earthquake(code - 19)` |
+    /// | 1..19 | `OnCustomKey(gob, slot, code)` |
+    ///
+    /// The first line is where an enemy's shot comes from: `hans.mod`
+    /// animation 56 carries **421** at t = 0.513 and 421 is `hansshot`.
+    /// Filled by whoever has the models — the arena does not.
+    pub keys: BTreeMap<String, Vec<(f64, f64, f64)>>,
+    /// Keys that have fired, counted so a run can be held to a number.
+    pub keys_fired: usize,
     /// How many shots a run has fired, since `shots` only holds the live ones.
     pub fired: usize,
     /// How many of them hit something that took damage.
@@ -1320,7 +1340,9 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         lua.create_function(|lua, args: Variadic<Value>| {
             if let Some(name) = args.first().and_then(gob_name) {
                 let id = args.get(1).map(number).unwrap_or(0.0);
-                boot_mut(lua)?.playing.insert(name, id);
+                let mut boot = boot_mut(lua)?;
+                boot.playing.insert(name.clone(), id);
+                boot.since.insert(name, 0.0);
             }
             Ok(())
         })?,
@@ -2200,6 +2222,40 @@ fn spawn(lua: &Lua, spawner: &str) -> mlua::Result<Option<mlua::Table>> {
     Ok(Some(made))
 }
 
+/// An animation key of 100 or more **creates an object of that type** at the
+/// object playing it (0x42c02e). When the type is one the shot table names,
+/// the new object is a projectile and it leaves along the shooter's own yaw —
+/// which is ours; the original gives it the muzzle node's orientation.
+fn fire_key_object(scripts: &Scripts, who: &str, kind: f64) -> Result<(), Error> {
+    let lua = &scripts.lua;
+    let Some((at, yaw)) = stance(lua, who) else { return Ok(()) };
+    let Some((_, filter, damage, life, speed)) = crate::game::world::bullet(kind) else {
+        return Ok(()); // an effect or a prop, and the engine has nowhere to put it
+    };
+    let name = format!("{who}_key{}", kind as i64);
+    let id = {
+        let Some(mut w) = world::world_mut(lua) else { return Ok(()) };
+        w.register(Gob { name: name.clone(), kind, position: at, ..Gob::default() })
+    };
+    world::handle(lua, &name, id, at)?;
+    let mut boot = boot_mut(lua)?;
+    boot.shots.insert(
+        id,
+        Shot {
+            kind,
+            direction: [yaw.cos(), yaw.sin(), 0.0],
+            speed,
+            life: if life < 0.0 { f64::INFINITY } else { life },
+            damage,
+            filter,
+            shooter: Some(who.to_string()),
+            target: None,
+        },
+    );
+    boot.fired += 1;
+    Ok(())
+}
+
 /// A gob's name, from the table the scripts hold it by.
 /// How near a heading counts as facing it, from the double at 0x490198.
 /// Three walker functions share the constant and the angle-wrap idiom around
@@ -2858,6 +2914,63 @@ pub fn tick_touching(
         }
     }
 
+    // the animation clock, and the keys it passes.
+    //
+    // A key channel is target kind **23** in the model, its values are codes,
+    // and 0x478ad8 hands each one to 0x42bf80 as the animation reaches it.
+    // The split is that function's: **>= 100 creates an object of that type**,
+    // 30..99 a screen flash, 20..29 an earthquake, 1..19 `OnCustomKey`. See
+    // [`Boot::keys`].
+    //
+    // ponytail: a created shot flies along the **gob's own yaw**, where the
+    // original launches it with the muzzle node's orientation. The walker aims
+    // its whole body at what it is shooting, so the two agree for a walker and
+    // differ for a turret. Screen flashes and earthquakes are counted and not
+    // shown, because there is no camera to shake.
+    let struck: Vec<(String, f64)> = {
+        let mut boot = boot_mut(&scripts.lua)?;
+        let live: Vec<(String, f64, String)> = {
+            let Some(w) = crate::game::world::world(&scripts.lua) else {
+                return Err(Error::Pragma("no world".into()));
+            };
+            w.iter()
+                .filter(|(_, g)| !g.name.is_empty())
+                .filter_map(|(_, g)| {
+                    Some((g.name.clone(), *boot.playing.get(&g.name)?, model_for_type(g.kind)?))
+                })
+                .collect()
+        };
+        let (mut out, mut advanced) = (Vec::new(), Vec::new());
+        for (name, anim, model) in live {
+            let was = boot.since.get(&name).copied().unwrap_or(0.0);
+            let now = was + dt;
+            if let Some(keys) = boot.keys.get(&model) {
+                for &(a, at, code) in keys {
+                    if a == anim && at > was && at <= now {
+                        out.push((name.clone(), code));
+                    }
+                }
+            }
+            advanced.push((name, now));
+        }
+        for (name, now) in advanced {
+            boot.since.insert(name, now);
+        }
+        out
+    };
+    for (name, code) in struck {
+        boot_mut(&scripts.lua)?.keys_fired += 1;
+        if code >= 100.0 {
+            fire_key_object(scripts, &name, code)?;
+        } else if (1.0..20.0).contains(&code) {
+            if let Ok(gob) = globals.get::<mlua::Table>(name.as_str()) {
+                if let Ok(h) = gob.get::<mlua::Function>("OnCustomKey") {
+                    let _ = h.call::<Value>((gob.clone(), "", code));
+                }
+            }
+        }
+    }
+
     // and the scripted sequences. 0x42bd60 tests bit 0x800000 on each gob
     // and calls the Lua global `ScriptUpdate` for the ones that have it —
     // **not a handler on the object**, a global taking the object, which is
@@ -3135,6 +3248,48 @@ mod tests {
         assert_eq!(health("victim"), full - 25, "a lasershot is worth 25");
         assert_eq!(g.get::<f64>("landed").unwrap(), 430.0, "and the shooter heard it");
         assert!(scripts.lua.app_data_ref::<Boot>().unwrap().shots.is_empty(), "spent");
+    }
+
+    /// **An animation key is where an enemy's shot comes from.** `hans.mod`
+    /// animation 56 carries the code 421 at t = 0.513, and 421 is `hansshot`
+    /// — so a hans playing that animation fires one 0.513 seconds in, and
+    /// exactly once however long it plays.
+    #[test]
+    fn an_animation_key_fires_the_shot_the_model_names() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                // OBJ_HANS is 204 and wears hans.mod, per the enemy table
+                "mdkRegisterObject('h', 204, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 struck = 0\n\
+                 h.OnCustomKey = function(g, slot, code) struck = code end\n\
+                 omAnimPlay(h, 56, 0)",
+            )
+            .exec()
+            .unwrap();
+        {
+            let mut boot = scripts.lua.app_data_mut::<Boot>().unwrap();
+            // what `mod2obj.py --keys` reads out of hans.mod, and one custom
+            // key beside it to show the other half of the split
+            boot.keys.insert("hans".into(), vec![(56.0, 0.513, 421.0), (56.0, 0.6, 12.0)]);
+        }
+        let rooms = Visibility::default();
+        let mut state = Ticking::default();
+        for _ in 0..30 {
+            tick(&scripts, &rooms, [0.0, 0.0, 0.0], 0.0, 1.0 / 30.0, &mut state).unwrap();
+        }
+        let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
+        assert_eq!(boot.keys_fired, 2, "one shot and one custom key, once each");
+        assert_eq!(boot.fired, 1, "and the shot is a real one");
+        drop(boot);
+        assert_eq!(scripts.lua.globals().get::<f64>("struck").unwrap(), 12.0);
+        // the shot exists, carries hansshot's numbers, and is flying
+        let w = world::world(&scripts.lua).unwrap();
+        let id = w.find("h_key421").expect("the key made a bullet");
+        assert_eq!(w.get(id).unwrap().kind, 421.0);
     }
 
     /// A stop is not an order to face forwards: 0x431870 writes the heading

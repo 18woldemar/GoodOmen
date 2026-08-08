@@ -173,6 +173,7 @@ ENGINE = [
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--run", "7", "1", "30", "--expect-jumps", "2",
+      "--expect-keys", "0",
       "--expect-moves", "2509",
       "--expect-events", "7423", "--expect-survived", "7423"], None),
     # level 10's zizzy turrets shoot: nine bullets in thirty seconds, each one
