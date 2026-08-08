@@ -308,7 +308,8 @@ pub fn table_model(kind: f64) -> Option<&'static str> {
 ///
 /// | offset | what |
 /// |---|---|
-/// | +0x00 | the ready pose — `ANIM_DEFAULT`, `READY1`, `READY3`, `READY5` |
+/// | +0x00 | **the burst**: how many shots in a row (0x4328e6 loads it into
+/// `walker + 0x9c` and state 0 counts it down, one a second) |
 /// | +0x08 | the melee distance |
 /// | +0x1c | the near distance: inside it the thing backs away |
 /// | +0x20 | the far distance |
