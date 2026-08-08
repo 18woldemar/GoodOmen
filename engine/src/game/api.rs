@@ -1035,6 +1035,13 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             let cool = boot.cooldown.get(&who).copied().unwrap_or(0.0);
             // too close and off cooldown: give ground, still facing
             let gait = if dist < near && cool <= 0.0 { 3 } else { 0 };
+            if gait == 3 {
+                /// What giving ground costs, from the float 0x432af4 writes
+                /// into `walker + 0x64` on the way into state 2. Without it a
+                /// crowded walker backs away every single frame.
+                const BACKED_OFF: f64 = 3.0;
+                boot.cooldown.insert(who.clone(), BACKED_OFF);
+            }
             boot.gait.insert(who, gait);
             Ok(0.0)
         })?,
@@ -3403,6 +3410,42 @@ mod tests {
             .unwrap();
         let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
         assert_eq!(boot.gait["d"], 3, "five is inside a doganboy's ten");
+    }
+
+    /// Giving ground is not something a crowded walker does every frame:
+    /// entering state 2 sets the cooldown to **3** (0x432af4), and the state
+    /// refuses to run again until that has expired.
+    #[test]
+    fn giving_ground_costs_three_seconds() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('d', 207, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkRegisterObject('kurt', 100, scene, nil, -1, 0,5,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkSetPlayModeGobs(0, kurt)\n\
+                 mdkDoganboyAttack(d)",
+            )
+            .exec()
+            .unwrap();
+        let state = |s: &Scripts| {
+            let b = s.lua.app_data_ref::<Boot>().unwrap();
+            (b.gait["d"], b.cooldown["d"])
+        };
+        assert_eq!(state(&scripts), (3, 3.0), "give ground, then wait");
+        scripts.lua.load("mdkDoganboyAttack(d)").exec().unwrap();
+        assert_eq!(state(&scripts).0, 0, "still waiting, so it stands");
+        // run the clock out and it may give ground again
+        let rooms = Visibility::default();
+        let mut ticking = Ticking::default();
+        for _ in 0..100 {
+            tick(&scripts, &rooms, [0.0, 0.0, 0.0], 0.0, 1.0 / 30.0, &mut ticking).unwrap();
+        }
+        scripts.lua.load("mdkDoganboyAttack(d)").exec().unwrap();
+        assert_eq!(state(&scripts).0, 3, "three seconds later it may again");
     }
 
     /// A stop is not an order to face forwards: 0x431870 writes the heading
