@@ -124,6 +124,61 @@ def scale(exe: Path, bases: list[int]) -> dict[tuple[float, int], int]:
     return out
 
 
+# The shot table, found the same way the enemy table was: a run of plausible
+# `OBJ_*` ids at a fixed stride. 69 records of 0x58, and `mdkBullet.c` --
+# whose path string sits at 0x498f1c -- reads every field kept here.
+SHOTS = 0x00497388
+SHOT_STRIDE = 0x58
+SHOT_COLUMNS = ((0x04, "<i"), (0x08, "<i"), (0x20, "<f"), (0x2C, "<f"))
+
+
+def bullets(args) -> int:
+    """Compare the engine's shot table against the binary's, column by column."""
+    secs = _sections(args.exe)
+    want = []
+    i = 0
+    while True:
+        r = _read(secs, SHOTS + i * SHOT_STRIDE, SHOT_STRIDE)
+        key = struct.unpack_from("<I", r, 0)[0]
+        if not 100 <= key <= 999:
+            break
+        model = _read(secs, struct.unpack_from("<I", r, 0x30)[0], 40)
+        row = [str(key), model.split(b"\0")[0].decode("latin1")]
+        for off, fmt in SHOT_COLUMNS:
+            v = struct.unpack_from(fmt, r, off)[0]
+            row.append("%g" % v)
+        want.append(row)
+        i += 1
+
+    if not args.engine:
+        print("type model damage_type damage life speed")
+        for row in want:
+            print(" ".join(row))
+        return 0
+
+    out = subprocess.run(
+        ["cargo", "run", "--quiet", "--release", "--manifest-path",
+         str(Path(__file__).resolve().parent.parent / "engine/Cargo.toml"),
+         "--", "--bullets"],
+        capture_output=True, text=True, check=True).stdout
+    got = [l.split() for l in out.strip().splitlines() if l.strip()]
+    if got != want:
+        for i, (a, b) in enumerate(zip(got, want)):
+            if a != b:
+                print(f"MISMATCH at shot {i}: the engine says {a}, "
+                      f"the original {b}", file=sys.stderr)
+                break
+        print(f"{len(want)} shots from the binary, {len(got)} from the engine, "
+              "and they differ", file=sys.stderr)
+        return 1
+    hardest = max(want, key=lambda r: int(r[3]))
+    fastest = max(want, key=lambda r: float(r[5]))
+    print(f"{len(want)} shot types, 4 columns each, identical to the original "
+          f"({hardest[1]} {hardest[3]} damage and {fastest[1]} "
+          f"{fastest[5]} a second the most)", file=sys.stderr)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     # positional, because `check.py` decides whether a tool can run by asking
@@ -131,6 +186,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("exe", type=Path, nargs="?",
                     default=Path(os.environ.get("MDK2_GOG", ".")) / "mdk2Main.exe",
                     help="mdk2Main.exe (GOG)")
+    ap.add_argument("--bullets", action="store_true",
+                    help="the shot table at 0x497388 instead of the enemy "
+                         "table, and compare that")
     ap.add_argument("--engine", action="store_true",
                     help="compare the engine's own table against this one")
     args = ap.parse_args(argv)
@@ -138,6 +196,9 @@ def main(argv: list[str] | None = None) -> int:
     if not args.exe.is_file():
         print(f"skip: no {args.exe}", file=sys.stderr)
         return 0
+
+    if args.bullets:
+        return bullets(args)
 
     rows = table(args.exe)
     # bases too small for the doubling to survive truncation. The table has no

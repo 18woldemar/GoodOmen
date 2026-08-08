@@ -120,6 +120,106 @@ pub const BASE_HITPOINTS: [(f64, &str, i32); 19] = [
     (260.0, "zizzy", 2000), // OBJ_ZIZZY
 ];
 
+
+/// **The shot table**, at 0x497388: 69 records of 0x58 bytes, in the same
+/// shape as the enemy table and found the same way — a run of plausible
+/// `OBJ_*` ids at a fixed stride. `mdkBullet.c` (the path is at 0x498f1c) is
+/// where every one of these fields is read, and the columns kept here are the
+/// ones it uses:
+///
+/// | offset | what |
+/// |---|---|
+/// | +0x00 | the `OBJ_*` type |
+/// | +0x04 | the `DAMAGE_*` mask — 1 goodguy, 2 badguy, +1024 knockdown |
+/// | +0x08 | the damage |
+/// | +0x20 | the lifetime in seconds, -1 for none (0x403d94 reads it) |
+/// | +0x2c | the speed (0x4039f4 divides a distance by it) |
+/// | +0x30 | the model name |
+/// | +0x4c | how much the shot leads a moving target |
+/// | +0x54 | flags: 0x40 fixed heading, 0x400 aim at the gob, 0x800 at the player |
+///
+/// The numbers read like a weapon list should: `sniperbullet` is 25 damage at
+/// 300 units a second and lives 6, `grenade` is 10 at 25 and lives 30,
+/// `lasershot` 25 at 90 and lives **1**. `tools/health.py --bullets` reads
+/// the same six columns out of the binary and `check.py` holds this literal
+/// to them.
+pub const BULLET: [(f64, &str, i16, i16, f64, f64); 69] = [
+    (400.0, "bifshot", 1026, 5, 5.0, 60.0),
+    (404.0, "birdshot", 2, 3, 4.0, 60.0),
+    (420.0, "rpmissl", 2, 5, 30.0, 20.0),
+    (417.0, "dbgrenade", 1026, 10, 30.0, 20.0),
+    (403.0, "dboy1shot", 2, 2, 4.0, 40.0),
+    (423.0, "pdboy1shot", 2, 4, 4.0, 40.0),
+    (412.0, "powergenshot", 1026, 5, 5.0, 60.0),
+    (421.0, "hansshot", 1026, 3, 4.0, 60.0),
+    (435.0, "badmaxshot1", 2, 8, 4.0, 70.0),
+    (441.0, "badmaxshot2", 3, 5, 5.0, 60.0),
+    (427.0, "gruntshot", 2, 2, 4.0, 40.0),
+    (425.0, "udboy1shot", 1026, 10, 4.0, 100.0),
+    (432.0, "udboy2shot", 1027, 5, 5.0, 60.0),
+    (428.0, "hosershot", 2, 2, 4.0, 40.0),
+    (413.0, "turshot01", 2, 2, 4.0, 60.0),
+    (419.0, "turshot02", 2, 1, 4.0, 60.0),
+    (452.0, "turshot03", 2, 2, 4.0, 60.0),
+    (453.0, "turshot04", 2, 2, 4.0, 500.0),
+    (454.0, "turshot04", 2, 2, 4.0, 500.0),
+    (455.0, "turshot06", 2, 10, 10.0, 90.0),
+    (456.0, "grmissl", 0, 0, 5.0, 35.0),
+    (457.0, "turshot01", 2, 2, 4.0, 60.0),
+    (458.0, "turshot09", 2, 2, 4.0, 70.0),
+    (459.0, "turshot10", 2, 10, 5.0, 80.0),
+    (460.0, "turshot11", 2, 10, 5.0, 80.0),
+    (461.0, "turshot12", 2, 10, 5.0, 80.0),
+    (462.0, "turshot13", 2, 5, 5.0, 160.0),
+    (463.0, "turshot14", 2, 10, 5.0, 80.0),
+    (464.0, "turshot15", 2, 10, 5.0, 80.0),
+    (465.0, "turshot16", 2, 10, 5.0, 80.0),
+    (466.0, "turshot17", 2, 10, 5.0, 80.0),
+    (467.0, "turshot18", 2, 10, 5.0, 80.0),
+    (468.0, "turshot19", 2, 10, 5.0, 80.0),
+    (469.0, "turshot20", 2, 10, 5.0, 80.0),
+    (416.0, "toast_missle", 1, 15, 10.0, 50.0),
+    (422.0, "blackhole", 1, 0, 30.0, 25.0),
+    (405.0, "grenade", 1027, 10, 30.0, 25.0),
+    (424.0, "decoygrenade", 0, 0, 30.0, 25.0),
+    (401.0, "grmissl", 1027, 12, 30.0, 20.0),
+    (418.0, "moltov", 1025, 12, 30.0, 25.0),
+    (414.0, "rpmissl", 3, 6, 10.0, 20.0),
+    (415.0, "toast_flop", 1, 0, 30.0, 25.0),
+    (406.0, "sniperbullet", 1, 25, 6.0, 300.0),
+    (407.0, "snipergrenade", 1027, 40, 6.0, 200.0),
+    (408.0, "sniperhoming", 1025, 60, 30.0, 100.0),
+    (411.0, "snipermortar", 1027, 20, 30.0, 50.0),
+    (410.0, "sniperbounce", 1027, 20, 30.0, 60.0),
+    (430.0, "lasershot", 1, 25, 1.0, 90.0),
+    (431.0, "lasershot2", 1, 40, 1.0, 90.0),
+    (433.0, "toastbaguette", 1, 50, 30.0, 50.0),
+    (436.0, "toastpumper", 1027, 20, 30.0, 50.0),
+    (434.0, "bfbshot", 2, 4, 4.0, 40.0),
+    (437.0, "sniperlock", 0, 0, -1.0, 20.0),
+    (451.0, "sniperlock", 0, 0, -1.0, 25.0),
+    (438.0, "bfbshotseek", 0, 0, 30.0, 0.0),
+    (439.0, "bfbshotseek2", 1026, 5, 30.0, 30.0),
+    (444.0, "bfbshotseekb", 0, 0, 30.0, 0.0),
+    (445.0, "bfbshotseek2b", 1026, 5, 30.0, 30.0),
+    (440.0, "bfbshotpsi", 0, 0, 30.0, 0.0),
+    (446.0, "bfbbomb", 1026, 20, 30.0, 20.0),
+    (442.0, "turshot11", 2, 2, 4.0, 120.0),
+    (443.0, "turshot10", 2, 3, 30.0, 80.0),
+    (447.0, "zizshot01", 1026, 15, 30.0, 70.0),
+    (448.0, "zizbub", 0, 0, 600.0, 40.0),
+    (449.0, "zizshot03", 2, 5, 4.0, 200.0),
+    (450.0, "bilebelch", 1026, 5, 10.0, 25.0),
+    (480.0, "zizeye", 0, 0, -1.0, 1.0),
+    (481.0, "gastricjuice", 2, 4, 4.0, 30.0),
+    (482.0, "zizbrain", 1026, 5, 30.0, 30.0),
+];
+
+/// What a shot of this type does, if the table names it.
+pub fn bullet(kind: f64) -> Option<(&'static str, i16, i16, f64, f64)> {
+    BULLET.iter().find(|(k, ..)| *k == kind).map(|(_, m, f, d, l, s)| (*m, *f, *d, *l, *s))
+}
+
 /// The base hitpoints for a type, if it is one the table names.
 pub fn base_hitpoints(kind: f64) -> Option<i32> {
     BASE_HITPOINTS.iter().find(|(k, _, _)| *k == kind).map(|(_, _, hp)| *hp)

@@ -155,15 +155,23 @@ ENGINE = [
     # level 7's task lists jump the sniper pilots onto their perches
     # (`{ mdkWalkerJumpToPoint, { "l7r6pilot12", 50 } }`), which is the first
     # thing in the game that moves a gob the player is not standing in.
-    # ...and its walkers walk: 1729 object moves against the 901 a run makes
+    # ...and its walkers walk and its shots fly: 2509 object moves against the 901 a run makes
     # when only the player is moving, all of it non-player gobs turning toward
     # a waypoint and running at their own type's speed out of 0x4ab2e8.
     ("a run launches a walker along the arc the original solves for",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--run", "7", "1", "30", "--expect-jumps", "2",
-      "--expect-moves", "1729",
+      "--expect-moves", "2509",
       "--expect-events", "7423", "--expect-survived", "7423"], None),
+    # level 10's zizzy turrets shoot: nine bullets in thirty seconds, each one
+    # carrying its damage, damage type, lifetime and speed out of the shot
+    # table at 0x497388 rather than out of the call.
+    ("a run fires shots that carry the table's own numbers",
+     ["cargo", "run", "--quiet", "--release",
+      "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
+      "--run", "10", "1", "30", "--expect-shots", "9",
+      "--expect-events", "2751", "--expect-survived", "2751"], None),
     ("walking drives the player's own animation, and reaches the scripts",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
@@ -196,6 +204,8 @@ SLOW = [
       "--count", "2000"], None),
     ("the enemy health table is the original's",
      ["health.py", "$MDK2_GOG/mdk2Main.exe", "--engine"], None),
+    ("the shot table is the original's",
+     ["health.py", "$MDK2_GOG/mdk2Main.exe", "--bullets", "--engine"], None),
     ("the controller walks every level",
      ["walksim.py", "extracted/base", "--resources", "extracted", "--all",
       "--expect-standing", "2556", "--expect-inside", "6"], "base"),

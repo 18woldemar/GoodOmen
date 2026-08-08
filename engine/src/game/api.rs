@@ -248,6 +248,24 @@ pub fn launch(from: [f64; 3], to: [f64; 3], apex: f64) -> Launch {
     }
 }
 
+/// A shot in the air, from `mdkShootBullet`. The numbers are the shot
+/// table's own — see [`crate::game::world::BULLET`].
+#[derive(Clone, Debug)]
+pub struct Shot {
+    pub kind: f64,
+    /// Unit vector. `mdkShootBulletLua` takes it as three numbers and 0x403860
+    /// turns them into the bullet's orientation before the launch.
+    pub direction: [f64; 3],
+    pub speed: f64,
+    /// Seconds it has left. -1 in the table means it never times out, and
+    /// 0x403d94 tests that before counting down at all.
+    pub life: f64,
+    pub damage: i16,
+    pub filter: i16,
+    pub shooter: Option<String>,
+    pub target: Option<String>,
+}
+
 /// What a level start asked the engine for.
 #[derive(Default)]
 pub struct Boot {
@@ -303,6 +321,14 @@ pub struct Boot {
     /// the only per-frame reader in the original is `mdkWalkerAnimUpdate`
     /// (0x42f700, at 0x42f872), which is the piece still unread.
     pub gait: BTreeMap<String, i64>,
+    /// Shots in the air, by the arena id of the bullet gob — **not by name**,
+    /// because the scripts create them with `mdkCreateObjectLua("", ...)` and
+    /// a bullet has none.
+    pub shots: BTreeMap<world::Id, Shot>,
+    /// How many shots a run has fired, since `shots` only holds the live ones.
+    pub fired: usize,
+    /// How many of them hit something that took damage.
+    pub hits: usize,
     /// How many launches a run has ordered. `jumps` only holds the ones still
     /// in the air, so it is empty by the time anyone reads it.
     pub jumped: usize,
@@ -928,6 +954,83 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             Ok(1.0)
         })?,
     )?;
+
+    // `mdkShootBulletLua(bullet, shooter, target, x, y, z)` — 0x4414d0 into
+    // 0x403860, which turns `(x, y, z)` into the bullet's orientation and
+    // hands it to **0x4038b0**, the launch. `mdkShootBullet(bullet, shooter,
+    // target, aim)` is 0x441410 into the same place with a gob's orientation
+    // instead of a vector; the engine aims it at that gob.
+    //
+    // What the bullet is worth comes from **the shot table at 0x497388** —
+    // 69 records, damage, damage type, lifetime and speed — and not from the
+    // call, which carries only a direction. See
+    // [`crate::game::world::BULLET`].
+    //
+    // The two events are read rather than guessed, out of 0x404280:
+    // **`OnShotLanded` (12) and `OnShotExploded` (13) both fire on the
+    // shooter**, not on the bullet, and the first only when what was hit is
+    // the gob the shot was aimed at (0x4042e1 compares the ids). `OnShotLanded`
+    // takes the bullet's *type* as a number; `OnShotExploded` takes the type
+    // and then the bullet itself.
+    for name in ["mdkShootBulletLua", "mdkShootBullet"] {
+        let by_vector = name == "mdkShootBulletLua";
+        globals.set(
+            name,
+            lua.create_function(move |lua, args: Variadic<Value>| {
+                let Some(Value::Table(bullet)) = args.first() else { return Ok(0.0) };
+                let Some(id) = world::id_of(bullet) else { return Ok(0.0) };
+                let (kind, at) = {
+                    let Some(w) = world::world(lua) else { return Ok(0.0) };
+                    match w.get(id) {
+                        Some(g) => (g.kind, g.position),
+                        None => return Ok(0.0),
+                    }
+                };
+                let Some((_, filter, damage, life, speed)) = crate::game::world::bullet(kind)
+                else {
+                    return Ok(0.0); // not a shot type, so there is nothing to fly
+                };
+                let target = args.get(2).and_then(gob_name).filter(|n| !n.is_empty());
+                let mut d = if by_vector {
+                    [3, 4, 5].map(|i| args.get(i).map(number).unwrap_or(0.0))
+                } else {
+                    // aimed at a gob: the direction is the way to it
+                    let to = args.get(3).and_then(gob_name).and_then(|n| {
+                        let w = world::world(lua)?;
+                        w.find(&n).and_then(|i| w.get(i)).map(|g| g.position)
+                    });
+                    match to {
+                        Some(p) => [0, 1, 2].map(|c| p[c] - at[c]),
+                        None => [1.0, 0.0, 0.0],
+                    }
+                };
+                let length = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                if length <= 0.0 {
+                    return Ok(0.0);
+                }
+                d = d.map(|c| c / length);
+                let mut boot = boot_mut(lua)?;
+                boot.shots.insert(
+                    id,
+                    Shot {
+                        kind,
+                        direction: d,
+                        speed,
+                        // -1 in the table means it never times out; the
+                        // countdown at 0x403d94 is gated on the field being
+                        // positive at all
+                        life: if life < 0.0 { f64::INFINITY } else { life },
+                        damage,
+                        filter,
+                        shooter: args.get(1).and_then(gob_name),
+                        target,
+                    },
+                );
+                boot.fired += 1;
+                Ok(1.0)
+            })?,
+        )?;
+    }
 
     // `mdkWalkerJumpToPoint(gob, point, apex)` — 0x43f980 into **0x430360**,
     // which is four lines: copy the waypoint into `walker + 0x80`, then call
@@ -2664,6 +2767,89 @@ pub fn tick_touching(
         }
     }
 
+    // the shots. A bullet travels its type's speed along the direction it was
+    // launched with, and it ends one of three ways: it runs out of life
+    // (`life > 0` gates the countdown, 0x403d94), it reaches something it can
+    // hurt, or the level ends with it still going.
+    //
+    // ponytail: no geometry. `Collision::sees` is exactly the query — the
+    // segment against the trees — but the walker's lesson applies here too and
+    // 39 of the game's own waypoints are inside a tree, so a shot that stopped
+    // at the first solid point would die on the muzzle. The hit test is
+    // against **objects that can take damage**, which is what a shot is for.
+    let shots: Vec<(world::Id, [f64; 3], Option<String>, Shot)> = {
+        let mut boot = boot_mut(&scripts.lua)?;
+        let Some(w) = crate::game::world::world(&scripts.lua) else {
+            return Err(Error::Pragma("no world".into()));
+        };
+        /// How near a shot has to pass to count as a hit. Ours: the original
+        /// sweeps the bullet's own hull against the world.
+        const REACH: f64 = 2.0;
+        let mut out = Vec::new();
+        boot.shots.retain(|&id, shot| {
+            let Some(from) = w.get(id).map(|g| g.position) else { return false };
+            let at = [0, 1, 2].map(|c| from[c] + shot.direction[c] * shot.speed * dt);
+            shot.life -= dt;
+            let hit = w
+                .iter()
+                .filter(|(i, g)| *i != id && g.hitpoints > 0 && !g.name.is_empty())
+                .filter(|(_, g)| Some(&g.name) != shot.shooter.as_ref())
+                .find(|(_, g)| {
+                    (0..3).map(|c| (g.position[c] - at[c]).powi(2)).sum::<f64>() < REACH * REACH
+                })
+                .map(|(_, g)| g.name.clone());
+            let alive = hit.is_none() && shot.life > 0.0;
+            out.push((id, at, hit, shot.clone()));
+            alive
+        });
+        out
+    };
+    for (id, at, hit, shot) in shots {
+        if let Some(victim) = &hit {
+            let source = shot
+                .shooter
+                .as_ref()
+                .and_then(|n| globals.get::<mlua::Table>(n.as_str()).ok())
+                .map(Value::Table);
+            if let Ok(v) = globals.get::<mlua::Table>(victim.as_str()) {
+                deal_damage(
+                    &scripts.lua,
+                    source,
+                    Value::Table(v),
+                    shot.damage as i64,
+                    shot.filter as i64,
+                    -1,
+                    true,
+                )?;
+                boot_mut(&scripts.lua)?.hits += 1;
+            }
+        }
+        let over = hit.is_some() || shot.life <= 0.0;
+        if !over {
+            if let Some(mut w) = scripts.lua.app_data_mut::<world::World>() {
+                w.set_position(id, at);
+            }
+            continue;
+        }
+        // both events go to the **shooter**, and the first only when what was
+        // hit is what was aimed at
+        if let Some(shooter) = shot.shooter.as_ref() {
+            if let Ok(gob) = globals.get::<mlua::Table>(shooter.as_str()) {
+                if hit.is_some() && hit == shot.target {
+                    if let Ok(h) = gob.get::<mlua::Function>("OnShotLanded") {
+                        let _ = h.call::<Value>((gob.clone(), shot.kind));
+                    }
+                }
+                if let Ok(h) = gob.get::<mlua::Function>("OnShotExploded") {
+                    let bullet = world::world(&scripts.lua)
+                        .and_then(|w| w.get(id).map(|g| g.name.clone()))
+                        .and_then(|n| globals.get::<mlua::Table>(n.as_str()).ok());
+                    let _ = h.call::<Value>((gob.clone(), shot.kind, bullet));
+                }
+            }
+        }
+    }
+
     // and the scripted sequences. 0x42bd60 tests bit 0x800000 on each gob
     // and calls the Lua global `ScriptUpdate` for the ones that have it —
     // **not a handler on the object**, a global taking the object, which is
@@ -2897,6 +3083,50 @@ mod tests {
         assert!((45.0..60.0).contains(&travelled), "travelled {travelled}");
         let at = at_of(&scripts, "g");
         assert!(at[0] < -40.0, "and it ends up toward the waypoint, at {at:?}");
+    }
+
+    /// A shot carries none of its own numbers: the call gives it a direction
+    /// and the **shot table** gives it everything else. `lasershot` is type
+    /// 430, 25 damage at 90 a second, and its damage type is 1 —
+    /// `DAMAGE_GOODGUY`, which is what lets it through a conehead's filter.
+    /// A `gruntshot` next to it is `DAMAGE_BADGUY` and would bounce off, and
+    /// that is the original's rule rather than a quirk of this test.
+    #[test]
+    fn a_shot_flies_at_its_type_s_speed_and_hurts_what_it_reaches() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                // OBJ_GRUNT 202 shoots OBJ_GRUNTSHOT 427 due +x at a conehead
+                "mdkRegisterObject('shooter', 202, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkRegisterObject('victim', 203, scene, nil, -1, 20,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 bul = mdkRegisterObject('', 430, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 landed = 0\n\
+                 shooter.OnShotExploded = function(g, kind, b) landed = kind end\n\
+                 fired = mdkShootBulletLua(bul, shooter, victim, 1, 0, 0)",
+            )
+            .exec()
+            .unwrap();
+        let g = scripts.lua.globals();
+        assert_eq!(g.get::<f64>("fired").unwrap(), 1.0);
+        let health = |name: &str| {
+            let w = world::world(&scripts.lua).unwrap();
+            w.get(w.find(name).unwrap()).unwrap().hitpoints
+        };
+        let full = health("victim");
+        let rooms = Visibility::default();
+        let mut state = Ticking::default();
+        // 20 units at 90 a second is under a quarter second
+        for _ in 0..20 {
+            tick(&scripts, &rooms, [0.0, 0.0, 0.0], 0.0, 1.0 / 30.0, &mut state).unwrap();
+        }
+        assert_eq!(health("victim"), full - 25, "a lasershot is worth 25");
+        assert_eq!(g.get::<f64>("landed").unwrap(), 430.0, "and the shooter heard it");
+        assert!(scripts.lua.app_data_ref::<Boot>().unwrap().shots.is_empty(), "spent");
     }
 
     /// A stop is not an order to face forwards: 0x431870 writes the heading

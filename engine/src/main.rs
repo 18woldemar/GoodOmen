@@ -232,6 +232,14 @@ fn main() {
     // Any bases after it are scaled too, which is how the rule that keeps a
     // non-zero base off zero gets checked: the table has no record small
     // enough to reach it.
+    // the shot table, the same way: one row per record so a tool can diff it
+    if args.iter().any(|a| a == "--bullets") {
+        for (kind, model, filter, damage, life, speed) in goodomen::game::world::BULLET {
+            println!("{} {model} {filter} {damage} {life} {speed}", kind as i64);
+        }
+        return;
+    }
+
     if let Some(i) = args.iter().position(|a| a == "--health") {
         use goodomen::game::world::{diff_scale, BASE_HITPOINTS, DIFFICULTY, LOCOMOTION};
         let scaled = |base: i32| -> String {
@@ -1028,7 +1036,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     }
 
     // what the scripts actually did to the world while it ran
-    let (moved, playing, what, fired_sounds, spawned, jumped) = {
+    let (moved, playing, what, fired_sounds, spawned, jumped, shots, landed) = {
         let w = world::world(&scripts.lua).expect("a world");
         let boot = scripts.lua.app_data_ref::<api::Boot>().expect("boot state");
         let what: Vec<String> = boot
@@ -1039,7 +1047,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         // what the run asked to be heard: `omGobGSPlay` calls that reached a
         // sound the scripts had hung on an object
         let sounds: usize = boot.gob_sounds.iter().map(|g| g.played).sum();
-        (w.generation(), boot.playing.len(), what, sounds, boot.spawned.len(), boot.jumped)
+        (w.generation(), boot.playing.len(), what, sounds, boot.spawned.len(), boot.jumped, boot.fired, boot.hits)
     };
     let (fired, survived) = state.total();
     let mut stopped: Vec<(&String, &usize)> = state.why.iter().collect();
@@ -1061,6 +1069,8 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         ("objects touched", state.touched.len(), expect_flag("--expect-touched")),
         ("objects spawned", spawned, expect_flag("--expect-spawned")),
         ("walkers launched", jumped, expect_flag("--expect-jumps")),
+        ("shots fired", shots, expect_flag("--expect-shots")),
+        ("shots that hit", landed, expect_flag("--expect-hits")),
     ] {
         if let Some(want) = want {
             if got != want {
@@ -1074,7 +1084,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
          {} rooms entered, {survived} of {fired} handler calls ran to the end, \
          {moved} object moves, {playing} animations chosen, \
          {fired_sounds} sounds fired, {spawned} objects spawned, \
-         {jumped} walkers launched, \
+         {jumped} walkers launched, {shots} shots fired ({landed} hit), \
          {} objects touched and {} of them \
          scripted{}{} [{}]{}",
         if recorded { "the game's own recorded" } else { "held-forwards" },
