@@ -846,16 +846,77 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
     // and **the heading set to where the gob already looks**, which is how a
     // stop differs from an order to face forwards.
     //
-    // Its two opposite numbers, `mdkWalkerGotoPoint` (0x431b80) and
-    // `mdkWalkerGotoPointDirectly` (0x431f70), are **read and deliberately
-    // still recorders** — see `CLAUDE.md` for both, down to the arguments.
-    // They return 0 until the walker arrives, and `script.lua`'s task loop is
-    // `while (res ~= 0 and self.stack)`, so a real one blocks its whole
-    // sequence until something obeys the gait. Implementing them cost level 7
-    // its two jumps: the sniper pilots sit behind a walking sequence that
-    // never finishes. A recorder's `nil` walks straight past, which is wrong
-    // but not stuck, and that is the better wrong answer until there is a
-    // mover. The moment there is one, both are ten lines.
+    // Its two opposite numbers order a walk. `mdkWalkerGotoPointDirectly`
+    // (0x43f890 into **0x431f70**) has no randomness in it at all:
+    //
+    //     if dist3(gob, dest) < radius: return 1        ; arrived
+    //     walker.heading = bearing(gob -> dest)
+    //     walker.strafe  = 0
+    //     walker.gait    = facing ? (run and 2 or 1) : 0
+    //     return 0
+    //
+    // The gait going to **0** when it is not facing yet is what "directly"
+    // means: turn on the spot first, then move.
+    //
+    // `mdkWalkerGotoPoint(gob, point, run, mustFace, wobble, avoid, radius)`
+    // is 0x43f6f0 into **0x431b80**, the same shape with three differences.
+    // The distance is **horizontal** — 0x431bbe writes the destination's z
+    // and 0x431bc3 immediately overwrites it with the gob's, so the vector it
+    // measures against is `(dest.x, dest.y, gob.z)`. The radius **defaults to
+    // 4.0** (the double the binding pushes at 0x43f825). And the heading is
+    // refreshed on a random countdown in `walker + 0x98` rather than every
+    // frame, with `wobble` scaling a random nudge onto it.
+    //
+    // Both the countdown and the nudge are dead in this game. **Every one of
+    // the 52 calls in the shipped scripts is `(gob, point, 1, 0, 0, 0)`** —
+    // wobble 0, so the nudge adds nothing, and avoid 0, so the probe at
+    // 0x431490 never runs. What is left is deterministic, and a heading
+    // refreshed every frame equals one refreshed on a timer whenever the
+    // destination is a fixed waypoint, which is what a waypoint is. The
+    // `mustFace` gate is implemented because it is two lines; the avoid probe
+    // is not, so a blocked walker is not detected.
+    //
+    // **Neither stops the legs on arrival** — neither 0x431c14 nor 0x431fba
+    // touches the gait — which is why the scripts follow a goto with a stop.
+    for name in ["mdkWalkerGotoPoint", "mdkWalkerGotoPointDirectly"] {
+        let direct = name == "mdkWalkerGotoPointDirectly";
+        globals.set(
+            name,
+            lua.create_function(move |lua, args: Variadic<Value>| {
+                let Some(who) = args.first().and_then(gob_name) else { return Ok(0.0) };
+                let Some(to) = point_at(lua, args.get(1)) else { return Ok(0.0) };
+                let Some((at, yaw)) = stance(lua, &who) else { return Ok(0.0) };
+                let run = args.get(2).map(number).unwrap_or(0.0) != 0.0;
+                let (must_face, radius) = if direct {
+                    // the direct one takes its radius where the other takes
+                    // its flags, and it has no default
+                    (true, args.get(3).map(number).unwrap_or(0.0))
+                } else {
+                    /// The arrival radius `mdkWalkerGotoPoint` assumes.
+                    const REACHED: f64 = 4.0;
+                    (
+                        args.get(3).map(number).unwrap_or(0.0) != 0.0,
+                        args.get(6).map(number).unwrap_or(REACHED),
+                    )
+                };
+                let d = [to[0] - at[0], to[1] - at[1], to[2] - at[2]];
+                let dist = if direct {
+                    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+                } else {
+                    (d[0] * d[0] + d[1] * d[1]).sqrt()
+                };
+                if dist < radius {
+                    return Ok(1.0);
+                }
+                let heading = d[1].atan2(d[0]);
+                let moving = !must_face || facing(yaw, heading);
+                let mut boot = boot_mut(lua)?;
+                boot.heading.insert(who.clone(), heading);
+                boot.gait.insert(who, if !moving { 0 } else if run { 2 } else { 1 });
+                Ok(0.0)
+            })?,
+        )?;
+    }
     globals.set(
         "mdkWalkerStop",
         lua.create_function(|lua, args: Variadic<Value>| {
@@ -2525,6 +2586,75 @@ pub fn tick_touching(
         }
     }
 
+    // and the walkers, which turn toward what they were told to face and
+    // then move along their own nose. Both halves are the original's:
+    //
+    // 0x42fbbb, inside `mdkWalkerAnimUpdate`, is the turn. It is the only
+    // place in the binary that closes the loop from `walker + 0x14` back onto
+    // the gob — every other `fsub [reg+0x14]` in the walker files is the
+    // *test*, never the turn — and it has **hysteresis, not a single
+    // threshold**: a walker starts turning when it is more than **0.17 rad**
+    // off (0x490198) and keeps turning until it is inside **0.01** (the
+    // double at 0x48f620), with `walker + 0x2c` remembering which of the two
+    // it is in. The step is `dt * def[0x28]`, clamped both ways.
+    //
+    // 0x42fd0d is the move: the speed is `def[0x18 + gait * 4]` and it is
+    // spent along the **gob's own facing**, not along the heading, which is
+    // why the turn has to come first and why a walker corners in an arc.
+    //
+    // ponytail: no collision and no ground. The original hands the velocity
+    // to 0x46de70, which sweeps it and projects it onto the surface normal at
+    // `omgob + 0x30`; here it is a flat slide, so a walker crosses a wall and
+    // ignores a slope. Give it `Collision` when a non-player gob has a body.
+    let steps: Vec<(world::Id, String, [f64; 3], f64)> = {
+        let boot = boot_ref(&scripts.lua)?;
+        let Some(w) = crate::game::world::world(&scripts.lua) else {
+            return Err(Error::Pragma("no world".into()));
+        };
+        boot.gait
+            .iter()
+            .filter(|(name, _)| !boot.stasis.contains(*name) && !boot.jumps.contains_key(*name))
+            .filter_map(|(name, &gait)| {
+                let id = w.find(name)?;
+                let g = w.get(id)?;
+                let want = *boot.heading.get(name)?;
+                let (speed, turn) = crate::game::world::locomotion(g.kind, gait)?;
+                let q = g.rotation;
+                let yaw = (2.0 * (q[0] * q[3] + q[1] * q[2]))
+                    .atan2(1.0 - 2.0 * (q[2] * q[2] + q[3] * q[3]));
+                let mut d = want - yaw;
+                if d < -std::f64::consts::PI {
+                    d += std::f64::consts::TAU;
+                } else if d > std::f64::consts::PI {
+                    d -= std::f64::consts::TAU;
+                }
+                // the outer threshold only; `walker + 0x2c` is the inner
+                // half of the hysteresis and the engine keeps no walker block
+                let turning = d.abs() > FACING;
+                if !turning && speed == 0.0 {
+                    return None; // standing still and already square
+                }
+                let step = (dt * turn).min(d.abs()) * d.signum();
+                let yaw = if turning { yaw + step } else { yaw };
+                let at = [
+                    g.position[0] + yaw.cos() * speed * dt,
+                    g.position[1] + yaw.sin() * speed * dt,
+                    g.position[2],
+                ];
+                Some((id, name.clone(), at, yaw))
+            })
+            .collect()
+    };
+    for (id, name, at, yaw) in steps {
+        if let Ok(gob) = globals.get::<mlua::Table>(name.as_str()) {
+            place(&scripts.lua, &gob, at)?;
+        }
+        if let Some(mut w) = scripts.lua.app_data_mut::<world::World>() {
+            let half = yaw / 2.0;
+            w.set_rotation(id, [half.cos(), 0.0, 0.0, half.sin()]);
+        }
+    }
+
     // and the scripted sequences. 0x42bd60 tests bit 0x800000 on each gob
     // and calls the Lua global `ScriptUpdate` for the ones that have it —
     // **not a handler on the object**, a global taking the object, which is
@@ -2577,6 +2707,11 @@ pub fn tick_touching(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn at_of(scripts: &Scripts, name: &str) -> [f64; 3] {
+        let w = world::world(&scripts.lua).unwrap();
+        w.get(w.find(name).unwrap()).unwrap().position
+    }
 
     /// The names are the game's own, and the eight directions are the eight
     /// `ANIM_RUN*` the models carry.
@@ -2655,6 +2790,104 @@ mod tests {
         // and the last call left the want behind, pointing at the waypoint
         let want = scripts.lua.app_data_ref::<Boot>().unwrap().heading["w"];
         assert!((want - std::f64::consts::FRAC_PI_2).abs() < 1e-9, "due +y");
+    }
+
+    /// The two walking orders differ in three readable ways, and this checks
+    /// all three: the direct one measures in **all three axes** and refuses
+    /// to move until it is facing, the other measures **horizontally** and
+    /// has a default radius of 4.0.
+    #[test]
+    fn a_goto_orders_the_gait_and_the_direct_one_turns_first() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                // the walker faces +x and stands at the origin; the waypoint
+                // is due +y, ten out and three up
+                "points.wp = {x = 0, y = 10, z = 3, f = 0}\n\
+                 mdkRegisterObject('w', OBJ_NONE, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 far    = mdkWalkerGotoPoint(w, 'wp', 1, 0, 0, 0)\n\
+                 direct = mdkWalkerGotoPointDirectly(w, 'wp', 1, 4)",
+            )
+            .exec()
+            .unwrap();
+        let g = scripts.lua.globals();
+        assert_eq!(g.get::<f64>("far").unwrap(), 0.0, "ten units is not four");
+        assert_eq!(g.get::<f64>("direct").unwrap(), 0.0);
+        {
+            let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
+            // the direct call ran last and the walker still faces +x, a right
+            // angle off the waypoint, so it turns before it moves
+            assert_eq!(boot.gait["w"], 0, "not facing yet");
+            assert!((boot.heading["w"] - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+        }
+        // now put it square on the waypoint's x/y and ask again. The plain
+        // goto is horizontal, so three units of height is arrival; the direct
+        // one measures the height too, so three units is not.
+        scripts
+            .lua
+            .load(
+                "mdkGobSetPositionXYZ(w, 0, 10, 0)\n\
+                 flat = mdkWalkerGotoPoint(w, 'wp', 1, 0, 0, 0)\n\
+                 solid = mdkWalkerGotoPointDirectly(w, 'wp', 1, 2)",
+            )
+            .exec()
+            .unwrap();
+        assert_eq!(g.get::<f64>("flat").unwrap(), 1.0, "arrived in the plane");
+        assert_eq!(g.get::<f64>("solid").unwrap(), 0.0, "three up is not two");
+    }
+
+    /// The mover, which is the point of all of it: a grunt told to run at a
+    /// waypoint behind it **turns before it travels**, and once round it
+    /// covers its own type's run speed out of the table — 20 a second, not
+    /// the player's 4.
+    #[test]
+    fn a_walker_turns_first_and_then_runs_at_its_own_speed() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                // OBJ_GRUNT is 202, and it faces +x with the waypoint due -x
+                "points.wp = {x = -400, y = 0, z = 0, f = 0}\n\
+                 mdkRegisterObject('g', 202, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)",
+            )
+            .exec()
+            .unwrap();
+        let rooms = Visibility::default();
+        let mut state = Ticking::default();
+        let mut travelled = 0.0;
+        let mut turned_before_moving = None;
+        for i in 0..90 {
+            scripts
+                .lua
+                .load("mdkWalkerGotoPoint(g, 'wp', 1, 0, 0, 0)")
+                .exec()
+                .unwrap();
+            let before = at_of(&scripts, "g");
+            tick(&scripts, &rooms, [0.0, 0.0, 0.0], 0.0, 1.0 / 30.0, &mut state).unwrap();
+            let after = at_of(&scripts, "g");
+            let d = ((after[0] - before[0]).powi(2) + (after[1] - before[1]).powi(2)).sqrt();
+            travelled += d;
+            // the first tick is a half turn away from the waypoint, so it
+            // must not already be closing on it
+            if i == 0 {
+                turned_before_moving = Some(after[0] - before[0] > 0.0);
+            }
+        }
+        assert_eq!(
+            turned_before_moving,
+            Some(true),
+            "it should still be drifting the wrong way while it turns"
+        );
+        // three seconds at 20 a second is 60 units, less the half-turn at 4
+        // radians a second that starts it — a grunt's own two numbers
+        assert!((45.0..60.0).contains(&travelled), "travelled {travelled}");
+        let at = at_of(&scripts, "g");
+        assert!(at[0] < -40.0, "and it ends up toward the waypoint, at {at:?}");
     }
 
     /// A stop is not an order to face forwards: 0x431870 writes the heading

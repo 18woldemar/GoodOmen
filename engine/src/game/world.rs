@@ -125,6 +125,55 @@ pub fn base_hitpoints(kind: f64) -> Option<i32> {
     BASE_HITPOINTS.iter().find(|(k, _, _)| *k == kind).map(|(_, _, hp)| *hp)
 }
 
+/// **The same 19 records, read for how the thing moves.** The table at
+/// 0x4ab2e8 is not a health table at all — it is the walker's whole
+/// definition, and `walker[0]` points into it. 0x42fd0d indexes it by the
+/// gait: **`def[0x18 + gait * 4]`**, a float, so the four speeds below are
+/// slots +0x18, +0x1c, +0x20 and +0x24 in order — **still, walk, run and
+/// back** — and the back one is *negative* so a walk clip plays in reverse.
+/// Beside them are +0x28, the turn rate in radians a second (0x42fc5d
+/// multiplies it by the frame time), and +0x2c, the strafe speed, which is
+/// multiplied by `walker + 0x10`.
+///
+/// **A walker below `def[0x40]` hitpoints moves at half speed** — the branch
+/// at 0x42fd4c takes the same slot and multiplies by the 0.5 at 0x48f2fc.
+/// Most records hold 0xffffffff there and never limp, so that is not modelled
+/// here.
+///
+/// `tools/health.py --walk` reads the same six columns out of the binary and
+/// `check.py` holds this literal to them.
+pub const LOCOMOTION: [(f64, [f64; 4], f64, f64); 19] = [
+    //  type    still  walk   run   back        turn  strafe
+    (201.0, [0.0, 7.0, 16.0, 0.0], 3.0, 0.0),
+    (215.0, [0.0, 7.0, 14.0, 0.0], 3.0, 0.0),
+    (216.0, [0.0, 9.0, 23.0, 0.0], 3.5, 0.0),
+    (203.0, [0.0, 4.0, 7.0, -4.0], 5.0, 4.0),
+    (250.0, [0.0, 4.0, 7.0, -4.0], 5.0, 4.0),
+    (200.0, [0.0, 4.0, 10.0, -4.0], 2.5, 0.0),
+    (204.0, [0.0, 12.0, 20.0, -12.0], 4.0, 8.0),
+    (205.0, [0.0, 2.0, 5.0, -2.0], 4.0, 3.0),
+    (202.0, [0.0, 6.0, 20.0, -6.0], 4.0, 15.7),
+    (219.0, [0.0, 6.0, 12.0, -6.0], 4.0, 11.3),
+    (207.0, [0.0, 6.0, 12.0, -6.0], 4.0, 10.0),
+    (214.0, [0.0, 8.0, 15.0, -8.0], 4.0, 13.0),
+    (211.0, [0.0, 5.0, 9.0, -4.0], 2.0, 4.0),
+    (220.0, [0.0, 16.0, 32.0, -16.0], 3.0, 16.0),
+    (210.0, [0.0, 12.0, 16.0, -7.0], 4.0, 5.0),
+    (217.0, [0.0, 4.0, 8.0, -4.0], 4.0, 5.0),
+    (206.0, [0.0, 12.0, 24.0, -8.0], 2.0, 8.0),
+    (208.0, [0.0, 8.0, 16.0, -8.0], 4.0, 12.0),
+    (260.0, [0.0, 12.0, 36.0, -12.0], 3.5, 12.0),
+];
+
+/// How fast a type moves at a gait, and how fast it turns, if the table names
+/// it. A gait outside 0..3 is not one the original can produce — the only
+/// writers are the input block and the two goto functions — so it reads as
+/// standing still.
+pub fn locomotion(kind: f64, gait: i64) -> Option<(f64, f64)> {
+    let (_, speeds, turn, _) = LOCOMOTION.iter().find(|(k, ..)| *k == kind)?;
+    Some((*speeds.get(gait.max(0) as usize).unwrap_or(&0.0), *turn))
+}
+
 /// Scale a base by the difficulty, exactly as 0x42d020 does — the routine the
 /// scripts see as `mdkDiffScale`.
 ///

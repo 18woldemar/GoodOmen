@@ -233,7 +233,7 @@ fn main() {
     // non-zero base off zero gets checked: the table has no record small
     // enough to reach it.
     if let Some(i) = args.iter().position(|a| a == "--health") {
-        use goodomen::game::world::{diff_scale, BASE_HITPOINTS, DIFFICULTY};
+        use goodomen::game::world::{diff_scale, BASE_HITPOINTS, DIFFICULTY, LOCOMOTION};
         let scaled = |base: i32| -> String {
             DIFFICULTY
                 .iter()
@@ -241,11 +241,27 @@ fn main() {
                 .collect::<Vec<_>>()
                 .join(" ")
         };
-        for (kind, name, base) in BASE_HITPOINTS {
-            println!("{} {} {} {}", kind as i64, name, base, scaled(base));
+        // the same 19 records carry the locomotion, so one row says both and
+        // `tools/health.py --engine` holds the pair of tables to the binary
+        for ((kind, name, base), (_, speeds, turn, strafe)) in
+            BASE_HITPOINTS.iter().zip(LOCOMOTION.iter())
+        {
+            let walk: Vec<String> = speeds
+                .iter()
+                .chain([turn, strafe])
+                .map(|v| format!("{v}"))
+                .collect();
+            println!(
+                "{} {} {} {} {}",
+                *kind as i64,
+                name,
+                base,
+                scaled(*base),
+                walk.join(" ")
+            );
         }
         for base in args[i + 1..].iter().filter_map(|a| a.parse::<i32>().ok()) {
-            println!("- - {} {}", base, scaled(base));
+            println!("- - {} {} - - - - - -", base, scaled(base));
         }
         return;
     }

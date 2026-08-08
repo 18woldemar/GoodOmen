@@ -80,8 +80,16 @@ def _read(secs, va: int, n: int) -> bytes:
     raise ValueError(f"{va:#x} is in no section")
 
 
-def table(exe: Path) -> list[tuple[int, str, int]]:
-    """-> `(type, name, base hitpoints)` for every record, in table order."""
+# The locomotion columns of the same record. 0x42fd0d indexes the four speeds
+# by the gait -- `def[0x18 + gait * 4]`, still/walk/run/back, the last one
+# negative so a walk clip plays in reverse -- and beside them are the turn rate
+# in radians a second (0x42fc5d multiplies it by the frame time) and the strafe
+# speed (0x42fd11 multiplies it by `walker + 0x10`).
+WALK = (0x18, 0x1C, 0x20, 0x24, 0x28, 0x2C)
+
+
+def table(exe: Path) -> list[tuple[int, str, int, tuple[float, ...]]]:
+    """-> `(type, name, base hitpoints, locomotion)`, in table order."""
     secs = _sections(exe)
     out = []
     while True:
@@ -90,7 +98,8 @@ def table(exe: Path) -> list[tuple[int, str, int]]:
         if key == 0:                       # the terminator the walk stops on
             return out
         name = r[NAME:BASE].split(b"\0")[0].decode("latin1")
-        out.append((key, name, struct.unpack_from("<i", r, BASE)[0]))
+        out.append((key, name, struct.unpack_from("<i", r, BASE)[0],
+                    tuple(struct.unpack_from("<f", r, o)[0] for o in WALK)))
 
 
 def scale(exe: Path, bases: list[int]) -> dict[tuple[float, int], int]:
@@ -135,13 +144,15 @@ def main(argv: list[str] | None = None) -> int:
     # record that reaches them, so without these the rule that keeps a
     # non-zero base off zero would go unchecked on both sides.
     probes = [1, -1, -3]
-    scaled = scale(args.exe, [b for _, _, b in rows] + probes)
+    scaled = scale(args.exe, [b for _, _, b, _ in rows] + probes)
 
-    def line(key, name, base):
+    def line(key, name, base, walk):
         return ([str(key), name, str(base)]
-                + [str(scaled[(d, base)]) for _, d in DIFFICULTIES])
+                + [str(scaled[(d, base)]) for _, d in DIFFICULTIES]
+                + [("%g" % v if v != "-" else "-") for v in walk])
 
-    want = [line(k, n, b) for k, n, b in rows] + [line("-", "-", b) for b in probes]
+    want = ([line(k, n, b, w) for k, n, b, w in rows]
+            + [line("-", "-", b, ["-"] * len(WALK)) for b in probes])
 
     if not args.engine:
         print("type name base " + " ".join(n for n, _ in DIFFICULTIES))
@@ -167,9 +178,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     hardest = max(rows, key=lambda r: r[2])
+    fastest = max(rows, key=lambda r: r[3][2])
     print(f"{len(rows)} enemy types and {len(probes)} bare bases at "
-          f"{len(DIFFICULTIES)} difficulties, identical to the original "
-          f"({hardest[1]} {hardest[2]} the most)", file=sys.stderr)
+          f"{len(DIFFICULTIES)} difficulties, plus {len(WALK)} locomotion "
+          f"columns, identical to the original "
+          f"({hardest[1]} {hardest[2]} hitpoints and {fastest[1]} "
+          f"{fastest[3][2]:g} a second the most)", file=sys.stderr)
     return 0
 
 
