@@ -221,12 +221,13 @@ ENGINE = [
     # things right: the engine arms them, the shot table's 0x800 launches the
     # bullet **at the player** instead of flat out of the shooter's feet, and
     # the damage filter lets it through. Before the flag the nearest of the 45
-    # passed 2.9 units away with 2.8 of it height.
+    # passed 2.9 units away with 2.8 of it height. Six hits at five damage
+    # each leave the player on 70 of Kurt's 100 -- the loop closed both ways.
     ("an enemy shoots the player and hits",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--run", "4", "1", "120", "--roam", "--expect-shots", "45",
-      "--expect-hits", "6", "--expect-events", "72001",
+      "--expect-hits", "6", "--expect-health", "70", "--expect-events", "72001",
       "--expect-survived", "72001"], None),
     # and the loop closes: the player walks at an enemy, shoots it with the
     # hitscan the original uses, and it dies. Two minutes of hunting on level

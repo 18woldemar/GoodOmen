@@ -1204,7 +1204,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     }
 
     // what the scripts actually did to the world while it ran
-    let (moved, playing, what, fired_sounds, spawned, jumped, shots, landed, struck, fighting, died, walled, buried, walkers, walked, started, miss, drop) = {
+    let (moved, playing, what, fired_sounds, spawned, jumped, shots, landed, struck, fighting, died, walled, buried, walkers, walked, started, miss, drop, health) = {
         let w = world::world(&scripts.lua).expect("a world");
         let boot = scripts.lua.app_data_ref::<api::Boot>().expect("boot state");
         let what: Vec<String> = boot
@@ -1221,7 +1221,9 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         // and how far they got, which is what says whether any of it ran
         // `max` only so an empty sum prints 0 and not -0
         let walked: f64 = boot.bodies.values().map(|b| b.travelled).sum::<f64>().max(0.0);
-        (w.generation(), boot.playing.len(), what, sounds, boot.spawned.len(), boot.jumped, boot.fired, boot.hits, boot.keys_fired, boot.fighting.len(), boot.died.len(), walled, boot.bodies.values().map(|b| b.inside).sum::<usize>(), boot.bodies.len(), walked, boot.ever_scripted.len(), boot.nearest_miss, boot.nearest_drop)
+        (w.generation(), boot.playing.len(), what, sounds, boot.spawned.len(), boot.jumped, boot.fired, boot.hits, boot.keys_fired, boot.fighting.len(), boot.died.len(), walled, boot.bodies.values().map(|b| b.inside).sum::<usize>(), boot.bodies.len(), walked, boot.ever_scripted.len(), boot.nearest_miss, boot.nearest_drop,
+         boot.player.as_deref().and_then(|n| w.find(n)).and_then(|i| w.get(i))
+             .map(|g| (g.hitpoints, g.max_hitpoints)).unwrap_or((0, 0)))
     };
     let (fired, survived) = state.total();
     let mut stopped: Vec<(&String, &usize)> = state.why.iter().collect();
@@ -1247,6 +1249,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         ("walker frames inside geometry", buried, expect_flag("--expect-buried")),
         ("walkers with a body", walkers, expect_flag("--expect-walkers")),
         ("objects given a script", started, expect_flag("--expect-scripts")),
+        ("hitpoints the player has left", health.0 as usize, expect_flag("--expect-health")),
         ("shots fired", shots, expect_flag("--expect-shots")),
         ("shots that hit", landed, expect_flag("--expect-hits")),
         ("animation keys", struck, expect_flag("--expect-keys")),
@@ -1271,6 +1274,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
          and met a wall on {walled} frames ({buried} inside), \
          {shots} shots fired ({landed} hit, nearest {}, {drop:.1} of it height), \
          {anim_keys} keys in {struck} struck, {fighting} enemies fighting, {shot_at} shot by the player and {died} killed, \
+         the player on {} of {} hitpoints, \
          {} objects touched and {} of them \
          scripted{}{} [{}]{}",
         if recorded { "the game's own recorded" } else if hunt && roam { "roaming and hunting" } else if hunt { "hunting" } else if roam { "roaming" } else { "held-forwards" },
@@ -1279,6 +1283,8 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         body.inside,
         state.rooms_entered,
         match miss { Some(d) => format!("{d:.1}"), None => "never".into() },
+        health.0,
+        health.1,
         state.touched.len(),
         state.collisions,
         if state.touched.is_empty() {
