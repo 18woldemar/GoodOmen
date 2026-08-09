@@ -92,17 +92,28 @@ void main() {
     vec4 texel = texture(albedo, vary_uv);
     if (texel.a < alpha_test) discard;
     vec3 n = normalize(vary_normal);
-    // MDK2's static lights are small and local -- the median radius is 15
-    // units in arenas a hundred across -- so they *add* to a base level
-    // rather than being the whole of the lighting. Without one the levels
-    // read almost black, which is a rendering choice made here and not
-    // something the data says.
-    vec3 lit = vec3(0.75);
+    // **The lighting is the original's, read at 0x4644c0.** omPolyhedron.c
+    // hands each light to `glLightfv` as a GL_POSITION with w = 1 and a
+    // GL_DIFFUSE, and then sets **GL_QUADRATIC_ATTENUATION to `9 / (2 r^2)`**
+    // -- the 9.0 is the float at 0x49034c and `r` is the light's own radius
+    // at `light + 0x28`. So the fixed-function falloff is
+    //
+    //     1 / (1 + 4.5 * (d / r)^2)
+    //
+    // which never reaches zero: a radius-12 lamp still gives a twentieth of
+    // itself at 24 units, where the old linear ramp cut off dead at 12 and
+    // left everything past it flat.
+    //
+    // The base is **0.2** and that is not a choice either: `glLightModelfv`
+    // is resolved by name at 0x45a81b and **never called**, so the ambient
+    // stays GL's own default of (0.2, 0.2, 0.2, 1).
+    vec3 lit = vec3(0.2);
     for (int i = 0; i < light_count; i++) {
         vec3 to = light_position[i] - vary_world;
         float d = length(to);
-        float reach = max(1.0 - d / light_radius[i], 0.0);
-        lit += light_colour[i] * reach * reach * max(dot(n, to / max(d, 0.001)), 0.0);
+        float r = max(light_radius[i], 0.001);
+        float atten = 1.0 / (1.0 + 4.5 * (d * d) / (r * r));
+        lit += light_colour[i] * atten * max(dot(n, to / max(d, 0.001)), 0.0);
     }
     vec3 colour = texel.rgb * min(lit, vec3(1.6));
     // MDK2's fog is fixed-function OpenGL and the mode is read, not guessed:
