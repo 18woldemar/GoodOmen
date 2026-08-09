@@ -1550,16 +1550,42 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                     | Event::KeyDown { keycode: Some(Keycode::Escape), .. } => {
                         unsafe { scene.delete(&video.gl) };
                         let (fired, survived) = ticking.total();
-                        let died = level_scripts
+                        // the same combat numbers a headless run reports, so
+                        // that playing a level says as much as running one
+                        let (died, fighting, shots, hit, near, walked, health) = level_scripts
                             .lua
                             .app_data_ref::<goodomen::game::api::Boot>()
-                            .map(|b| b.died.len())
-                            .unwrap_or(0);
+                            .map(|b| {
+                                let health = b
+                                    .player
+                                    .as_deref()
+                                    .and_then(|n| goodomen::game::world::world(&level_scripts.lua)
+                                        .and_then(|w| w.find(n).and_then(|i| w.get(i))
+                                            .map(|g| (g.hitpoints, g.max_hitpoints))));
+                                (
+                                    b.died.len(),
+                                    b.fighting.len(),
+                                    b.fired,
+                                    b.hits,
+                                    b.nearest_miss,
+                                    b.bodies.values().map(|x| x.travelled).sum::<f64>(),
+                                    health.unwrap_or((0, 0)),
+                                )
+                            })
+                            .unwrap_or_default();
                         return Ok(format!(
                             "{summary}, ran {:.0}s: {} rooms entered, \
                              {survived} of {fired} handler calls ran to the end, \
-                             {} shot and {died} killed",
-                            ticking.clock, ticking.rooms_entered, shot_at.len()
+                             {} shot by you and {died} killed, \
+                             {fighting} enemies fighting, {shots} shots fired at you \
+                             ({hit} hit, nearest {}), walkers walked {walked:.0} units, \
+                             you on {} of {} hitpoints",
+                            ticking.clock,
+                            ticking.rooms_entered,
+                            shot_at.len(),
+                            match near { Some(d) => format!("{d:.1}"), None => "never".into() },
+                            health.0,
+                            health.1,
                         ));
                     }
                     Event::KeyDown { keycode: Some(Keycode::C), .. } => cull = !cull,
