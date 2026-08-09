@@ -1059,7 +1059,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             };
             let d = [to[0] - at[0], to[1] - at[1], to[2] - at[2]];
             let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-            let near = crate::game::world::ai(kind).map(|r| r.3).unwrap_or(0.0);
+            let near = crate::game::world::ai(kind).map(|r| r.near).unwrap_or(0.0);
             // **and it leads.** 0x432d90 aims at `target + velocity * (dist *
             // 0.025)`, which is the flight time at the shot's own speed, and
             // the AI record's last column says whether this type bothers.
@@ -1068,7 +1068,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             // units a second times the three quarters of a second the bullet
             // was in the air.
             const LEAD: f64 = 0.025; // 0x4901c4
-            let lead = crate::game::world::ai(kind).map(|r| r.7).unwrap_or(false);
+            let lead = crate::game::world::ai(kind).is_some_and(|r| r.lead != 0.0);
             let mut boot = boot_mut(lua)?;
             let moving = hero.as_deref().and_then(|n| boot.velocity.get(n)).copied();
             let d = match moving {
@@ -1088,28 +1088,52 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             // it has none already in the air (`walker + 0x3c` is -1), and it
             // comes out of the slot the definition names at `def + 0x68` —
             // `DOGGNBOY_TARGET`, which is the engine's stand-in for the hand.
-            let reach = crate::game::world::ai(kind).map(|r| r.5).unwrap_or(0.0);
-            let rounds = crate::game::world::ai(kind).map(|r| r.0).unwrap_or(0.0);
+            let reach = crate::game::world::ai(kind).map(|r| r.reach).unwrap_or(0.0);
+            let rounds = crate::game::world::ai(kind).map(|r| r.burst).unwrap_or(0.0);
             let left = boot.burst.get(&who).copied().unwrap_or(0.0);
-            let interval = crate::game::world::ai(kind).map(|r| r.1).unwrap_or(0.0);
-            // **Why an enemy still does not walk at you**, written down
-            // because it cost a measurement to learn. State 5 is *advance*,
-            // set in exactly one place — 0x432cd7 — reached by a `chRand()`
-            // against **`record + 0x18`** at 0x432c56: the higher roll
-            // advances with a cooldown of 3, the lower fires two rounds.
+            let interval = crate::game::world::ai(kind).map(|r| r.interval).unwrap_or(0.0);
+            // **And this is what makes an enemy walk at you.** The chooser
+            // at 0x432740..0x432ce0 is read now, and the branch that matters
+            // hangs off two gates the first attempt at this missed:
             //
-            // Building that leaf alone was tried and taken out. `record +
-            // 0x18` is **0 for the bif**, which under that leaf reads as
-            // "always advance, never fire" — and the run said so at once:
-            // level 4, whose walkers are mostly bifs, went from 45 shots in
-            // two minutes to none while the walkers covered 191 units instead
-            // of 9. A second advance leaf at 0x432cc1 rolls `record + 0x14`
-            // with the **opposite** sense, which is the tell that both sit
-            // under a tree whose top decides which one applies.
+            //   dist >= record.reach   ->  roll `act`, and under it: state 5
+            //   dist <  record.reach   ->  roll `act`; **over** it: state 4,
+            //                              the fight. Under it, roll `taunt`;
+            //                              over that, roll `close` -- over
+            //                              `close` state 5, under it state 0,
+            //                              two rounds.
             //
-            // So the chooser at 0x432740..0x432ce0 has to be read whole —
-            // fifteen rolls and ten states — and until it is, an enemy stands
-            // its ground and fights rather than closing.
+            // Reading the last leaf alone made a bif -- whose `close` is 0 --
+            // advance for ever and never fire. With the gates it does the
+            // opposite seven times in ten, which is what a bif is.
+            //
+            // ponytail: states 4 and 0 are collapsed here into the burst
+            // below, so what this adds is the two ways out to state 5.
+            const ADVANCING: f64 = 3.0; // 0x432cde, 0x432ce1
+            if let Some(rec) = crate::game::world::ai(kind) {
+                let choosing = cool <= 0.0 && left <= 0.0 && dist >= near;
+                let advance = if dist >= rec.reach {
+                    // too far to shoot at all
+                    choosing && boot.random.next() < rec.act
+                } else {
+                    choosing
+                        && boot.random.next() <= rec.act
+                        && kind != INVISOGRUNT
+                        && boot.random.next() >= rec.taunt
+                        && boot.random.next() >= rec.close
+                };
+                if advance {
+                    boot.cooldown.insert(who.clone(), ADVANCING);
+                    boot.gait.insert(who, 2);
+                    return Ok(0.0);
+                }
+            }
+
+            // What is **not** built, written down
+            // from the same tree: the leap (state 7, inside `record.leap`),
+            // the charge (state 11, which a limping doganboy and a scared
+            // conehead take), `ANIM_SCARED` and the three taunts, and the
+            // walk home when it is past its leash (state 1).
             if cool <= 0.0 {
                 if left > 0.0 {
                     boot.burst.insert(who.clone(), left - 1.0);
@@ -2545,6 +2569,9 @@ fn fire_key_object(lua: &Lua, who: &str, kind: f64) -> Result<(), Error> {
 /// A gob's name, from the table the scripts hold it by.
 /// `OBJ_DOGANBOY` and the grenade it throws, both out of the tables.
 const DOGANBOY: f64 = 207.0;
+/// `OBJ_INVISOGRUNT`, which 0x432b77 sends straight to the fight rather than
+/// letting it choose to close.
+const INVISOGRUNT: f64 = 219.0;
 const DBGRENADE: f64 = 417.0;
 
 /// `ANIM_SHOOT` and `ANIM_THROW`. 0x4331f8 plays the first for every round of

@@ -368,17 +368,66 @@ pub fn table_model(kind: f64) -> Option<&'static str> {
 ///
 /// It was missed for a whole session because `health.py --ai` printed eleven
 /// of the record's thirteen columns and skipped this one.
-pub const AI: [(f64, f64, f64, f64, f64, f64, f64, bool, f64); 9] = [
-    // burst, interval, melee, near, far, reach, fov, lead, advance
-    (3.0, 0.5, 0.9, 10.0, 15.0, 100.0, 1.047198, true, 0.3),
-    (5.0, 0.8, 0.9, 10.0, 15.0, 75.0, 1.570796, true, 0.3),
-    (3.0, 2.0, 0.15, 15.0, 25.0, 150.0, 0.785398, false, 0.0),
-    (3.0, 0.5, 0.9, 8.0, 13.0, 50.0, 1.047198, false, 0.2),
-    (1.0, 2.0, 0.2, 25.0, 35.0, 150.0, 1.047198, false, 0.2),
-    (1.0, 2.0, 0.2, 25.0, 35.0, 200.0, 1.047198, true, 0.4),
-    (3.0, 0.0, 1.0, 20.0, 30.0, 50.0, 1.570796, false, 0.5),
-    (0.0, 0.5, 1.0, 5.0, 5.0, 6.0, 0.392699, false, 0.2),
-    (1.0, 3.0, 0.0, 15.0, 25.0, 150.0, 0.785398, false, 0.3),
+/// One row of the AI table at 0x48ff78 — **all thirteen columns**, named for
+/// what the chooser at 0x432740..0x432ce0 does with them. It is a struct and
+/// not a tuple on purpose: the version of this that was a tuple lost
+/// `+0x18` for a session, because `health.py --ai` printed eleven of the
+/// thirteen and nobody could see which one was missing.
+#[derive(Clone, Copy)]
+pub struct Ai {
+    /// +0x00, rounds in a burst — `walker + 0x9c` is loaded from it (0x4328e6)
+    pub burst: f64,
+    /// +0x04, the wait between rounds (0x433219)
+    pub interval: f64,
+    /// +0x08, the **health fraction** below which it counts as hurt
+    /// (0x4329f9 against `mdkGobGetHealth`, which is hitpoints over maximum)
+    pub hurt: f64,
+    /// +0x0c, roll under this and it taunts instead of acting (0x432b92)
+    pub taunt: f64,
+    /// +0x10, roll under this when hurt and it plays `ANIM_SCARED` (0x432a29)
+    pub scared: f64,
+    /// +0x14, the gate on doing anything at all: over it and the walker just
+    /// fights (0x432b62), under it and the tree goes on
+    pub act: f64,
+    /// +0x18, and this is the one that makes an enemy walk at you: past it
+    /// the walker takes state 5 and closes, under it it fires two rounds
+    /// (0x432c56)
+    pub close: f64,
+    /// +0x1c, inside this it gives ground (0x432a9b)
+    pub near: f64,
+    /// +0x20
+    pub far: f64,
+    /// +0x24, the weapon's reach — **beyond it the walker advances instead of
+    /// shooting** (0x432b45)
+    pub reach: f64,
+    /// +0x28, the field of view in radians
+    pub fov: f64,
+    /// +0x2c, the distance it will leap from; 0 for the four that never do
+    /// (0x4329d9)
+    pub leap: f64,
+    /// +0x30, whether its aim leads a moving target
+    pub lead: f64,
+}
+
+pub const AI: [Ai; 9] = [
+    Ai { burst: 3.0, interval: 0.5, hurt: 0.9, taunt: 0.2, scared: 0.5, act: 0.6,
+         close: 0.3, near: 10.0, far: 15.0, reach: 100.0, fov: 1.0472, leap: 30.0, lead: 1.0 }, // doganboy
+    Ai { burst: 5.0, interval: 0.8, hurt: 0.9, taunt: 0.3, scared: 0.7, act: 0.7,
+         close: 0.3, near: 10.0, far: 15.0, reach: 75.0, fov: 1.5708, leap: 30.0, lead: 1.0 }, // hoser and poopsy
+    Ai { burst: 3.0, interval: 2.0, hurt: 0.15, taunt: 0.2, scared: 0.1, act: 0.3,
+         close: 0.0, near: 15.0, far: 25.0, reach: 150.0, fov: 0.785398, leap: 0.0, lead: 0.0 }, // bif
+    Ai { burst: 3.0, interval: 0.5, hurt: 0.9, taunt: 0.3, scared: 0.4, act: 0.5,
+         close: 0.2, near: 8.0, far: 13.0, reach: 50.0, fov: 1.0472, leap: 30.0, lead: 0.0 }, // grunt
+    Ai { burst: 1.0, interval: 2.0, hurt: 0.2, taunt: 0.2, scared: 0.2, act: 0.4,
+         close: 0.2, near: 25.0, far: 35.0, reach: 150.0, fov: 1.0472, leap: 30.0, lead: 0.0 }, // ultradogan
+    Ai { burst: 1.0, interval: 2.0, hurt: 0.2, taunt: 0.1, scared: 0.2, act: 0.4,
+         close: 0.4, near: 25.0, far: 35.0, reach: 200.0, fov: 1.0472, leap: 40.0, lead: 1.0 }, // hans
+    Ai { burst: 3.0, interval: 0.0, hurt: 1.0, taunt: 0.3, scared: 1.0, act: 0.5,
+         close: 0.5, near: 20.0, far: 30.0, reach: 50.0, fov: 1.5708, leap: 0.0, lead: 0.0 }, // conehead
+    Ai { burst: 0.0, interval: 0.5, hurt: 1.0, taunt: 0.2, scared: 0.0, act: 1.0,
+         close: 0.2, near: 5.0, far: 5.0, reach: 6.0, fov: 0.392699, leap: 30.0, lead: 0.0 }, // invisogrunt
+    Ai { burst: 1.0, interval: 3.0, hurt: 0.0, taunt: 0.0, scared: 0.0, act: 0.4,
+         close: 0.3, near: 15.0, far: 25.0, reach: 150.0, fov: 0.785398, leap: 0.0, lead: 0.0 }, // zizzy
 ];
 
 /// Which behaviour an enemy type uses, out of `def + 0x84`. Nine of the 19
@@ -389,7 +438,7 @@ pub const AI_OF: [(f64, usize); 10] = [
 ];
 
 /// The behaviour a type fights with, if it has one.
-pub fn ai(kind: f64) -> Option<(f64, f64, f64, f64, f64, f64, f64, bool, f64)> {
+pub fn ai(kind: f64) -> Option<Ai> {
     let i = AI_OF.iter().find(|(k, _)| *k == kind)?.1;
     Some(AI[i])
 }

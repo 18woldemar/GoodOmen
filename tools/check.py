@@ -178,10 +178,10 @@ ENGINE = [
       # `l7r2_spn1_spawn`, which spawns **inside** `c9` -- so what this pins
       # is the escape rule, not the refusal. Nothing in ten levels walks into
       # a wall in the first thirty seconds.
-      "--expect-walled", "93", "--expect-buried", "93",
-      "--expect-keys", "6", "--expect-fighting", "17",
-      "--expect-moves", "2312",
-      "--expect-events", "22504", "--expect-survived", "22504"], None),
+      "--expect-walled", "135", "--expect-buried", "132",
+      "--expect-keys", "60", "--expect-fighting", "17",
+      "--expect-moves", "2416",
+      "--expect-events", "22624", "--expect-survived", "22624"], None),
     # and the driver that reaches more than the first room. Held forwards
     # jams on the first corner -- level 6 spends 1162 of 1200 frames against a
     # wall -- so `--roam` follows walls and treats a hole like a wall. Level 2
@@ -229,13 +229,13 @@ ENGINE = [
     ("an enemy kills the player",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
-      "--run", "4", "1", "600", "--roam", "--expect-hits", "20",
+      "--run", "4", "1", "900", "--roam", "--expect-hits", "20",
       "--expect-health", "0"], None),
     ("an enemy shoots the player and hits",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
-      "--run", "4", "1", "120", "--roam", "--expect-shots", "45",
-      "--expect-hits", "6", "--expect-health", "70", "--expect-events", "72001",
+      "--run", "4", "1", "120", "--roam", "--expect-shots", "42",
+      "--expect-hits", "5", "--expect-health", "75", "--expect-events", "72001",
       "--expect-survived", "72001"], None),
     # and the loop closes: the player walks at an enemy, shoots it with the
     # hitscan the original uses, and it dies. Two minutes of hunting on level
@@ -252,7 +252,7 @@ ENGINE = [
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--run", "6", "1", "40", "--expect-playing", "14",
-      "--expect-moves", "1563", "--expect-touched", "1"], None),
+      "--expect-moves", "1649", "--expect-touched", "1"], None),
     ("the room graph culls what the engine draws",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
