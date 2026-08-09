@@ -316,11 +316,16 @@ pub struct Boot {
     /// [`launch`] for the arc and [`tick_touching`] for what flies it.
     pub jumps: BTreeMap<String, Jump>,
     /// What each walker has been told to do with its legs — `walker + 0xc`,
-    /// **0 still, 1 walk, 2 run** — written by `mdkWalkerGotoPoint`, its
-    /// direct variant and `mdkWalkerStop`. Nothing turns it into motion yet;
-    /// the only per-frame reader in the original is `mdkWalkerAnimUpdate`
-    /// (0x42f700, at 0x42f872), which is the piece still unread.
+    /// **0 still, 1 walk, 2 run, 3 back** — written by `mdkWalkerGotoPoint`,
+    /// its direct variant, `mdkWalkerStop` and the attack. The tick turns it
+    /// into both a move and an animation, the two things `mdkWalkerAnimUpdate`
+    /// and the move at 0x42fd0d read it for.
     pub gait: BTreeMap<String, i64>,
+    /// The body each walker walks with, kept between frames for its vertical
+    /// speed and whether it is on the ground. Created the first time a walker
+    /// is asked to move and never removed — a walker that stops still stands
+    /// on something.
+    pub bodies: BTreeMap<String, crate::game::body::Body>,
     /// Shots in the air, by the arena id of the bullet gob — **not by name**,
     /// because the scripts create them with `mdkCreateObjectLua("", ...)` and
     /// a bullet has none.
@@ -2966,24 +2971,20 @@ pub fn tick_touching(
     // spent along the **gob's own facing**, not along the heading, which is
     // why the turn has to come first and why a walker corners in an arc.
     //
-    // ponytail: no collision. The original hands the velocity to 0x46de70,
-    // which sweeps it and slides it along the surface normal at `omgob +
-    // 0x30`; here it is a flat slide through walls.
+    // ponytail: the collision is the player's `Body`, not the original's
+    // sweep. 0x46de70 takes the velocity and slides it along the surface
+    // normal at `omgob + 0x30`; this probes a column and slides along the two
+    // axes, which is the same idea a rung down.
     //
-    // A point refusal was tried and taken out, and what it found is worth
-    // more than what it fixed. Exactly **one** walker in a thirty-second run
-    // of level 7 is ever refused — `l7r2_spn1_spawn`, at (-346.7, -140.5,
-    // 29.3), inside the tree owned by `c9` — and that one is enough to stall
-    // the level: it is a spawner's grunt at the head of a sequence, it is
-    // *already* inside the geometry when it appears, so all three slide
-    // candidates are refused too, and every sequence behind it waits. A
-    // walker with `avoid` off (which is every call the game makes) and no
-    // sweep cannot get out of anything it starts inside.
-    //
-    // So the order is: find out why a spawn lands inside `c9` first, then
-    // give a non-player gob a body. Refusing steps before that trades walking
-    // through walls for standing still, which is the worse of the two.
-    let steps: Vec<(world::Id, String, [f64; 3], f64)> = {
+    // A bare point refusal was tried first and taken out, and what it found
+    // is why `Body` had to grow an escape. Exactly **one** walker in a
+    // thirty-second run of level 7 is ever refused — `l7r2_spn1_spawn`, at
+    // (-346.7, -140.5, 29.3), inside the tree owned by `c9` — and that one is
+    // enough to stall the level: it is a spawner's grunt at the head of a
+    // sequence, it is *already* inside the geometry when it appears, so all
+    // three slide candidates are refused too, and every sequence behind it
+    // waits. A body that is already buried now moves anyway.
+    let steps: Vec<(world::Id, String, [f64; 3], f64, f64)> = {
         let boot = boot_ref(&scripts.lua)?;
         let Some(w) = crate::game::world::world(&scripts.lua) else {
             return Err(Error::Pragma("no world".into()));
@@ -3016,16 +3017,44 @@ pub fn tick_touching(
                 }
                 let step = (dt * turn).min(d.abs()) * d.signum();
                 let yaw = if turning { yaw + step } else { yaw };
-                let at = [
-                    g.position[0] + yaw.cos() * speed * dt,
-                    g.position[1] + yaw.sin() * speed * dt,
-                    g.position[2],
-                ];
-                Some((id, name.clone(), at, yaw))
+                Some((id, name.clone(), g.position, yaw, speed))
             })
             .collect()
     };
-    for (id, name, at, yaw) in steps {
+    // and the body that carries it. A walker gets the **same** `Body` the
+    // player has — the column probe, the axis slide, the step-up and the
+    // gravity — because a second mover would be a second set of bugs.
+    //
+    // ponytail: every walker is the player's size. The original's sweep takes
+    // a radius and a height off the gob and this takes `EYE`; a bfb is not a
+    // grunt is not a Kurt, and the columns that say so are not read yet.
+    let solid = scripts
+        .lua
+        .app_data_ref::<std::rc::Rc<crate::game::body::Collision>>()
+        .map(|c| c.clone())
+        .filter(|c| !c.is_empty());
+    for (id, name, from, yaw, speed) in steps {
+        let at = match &solid {
+            Some(world) => {
+                let mut boot = boot_mut(&scripts.lua)?;
+                let body = boot
+                    .bodies
+                    .entry(name.clone())
+                    .or_insert_with(|| crate::game::body::Body::new([0.0; 3], yaw));
+                // the arena keeps a gob's feet and a body its eye
+                body.position = [from[0], from[1], from[2] + crate::game::body::EYE];
+                body.yaw = yaw;
+                body.step(world, [yaw.cos(), yaw.sin()], false, speed, dt);
+                let p = body.position;
+                [p[0], p[1], p[2] - crate::game::body::EYE]
+            }
+            // no level loaded: a test, and there is nothing to walk into
+            None => [
+                from[0] + yaw.cos() * speed * dt,
+                from[1] + yaw.sin() * speed * dt,
+                from[2],
+            ],
+        };
         if let Ok(gob) = globals.get::<mlua::Table>(name.as_str()) {
             place(&scripts.lua, &gob, at)?;
         }

@@ -1138,7 +1138,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     }
 
     // what the scripts actually did to the world while it ran
-    let (moved, playing, what, fired_sounds, spawned, jumped, shots, landed, struck, fighting, died) = {
+    let (moved, playing, what, fired_sounds, spawned, jumped, shots, landed, struck, fighting, died, walled, buried) = {
         let w = world::world(&scripts.lua).expect("a world");
         let boot = scripts.lua.app_data_ref::<api::Boot>().expect("boot state");
         let what: Vec<String> = boot
@@ -1149,7 +1149,10 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         // what the run asked to be heard: `omGobGSPlay` calls that reached a
         // sound the scripts had hung on an object
         let sounds: usize = boot.gob_sounds.iter().map(|g| g.played).sum();
-        (w.generation(), boot.playing.len(), what, sounds, boot.spawned.len(), boot.jumped, boot.fired, boot.hits, boot.keys_fired, boot.fighting.len(), boot.died.len())
+        // frames on which a walker's own body met a wall -- the one number that
+        // says the walkers collide with the level and not just with each other
+        let walled: usize = boot.bodies.values().map(|b| b.hits).sum();
+        (w.generation(), boot.playing.len(), what, sounds, boot.spawned.len(), boot.jumped, boot.fired, boot.hits, boot.keys_fired, boot.fighting.len(), boot.died.len(), walled, boot.bodies.values().map(|b| b.inside).sum::<usize>())
     };
     let (fired, survived) = state.total();
     let mut stopped: Vec<(&String, &usize)> = state.why.iter().collect();
@@ -1171,6 +1174,8 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         ("objects touched", state.touched.len(), expect_flag("--expect-touched")),
         ("objects spawned", spawned, expect_flag("--expect-spawned")),
         ("walkers launched", jumped, expect_flag("--expect-jumps")),
+        ("walker frames against a wall", walled, expect_flag("--expect-walled")),
+        ("walker frames inside geometry", buried, expect_flag("--expect-buried")),
         ("shots fired", shots, expect_flag("--expect-shots")),
         ("shots that hit", landed, expect_flag("--expect-hits")),
         ("animation keys", struck, expect_flag("--expect-keys")),
@@ -1190,7 +1195,8 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
          {} rooms entered, {survived} of {fired} handler calls ran to the end, \
          {moved} object moves, {playing} animations chosen, \
          {fired_sounds} sounds fired, {spawned} objects spawned, \
-         {jumped} walkers launched, {shots} shots fired ({landed} hit), \
+         {jumped} walkers launched, {walled} walker frames against a wall ({buried} inside), \
+         {shots} shots fired ({landed} hit), \
          {anim_keys} keys in {struck} struck, {fighting} enemies fighting, {shot_at} shot by the player and {died} killed, \
          {} objects touched and {} of them \
          scripted{}{} [{}]{}",

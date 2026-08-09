@@ -270,6 +270,12 @@ impl Body {
                     self.touching.insert(t);
                 }
             }
+            // A body that is **already** inside geometry may leave it. Without
+            // this every candidate is refused and it stands there for ever,
+            // which is not hypothetical: 39 of the game's own 625 waypoints
+            // are inside a collision tree, and one grunt on level 7 spawns in
+            // one and holds up every sequence queued behind it.
+            let stuck = world.blocked(self.position);
             // in pieces, so a fast frame cannot step over a thin wall
             let pieces = (run / 0.25).ceil().max(1.0) as usize;
             for _ in 0..pieces {
@@ -279,7 +285,7 @@ impl Body {
                         self.position[1] + ay / pieces as f64,
                         self.position[2],
                     ];
-                    if !world.blocked(candidate) {
+                    if stuck || !world.blocked(candidate) {
                         self.position[0] = candidate[0];
                         self.position[1] = candidate[1];
                         break;
@@ -415,6 +421,26 @@ mod tests {
             body.position[2]
         );
         assert_eq!(body.inside, 0, "a body must never finish inside the world");
+    }
+
+    /// A body that starts **inside** the world walks out of it. Every slide
+    /// candidate is solid there, so without the escape it would stand in the
+    /// rock for ever — which is not a hypothetical shape of level: 39 of the
+    /// game's 625 waypoints are inside a collision tree, and level 7 spawns a
+    /// grunt in one at the head of a sequence.
+    #[test]
+    fn a_body_that_starts_buried_can_still_walk_out() {
+        let world = floor();
+        let mut body = Body::new([0.0, 0.0, -5.0], 0.0);
+        assert!(world.blocked(body.position), "five under the floor is solid");
+        for _ in 0..60 {
+            body.step(&world, [1.0, 0.0], false, WALK, 1.0 / 60.0);
+        }
+        assert!(
+            (body.position[0] - WALK).abs() < 0.1,
+            "it should have covered the second, got {}",
+            body.position[0]
+        );
     }
 
     #[test]

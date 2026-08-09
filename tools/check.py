@@ -173,6 +173,12 @@ ENGINE = [
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--run", "7", "1", "30", "--expect-jumps", "2",
+      # and its walkers have a body now. Both numbers are the same 61 frames
+      # and that is the point: the only walker any run reaches is
+      # `l7r2_spn1_spawn`, which spawns **inside** `c9` -- so what this pins
+      # is the escape rule, not the refusal. Nothing in ten levels walks into
+      # a wall in the first thirty seconds.
+      "--expect-walled", "61", "--expect-buried", "61",
       "--expect-keys", "0", "--expect-fighting", "1",
       "--expect-moves", "1826",
       "--expect-events", "8104", "--expect-survived", "8104"], None),
