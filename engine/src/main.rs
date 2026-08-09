@@ -1428,6 +1428,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         );
         let mut at = body.position;
         let mut cull = true;
+        let mut shot_at: std::collections::BTreeSet<String> = Default::default();
         // -1 is not an environment, so the first frame always sets one; the
         // same trick starts the music, since -1 is also "stop"
         let mut listening = -1i32;
@@ -1442,13 +1443,37 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                     | Event::KeyDown { keycode: Some(Keycode::Escape), .. } => {
                         unsafe { scene.delete(&video.gl) };
                         let (fired, survived) = ticking.total();
+                        let died = level_scripts
+                            .lua
+                            .app_data_ref::<goodomen::game::api::Boot>()
+                            .map(|b| b.died.len())
+                            .unwrap_or(0);
                         return Ok(format!(
                             "{summary}, ran {:.0}s: {} rooms entered, \
-                             {survived} of {fired} handler calls ran to the end",
-                            ticking.clock, ticking.rooms_entered
+                             {survived} of {fired} handler calls ran to the end, \
+                             {} shot and {died} killed",
+                            ticking.clock, ticking.rooms_entered, shot_at.len()
                         ));
                     }
                     Event::KeyDown { keycode: Some(Keycode::C), .. } => cull = !cull,
+                    // **the mouse fires.** The hitscan is the original's —
+                    // 100 units along the nose, 2 damage, `DAMAGE_GOODGUY`,
+                    // through the collision world — and the button is the
+                    // engine's own command 0xd, which `mdkBullet.c` reads at
+                    // 0x430e47. There is no ammunition and no rate limit yet.
+                    Event::MouseButtonDown { .. } => {
+                        if let Some(name) = level_scripts
+                            .lua
+                            .app_data_ref::<goodomen::game::api::Boot>()
+                            .and_then(|b| b.player.clone())
+                        {
+                            if let Some(hit) =
+                                goodomen::game::api::hitscan(&level_scripts.lua, &name, 0)
+                            {
+                                shot_at.insert(hit);
+                            }
+                        }
+                    }
                     Event::MouseMotion { xrel, yrel, .. } => {
                         yaw -= xrel as f64 * 0.0025;
                         pitch = (pitch - yrel as f64 * 0.0025).clamp(-1.5, 1.5);
