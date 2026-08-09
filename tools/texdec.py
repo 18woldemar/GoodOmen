@@ -78,6 +78,8 @@ INDEX_AT = (0, 32)            # handlers A, C, D, from the table at 0x4b8160
 INDEX_AT_B = (0, 48)          # handler B, three bits a pixel
 
 DATA_OFFSET = 0x68            # where the mip chain starts, past the header
+RAW_OFFSET = 0x2c             # where an uncoded texture's only level starts
+CODED = 32                    # the u32 at 0x24; 0 means no blocks at all
 
 
 def levels(data: bytes) -> list[tuple[int, int, int, int]]:
@@ -88,8 +90,19 @@ def levels(data: bytes) -> list[tuple[int, int, int, int]]:
     from 0x68. The table only holds the *last* nine levels — a 1024x1024
     texture has eleven, so its two largest are absent from it — which makes
     the arithmetic the more reliable source. The table is checked against it.
+
+    A texture whose 0x24 is not 32 skips the codec: one level, no mip chain,
+    no offset table, pixels straight from 0x2c at 0x10 bytes each. Two of the
+    755 in `base.zip` are stored that way — `font.tex` and `dialogfont.tex` —
+    and so is every texture the 1C release adds in its `Local.zip`.
     """
     width, height = struct.unpack_from("<2I", data, 8)
+    if struct.unpack_from("<I", data, 0x24)[0] != CODED:
+        size = width * height * struct.unpack_from("<I", data, 0x10)[0]
+        if RAW_OFFSET + size != len(data):
+            raise ValueError(f"raw level is {size}, file is "
+                             f"{len(data) - RAW_OFFSET} past the header")
+        return [(RAW_OFFSET, size, width, height)]
     out, off = [], DATA_OFFSET
     while True:
         size = (width * height // 2 if width >= 8 and height >= 8
@@ -268,14 +281,16 @@ def decode_texture(data: bytes) -> list[bytes]:
     is passed through, as are the two fonts, which have no blocks at all
     (the u32 at 0x24 is 0 rather than 32).
     """
-    if struct.unpack_from("<I", data, 0x24)[0] != 32:
-        width, height = struct.unpack_from("<2I", data, 8)
-        return [data[0x2c:0x2c + width * height * 4]]
     out = []
     for off, size, w, h in levels(data):
         raw = data[off:off + size]
-        out.append(bytes(decode_level(w, h, raw)) if size == w * h // 2
-                   else raw)
+        if size == w * h // 2:
+            out.append(bytes(decode_level(w, h, raw)))
+        elif size == w * h * 3:      # an uncoded level with no alpha channel
+            out.append(bytes(b for p in range(0, size, 3)
+                             for b in (*raw[p:p + 3], 255)))
+        else:
+            out.append(raw)
     return out
 
 
@@ -375,10 +390,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if bad else 0
 
     data = files[0].read_bytes()
-    off, size, w, h = refdec.levels(data)[0]
-    bgra = decode_level(w, h, data[off:off + size])
+    _, _, w, h = levels(data)[0]        # ours, not refdec's: it has no raw case
     if args.out:
-        args.out.write_bytes(refdec.to_png(w, h, bgra, 4))
+        args.out.write_bytes(refdec.to_png(w, h, decode_texture(data)[0], 4))
     print(f"{files[0].name}: {w}x{h}", file=sys.stderr)
     return 0
 

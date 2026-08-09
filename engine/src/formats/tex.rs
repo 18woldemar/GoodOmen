@@ -110,12 +110,17 @@ impl Texture {
         let channels = u32le(data, 0x10)?;
 
         if u32le(data, 0x24)? != COMPRESSED {
-            // the two fonts: one level, raw BGRA, no chain and no table
-            let n = (width * height * 4) as usize;
-            let bgra = data
-                .get(RAW_OFFSET..RAW_OFFSET + n)
-                .ok_or(Error::Truncated)?
-                .to_vec();
+            // one level, no chain and no table, at `channels` bytes a pixel.
+            // The GOG release stores its two fonts this way and the 1C one
+            // every texture its `Local.zip` adds, three of those with no
+            // alpha channel at all.
+            let n = (width * height * channels) as usize;
+            let raw = data.get(RAW_OFFSET..RAW_OFFSET + n).ok_or(Error::Truncated)?;
+            let bgra = if channels == 4 {
+                raw.to_vec()
+            } else {
+                raw.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect()
+            };
             return Ok(Texture {
                 width,
                 height,
@@ -472,6 +477,27 @@ mod tests {
         assert_eq!(e5(31), 255);
         assert_eq!(e6(0), 0);
         assert_eq!(e6(63), 255);
+    }
+
+    /// An uncoded texture with no alpha channel: three bytes a pixel from
+    /// 0x2c, opened out to BGRA. The 1C release ships several and reading
+    /// them at four bytes runs off the end of the file.
+    #[test]
+    fn an_uncoded_texture_may_have_three_channels() {
+        let mut data = vec![0u8; RAW_OFFSET + 2 * 2 * 3];
+        data[..4].copy_from_slice(&TYPE_TEX.to_le_bytes());
+        data[8..12].copy_from_slice(&2u32.to_le_bytes()); // width
+        data[12..16].copy_from_slice(&2u32.to_le_bytes()); // height
+        data[16..20].copy_from_slice(&3u32.to_le_bytes()); // bytes a pixel
+        data[0x24..0x28].copy_from_slice(&0u32.to_le_bytes()); // not coded
+        data[RAW_OFFSET..].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+
+        let tex = Texture::parse(&data).unwrap();
+        assert_eq!(tex.levels.len(), 1);
+        assert_eq!(
+            tex.levels[0].bgra,
+            vec![1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255]
+        );
     }
 
     #[test]
