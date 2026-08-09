@@ -182,6 +182,18 @@ ENGINE = [
       "--expect-keys", "0", "--expect-fighting", "1",
       "--expect-moves", "1826",
       "--expect-events", "8104", "--expect-survived", "8104"], None),
+    # level 9 is where the walkers actually walk. Three of them cover 425
+    # units in thirty seconds without the player doing anything -- their
+    # scripts start at level load, which is why every checkpoint gives the
+    # same three -- and they stay out of the geometry the whole way. It is
+    # also the first level where a **gait animation strikes a key**: two of
+    # them run, and `ANIM_RUN` carries three.
+    ("walkers walk a level without leaving the world",
+     ["cargo", "run", "--quiet", "--release",
+      "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
+      "--run", "9", "1", "30", "--expect-walkers", "3",
+      "--expect-walled", "0", "--expect-buried", "0", "--expect-keys", "3",
+      "--expect-events", "33383", "--expect-survived", "32483"], None),
     # level 10's zizzy turrets shoot: nine bullets in thirty seconds, each one
     # carrying its damage, damage type, lifetime and speed out of the shot
     # table at 0x497388 rather than out of the call.
