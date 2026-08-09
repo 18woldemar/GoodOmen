@@ -1196,7 +1196,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     }
 
     // what the scripts actually did to the world while it ran
-    let (moved, playing, what, fired_sounds, spawned, jumped, shots, landed, struck, fighting, died, walled, buried, walkers, walked) = {
+    let (moved, playing, what, fired_sounds, spawned, jumped, shots, landed, struck, fighting, died, walled, buried, walkers, walked, started) = {
         let w = world::world(&scripts.lua).expect("a world");
         let boot = scripts.lua.app_data_ref::<api::Boot>().expect("boot state");
         let what: Vec<String> = boot
@@ -1213,7 +1213,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         // and how far they got, which is what says whether any of it ran
         // `max` only so an empty sum prints 0 and not -0
         let walked: f64 = boot.bodies.values().map(|b| b.travelled).sum::<f64>().max(0.0);
-        (w.generation(), boot.playing.len(), what, sounds, boot.spawned.len(), boot.jumped, boot.fired, boot.hits, boot.keys_fired, boot.fighting.len(), boot.died.len(), walled, boot.bodies.values().map(|b| b.inside).sum::<usize>(), boot.bodies.len(), walked)
+        (w.generation(), boot.playing.len(), what, sounds, boot.spawned.len(), boot.jumped, boot.fired, boot.hits, boot.keys_fired, boot.fighting.len(), boot.died.len(), walled, boot.bodies.values().map(|b| b.inside).sum::<usize>(), boot.bodies.len(), walked, boot.ever_scripted.len())
     };
     let (fired, survived) = state.total();
     let mut stopped: Vec<(&String, &usize)> = state.why.iter().collect();
@@ -1238,6 +1238,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         ("walker frames against a wall", walled, expect_flag("--expect-walled")),
         ("walker frames inside geometry", buried, expect_flag("--expect-buried")),
         ("walkers with a body", walkers, expect_flag("--expect-walkers")),
+        ("objects given a script", started, expect_flag("--expect-scripts")),
         ("shots fired", shots, expect_flag("--expect-shots")),
         ("shots that hit", landed, expect_flag("--expect-hits")),
         ("animation keys", struck, expect_flag("--expect-keys")),
@@ -1257,7 +1258,8 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
          {} rooms entered, {survived} of {fired} handler calls ran to the end, \
          {moved} object moves, {playing} animations chosen, \
          {fired_sounds} sounds fired, {spawned} objects spawned, \
-         {jumped} walkers launched, {walkers} walkers walked {walked:.0} units \
+         {jumped} walkers launched, {started} objects given a script, \
+         {walkers} walkers walked {walked:.0} units \
          and met a wall on {walled} frames ({buried} inside), \
          {shots} shots fired ({landed} hit), \
          {anim_keys} keys in {struck} struck, {fighting} enemies fighting, {shot_at} shot by the player and {died} killed, \

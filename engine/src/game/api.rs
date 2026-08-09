@@ -379,6 +379,10 @@ pub struct Boot {
     /// game — `StartScript`, `StartGlobalScript` and `StartMovie` are used
     /// 290 times across the level scripts and all three go through it.
     pub scripted: BTreeSet<String>,
+    /// Every object that has *ever* been given a script, which is the measure
+    /// of how much of a level a run reaches: a level's content is task lists,
+    /// and a task list only runs after something calls `StartScript`.
+    pub ever_scripted: BTreeSet<String>,
     /// Seconds since the last frame. A boot has not drawn one, so it holds
     /// the rate the recorded demo runs at — 30 fps — rather than zero, which
     /// would divide.
@@ -1668,6 +1672,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 let Some(gob) = args.first().and_then(gob_name) else { return Ok(()) };
                 let mut boot = boot_mut(lua)?;
                 if on {
+                    boot.ever_scripted.insert(gob.clone());
                     boot.scripted.insert(gob);
                 } else {
                     boot.scripted.remove(&gob);

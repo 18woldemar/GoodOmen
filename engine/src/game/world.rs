@@ -831,6 +831,27 @@ pub fn handle(lua: &Lua, name: &str, id: Id, at: [f64; 3]) -> mlua::Result<Table
     position.set("z", at[2])?;
     handle.set("position", position)?;
     lua.globals().set(name, &handle)?;
+
+    // **And a walker arms itself.** The last thing the walker constructor
+    // does, at 0x42f65d..0x42f688, is call the Lua global
+    // `SetDefaultWalkerEvents(gob, type)` — which is in `script.lua`, hangs
+    // `DefaultWalkerOnDamage` on the object and starts
+    // `DefaultAIScripts[type].script`, and that script is `{{
+    // mdkDoganboyAttack }}` for eleven of the thirteen types it names.
+    //
+    // So **the engine arms every enemy, not the level**: only one line in all
+    // ten level scripts calls it (level 2, for `l2rbif`), and without this an
+    // enemy never fights no matter how far the player walks. It is guarded by
+    // the global existing, because a boot with no `script.lua` has no such
+    // function and the original would have raised.
+    let kind = lua
+        .app_data_ref::<World>()
+        .and_then(|w| w.get(id).map(|g| g.kind));
+    if let Some(kind) = kind.filter(|k| base_hitpoints(*k).is_some()) {
+        if let Ok(arm) = lua.globals().get::<mlua::Function>("SetDefaultWalkerEvents") {
+            let _ = arm.call::<Value>((&handle, kind));
+        }
+    }
     Ok(handle)
 }
 
