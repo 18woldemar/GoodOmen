@@ -120,8 +120,42 @@ import mod2html as mh  # noqa: E402
 
 # the same constants the page uses; keep them in step
 EYE, STEP, GRAVITY = 1.7, 0.6, 20.0
-WALK, SPRINT = 4.0, 9.0
+WALK, SPRINT = 4.0, 9.0        # test speeds; a player takes PLAYER_SPEED
 DT = 1 / 60
+
+# The mouse turn, and none of it is a gain of ours any more. Three pieces:
+#
+#   * the axis (0x46f110). Its raw value is the positive half's command minus
+#     the negative half's -- `MOUSEX+` and `MOUSEX-`, the pair `mdk2.lua`
+#     declares and the pair the demo records. If the axis's +0x20 is not 1.0
+#     it is then shaped by `sign(raw) * pow(|raw|, +0x20)`, and the turn
+#     axis's exponent is **0.8**: a compressive curve. Then times the gain at
+#     +0x1c, and zeroed below a dead zone at +0x18, which is 0.
+#   * the gain, from `mdkSetTurnSensitivity` (0x43ab60 into 0x42d050):
+#     **n * n + 0.05**, the 0.05 being the float at 0x48f3c4.
+#   * Kurt (0x419d1e): `axis(1) * 45.0 * 1/60`, the 45.0 being the first float
+#     of the block at `gob + 0x64`.
+#
+# `defaultopt.lua` ships `mdkSetMouseSensitivity(0.5)`, so that is the
+# default here. The curve is why no single "radians per unit" ever fitted.
+SENSITIVITY = 0.5
+TURN_EXPONENT = 0.8
+TURN_FLOOR = 0.05
+TURN_RATE = 45.0
+
+
+def turn_from_axis(raw: float, sensitivity: float = SENSITIVITY) -> float:
+    """The original's turn, and **not yet what the replay uses**.
+
+    At the shipped sensitivity it turns about a quarter as fast as the flat
+    factor of 1.0 the replay still carries, and replaying the demo that slowly
+    ends with the body inside geometry on 30 frames where it was never once
+    inside. That is the body failing, not this: it is a vertical segment 1.7
+    tall with no width, and Kurt's is 2.0 by 0.8 (0x416863). The fast turn was
+    hiding it by swinging away from every wall.
+    """
+    shaped = abs(raw) ** TURN_EXPONENT * (1.0 if raw >= 0 else -1.0)
+    return shaped * (sensitivity * sensitivity + TURN_FLOOR) * TURN_RATE / 60.0
 
 
 class World:
@@ -354,6 +388,8 @@ def replay(w: World, start, yaw: float, frames: list, mouse: float = 1.0,
         held = {}
         for cmd, v in f["input"]:
             held[cmd] = v
+        # still the flat factor and not turn_from_axis; see its docstring and
+        # the engine's `Body::replay` for the measurement that says why
         yaw -= mouse * held.get(TURN_RIGHT, 0.0)
         yaw += mouse * held.get(TURN_LEFT, 0.0)
         fx, fy = math.cos(yaw), math.sin(yaw)
@@ -552,8 +588,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="replay the demo in the engine too and require the "
                          "same body")
     ap.add_argument("--mouse", type=float, default=1.0,
-                    help="radians per unit of the demo's axis values; a guess,"
-                         " the file does not carry the sensitivity")
+                    help="radians per unit of the demo's axis value; flat, and not what the original does -- see turn_from_axis")
     args = ap.parse_args(argv)
 
     if args.keys:

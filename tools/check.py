@@ -153,11 +153,17 @@ ENGINE = [
      ["walksim.py", "extracted/base/l1.lua", "--resources", "extracted",
       "--demo", "extracted/base/demo1_5.omn", "--engine", "$MDK2_GOG"],
      "base/demo1_5.omn"),
-    ("the engine runs a level, driver and all",
+    # and the one recorded demo the game ships drives it, trigger included:
+    # `demo1_5.omn` holds fire on 161 of its 1348 frames, and the run now
+    # answers each of them with the hitscan. 21 land and one conehead dies,
+    # which is the only validation an input recording can give -- it carries
+    # no positions, but a player shoots at something.
+    ("the engine runs a level on the recorded demo, trigger and all",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--run", "1", "5", "45", "--expect-rooms", "1",
-      "--expect-events", "21600", "--expect-survived", "20250",
+      "--expect-events", "20474", "--expect-survived", "19135",
+      "--expect-shot-at", "21", "--expect-killed", "1",
       "--expect-touched", "1"], None),
     ("a run reaches a spawner and the enemies arrive with hitpoints",
      ["cargo", "run", "--quiet", "--release",

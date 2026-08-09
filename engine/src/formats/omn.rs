@@ -29,6 +29,9 @@ pub const BACKWARD: u32 = 208; // DIK_DOWN
 pub const LEFT: u32 = 203; // DIK_LEFT
 pub const RIGHT: u32 = 205; // DIK_RIGHT
 pub const JUMP: u32 = 1001; // the second mouse button
+/// The first mouse button — `COM_SHOOT` and `COM_MELEE` are both bound to it
+/// by `defaultkeys.lua`. Held on 161 of `demo1_5.omn`'s 1348 frames.
+pub const SHOOT: u32 = 1000;
 pub const TURN_RIGHT: u32 = 1004;
 pub const TURN_LEFT: u32 = 1005;
 

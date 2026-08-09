@@ -1105,12 +1105,38 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
             .unwrap_or(100.0)
     };
     let mut drive = goodomen::game::body::Drive::default();
+    // radians per unit of the demo's axis value. Flat, and not what the
+    // original does — `body::turn_from_axis` is, and its docstring says why
+    // it is not wired yet. `--mouse` overrides it so the two can be compared.
+    let turn = std::env::args()
+        .position(|a| a == "--mouse")
+        .and_then(|i| std::env::args().nth(i + 1))
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(1.0);
 
     for step in 0..steps {
         ran = step + 1;
         let was = body.position;
         match &frames {
-            Some(f) if step < f.len() => body.replay(&collision, &f[step..step + 1], 1.0, who),
+            Some(f) if step < f.len() => {
+                body.replay(&collision, &f[step..step + 1], turn, who);
+                // **and the recorded trigger fires.** This is the only
+                // validation the demo can give: the file carries no
+                // positions, but it carries when the player shot, and a
+                // player shoots at something. How many of those 161 frames
+                // land is a measure of whether the turn rate is right.
+                if f[step].held(goodomen::formats::omn::SHOOT).is_some() {
+                    if let Some(name) = scripts
+                        .lua
+                        .app_data_ref::<api::Boot>()
+                        .and_then(|b| b.player.clone())
+                    {
+                        if api::hitscan(&scripts.lua, &name, 0).is_some() {
+                            shot_at += 1;
+                        }
+                    }
+                }
+            }
             // forwards, which is enough to cross a room — or, with `--hunt`,
             // **toward the nearest thing that has hitpoints**. That is the
             // harness's own idea and not the game's: the AI only runs when a

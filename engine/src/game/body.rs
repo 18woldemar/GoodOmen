@@ -46,12 +46,11 @@ use crate::game::world::World;
 /// buttons:  yaw += dt * block[0] * (body[0xc0] ? 0.05 : 1/60)
 /// ```
 ///
-/// so **0.75 radians per unit of axis**, and the keyboard turns three times
-/// faster while `body + 0xc0` is set. The HD build compiles the same two as
-/// `/ 60.0` and `* 3.0 / 60.0`, which is how 0.05 was settled. The pitch
-/// accumulates into the same block at +0x3c. None of that is wired here yet:
-/// the mouse path needs the `.omn` command bound to an axis index, and
-/// guessing it would silently move the demo replay's path.
+/// and the keyboard turns three times faster while `body + 0xc0` is set. The
+/// HD build compiles the same two as `/ 60.0` and `* 3.0 / 60.0`, which is
+/// how 0.05 was settled. The pitch accumulates into the same block at +0x3c
+/// and is not wired. The mouse path **is** — see [`turn_from_axis`], which
+/// carries the axis's own curve as well as this factor.
 ///
 /// [`EYE`] is still ours, though Kurt's constructor writes **1.2** to
 /// `mdkGob + 0x08` at 0x4168b1, beside his hitpoints — the field
@@ -406,13 +405,22 @@ impl Body {
 
     /// Drive the body from a parsed `.omn`.
     ///
-    /// `mouse` is radians per unit of the demo's axis values and it is a
-    /// guess: the file does not carry the sensitivity and neither does any
-    /// script. Below about 0.2 the body grinds along walls.
+    /// `mouse` is radians per unit of the demo's axis value — a flat factor,
+    /// and **not** what the original does. [`turn_from_axis`] is what the
+    /// original does, and why it is not used here is in the body below.
     pub fn replay(&mut self, world: &Collision, frames: &[omn::Frame], mouse: f64, kind: f64) {
         let mut drive = Drive::default();
         for frame in frames {
             let dt = (frame.dt as f64).clamp(1e-4, 0.2);
+            // ponytail: still the flat factor, **not** [`turn_from_axis`],
+            // and the reason is measured. The real chain turns about a
+            // quarter as fast at the shipped sensitivity, and replaying the
+            // demo that slowly puts the body inside geometry on 30 frames
+            // where it was never once inside before. That is this body
+            // failing, not the reading: it is a vertical segment 1.7 tall
+            // with no width, where Kurt's is 2.0 by 0.8 (0x416863). A fast
+            // turn was hiding it by swinging away from every wall. Wire the
+            // real turn when the body is swept and the right size.
             self.yaw -= mouse * frame.held(omn::TURN_RIGHT).unwrap_or(0.0) as f64;
             self.yaw += mouse * frame.held(omn::TURN_LEFT).unwrap_or(0.0) as f64;
             let ahead = frame.held(omn::FORWARD).is_some() as i32
@@ -426,6 +434,34 @@ impl Body {
     }
 }
 
+/// Radians of yaw for one frame's worth of mouse, and **none of it is a gain
+/// picked by us**. Three pieces, each read where it lives:
+///
+/// - the axis itself (0x46f110). Its value is the positive half's command
+///   minus the negative half's — `MOUSEX+` and `MOUSEX-`, which is the pair
+///   `mdk2.lua` declares and the pair the demo records. Then, if the axis's
+///   `+0x20` is not 1.0, `sign(raw) * pow(|raw|, +0x20)` — a **compressive
+///   curve**, and the turn axis's exponent is **0.8**. Then times the axis's
+///   gain at `+0x1c`, and zeroed under a dead zone at `+0x18` which is 0.
+/// - the gain, from `mdkSetTurnSensitivity` (0x43ab60 into 0x42d050):
+///   **`n * n + 0.05`**, the 0.05 being the float at 0x48f3c4. It writes the
+///   same gain to axes 0 and 1, giving axis 0 a linear response and axis 1
+///   the 0.8 curve. `defaultopt.lua` calls it with **0.5**, so the shipped
+///   gain is 0.30.
+/// - Kurt (0x419d1e): `axis(1)` times the first float of the block at
+///   `gob + 0x64` — 45.0 — times 1/60.
+///
+/// The curve is why no single "radians per unit of axis" ever fitted: a
+/// compressive exponent boosts small movements relative to large ones, and a
+/// linear factor cannot be both at once.
+pub fn turn_from_axis(raw: f64, sensitivity: f64) -> f64 {
+    const EXPONENT: f64 = 0.8; // the axis's +0x20, set at 0x42d079
+    const FLOOR: f64 = 0.05; // 0x48f3c4
+    const TURN_RATE: f64 = 45.0; // the block at gob + 0x64, written at 0x416ad5
+    let shaped = raw.abs().powf(EXPONENT) * raw.signum();
+    shaped * (sensitivity * sensitivity + FLOOR) * TURN_RATE / 60.0
+}
+
 /// A playable character's two speeds, smoothed toward what the table asks for.
 ///
 /// The original keeps them at `kurt + 0x0c` and `kurt + 0x10` and steps each
@@ -434,6 +470,25 @@ impl Body {
 /// [`crate::game::world::ACCELERATE`]. Holding both is what makes the
 /// diagonals right: the table's own entries are pre-normalised, so this must
 /// **not** normalise them again — only the direction is a unit vector.
+#[cfg(test)]
+mod turn_tests {
+    /// The curve is the part that cannot be folded into a gain, so this pins
+    /// its shape rather than a number: a compressive exponent makes a small
+    /// movement worth proportionally more than a large one.
+    #[test]
+    fn the_turn_axis_compresses_before_it_scales() {
+        use super::turn_from_axis;
+        let (small, large) = (turn_from_axis(0.1, 0.5), turn_from_axis(1.0, 0.5));
+        assert!(small / 0.1 > large / 1.0, "small movements are worth more per unit");
+        assert!((turn_from_axis(-0.4, 0.5) + turn_from_axis(0.4, 0.5)).abs() < 1e-12);
+        assert_eq!(turn_from_axis(0.0, 0.5), 0.0);
+        // the shipped slider is 0.5, so the gain is 0.25 + 0.05, and a full
+        // unit of axis turns by that times 45/60
+        assert!((turn_from_axis(1.0, 0.5) - 0.3 * 0.75).abs() < 1e-12);
+        assert!(turn_from_axis(1.0, 1.0) > turn_from_axis(1.0, 0.5), "and it is monotonic");
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Drive {
     pub forward: f64,
