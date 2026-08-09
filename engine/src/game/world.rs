@@ -472,12 +472,13 @@ pub const SIZE: [(f64, f64, f64); 19] = [
     (260.0, 24.0, 12.0), // zizzy
 ];
 
-/// How tall a type is, if the table names it and it has a body at all.
-pub fn height(kind: f64) -> Option<f64> {
+/// How tall and how wide a type is, if the table names it and it has a body
+/// at all. The shwang and the angel hold -1 and get none.
+pub fn size(kind: f64) -> Option<(f64, f64)> {
     SIZE.iter()
         .find(|(k, ..)| *k == kind)
-        .map(|&(_, tall, _)| tall)
-        .filter(|t| *t > 0.0)
+        .map(|&(_, tall, wide)| (tall, wide))
+        .filter(|&(tall, wide)| tall > 0.0 && wide > 0.0)
 }
 
 /// Which animation a walker plays for a gait, given how hurt it is.

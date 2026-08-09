@@ -2984,7 +2984,7 @@ pub fn tick_touching(
     // sequence, it is *already* inside the geometry when it appears, so all
     // three slide candidates are refused too, and every sequence behind it
     // waits. A body that is already buried now moves anyway.
-    let steps: Vec<(world::Id, String, [f64; 3], f64, f64, f64)> = {
+    let steps: Vec<(world::Id, String, [f64; 3], f64, f64, f64, f64)> = {
         let boot = boot_ref(&scripts.lua)?;
         let Some(w) = crate::game::world::world(&scripts.lua) else {
             return Err(Error::Pragma("no world".into()));
@@ -3019,9 +3019,9 @@ pub fn tick_touching(
                 let yaw = if turning { yaw + step } else { yaw };
                 // `def + 0x78`, and the player's height for a type the table
                 // does not name — a spawner's own gob, say
-                let tall = crate::game::world::height(g.kind)
-                    .unwrap_or(crate::game::body::EYE);
-                Some((id, name.clone(), g.position, yaw, speed, tall))
+                let (tall, wide) = crate::game::world::size(g.kind)
+                    .unwrap_or((crate::game::body::EYE, 0.0));
+                Some((id, name.clone(), g.position, yaw, speed, tall, wide))
             })
             .collect()
     };
@@ -3029,23 +3029,21 @@ pub fn tick_touching(
     // player has — the column probe, the axis slide, the step-up and the
     // gravity — because a second mover would be a second set of bugs.
     //
-    // Its height is its type's own — `def + 0x78`, which the constructor puts
-    // in the collision block at `gob + 0x68`. ponytail: the **width** beside
-    // it, `def + 0x7c`, is still unused, because the probe is a column of
-    // points and has no radius to give it to.
+    // Its height and width are its type's own — `def + 0x78` and `+0x7c`,
+    // which the constructor puts in the collision block at `gob + 0x68`.
     let solid = scripts
         .lua
         .app_data_ref::<std::rc::Rc<crate::game::body::Collision>>()
         .map(|c| c.clone())
         .filter(|c| !c.is_empty());
-    for (id, name, from, yaw, speed, tall) in steps {
+    for (id, name, from, yaw, speed, tall, wide) in steps {
         let at = match &solid {
             Some(world) => {
                 let mut boot = boot_mut(&scripts.lua)?;
                 let body = boot
                     .bodies
                     .entry(name.clone())
-                    .or_insert_with(|| crate::game::body::Body::sized([0.0; 3], yaw, tall));
+                    .or_insert_with(|| crate::game::body::Body::shaped([0.0; 3], yaw, tall, wide));
                 // the arena keeps a gob's feet and a body its head
                 body.position = [from[0], from[1], from[2] + tall];
                 body.yaw = yaw;

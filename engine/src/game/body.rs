@@ -128,15 +128,29 @@ impl Collision {
     /// Which tree stops the body here, sampling exactly where
     /// [`Collision::blocked`] does — otherwise the two could disagree about
     /// whether there was a collision at all.
-    pub fn blocking(&self, p: [f64; 3], tall: f64) -> Option<usize> {
+    pub fn blocking(&self, p: [f64; 3], tall: f64, wide: f64) -> Option<usize> {
         let mut h = STEP;
         while h <= tall + 1e-9 {
-            if let Some(t) = self.at([p[0], p[1], p[2] - tall + h]) {
-                return Some(t);
+            for (dx, dy) in Collision::ring(wide) {
+                if let Some(t) = self.at([p[0] + dx, p[1] + dy, p[2] - tall + h]) {
+                    return Some(t);
+                }
             }
             h += (tall - STEP).max(1e-9) / 2.0;
         }
         None
+    }
+
+    /// Where a probe of this width samples in the horizontal plane: the
+    /// centre, and the four points half a width out on the axes.
+    ///
+    /// ponytail: four points, not a swept hull. `def + 0x7c` is a full width
+    /// and omCollision halves it, so half of it is the radius; a cross of
+    /// five samples is the cheapest thing that notices a wall a body's
+    /// shoulder would touch and its centre would not.
+    fn ring(wide: f64) -> [(f64, f64); 5] {
+        let r = (wide / 2.0).max(0.0);
+        [(0.0, 0.0), (r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r)]
     }
 
     /// The tree **under** the feet, which is what the body is standing on.
@@ -170,11 +184,13 @@ impl Collision {
     }
 
     /// Only the body above step height stops it; below is a kerb to walk over.
-    pub fn blocked(&self, p: [f64; 3], tall: f64) -> bool {
+    pub fn blocked(&self, p: [f64; 3], tall: f64, wide: f64) -> bool {
         let mut h = STEP;
         while h <= tall + 1e-9 {
-            if self.solid([p[0], p[1], p[2] - tall + h]) {
-                return true;
+            for (dx, dy) in Collision::ring(wide) {
+                if self.solid([p[0] + dx, p[1] + dy, p[2] - tall + h]) {
+                    return true;
+                }
             }
             // a walker shorter than the kerb still gets its three samples
             h += (tall - STEP).max(1e-9) / 2.0;
@@ -207,6 +223,11 @@ pub struct Body {
     /// own `def + 0x78`, so a bfb sixteen units tall does not fit where a
     /// hoser two units tall does.
     pub height: f64,
+    /// And how wide: `def + 0x7c`, halved into a radius by the probe. The
+    /// player's is **zero** on purpose — his walk is pinned frame for frame
+    /// against `walksim.py` and against his own recorded demo, and widening
+    /// him would move both.
+    pub width: f64,
 }
 
 impl Body {
@@ -216,8 +237,14 @@ impl Body {
 
     /// A body of a named height, which is what a walker gets.
     pub fn sized(position: [f64; 3], yaw: f64, height: f64) -> Body {
+        Body::shaped(position, yaw, height, 0.0)
+    }
+
+    /// A body with a width as well, which is what a walker gets.
+    pub fn shaped(position: [f64; 3], yaw: f64, height: f64, width: f64) -> Body {
         Body {
             height,
+            width,
             position,
             yaw,
             velocity_z: 0.0,
@@ -236,7 +263,7 @@ impl Body {
             let mut lift = 0.0;
             while lift < self.height
                 && world.footed(p(self, z + lift), self.height)
-                && !world.blocked(p(self, z + lift + 0.05), self.height)
+                && !world.blocked(p(self, z + lift + 0.05), self.height, self.width)
             {
                 lift += 0.05;
             }
@@ -275,9 +302,9 @@ impl Body {
             let run = speed * dt;
             let (dx, dy) = (direction[0] / length * run, direction[1] / length * run);
             let ahead = [self.position[0] + dx, self.position[1] + dy, self.position[2]];
-            if world.blocked(ahead, self.height) {
+            if world.blocked(ahead, self.height, self.width) {
                 self.hits += 1;
-                if let Some(t) = world.blocking(ahead, self.height) {
+                if let Some(t) = world.blocking(ahead, self.height, self.width) {
                     self.touching.insert(t);
                 }
             }
@@ -286,7 +313,7 @@ impl Body {
             // which is not hypothetical: 39 of the game's own 625 waypoints
             // are inside a collision tree, and one grunt on level 7 spawns in
             // one and holds up every sequence queued behind it.
-            let stuck = world.blocked(self.position, self.height);
+            let stuck = world.blocked(self.position, self.height, self.width);
             // in pieces, so a fast frame cannot step over a thin wall
             let pieces = (run / 0.25).ceil().max(1.0) as usize;
             for _ in 0..pieces {
@@ -296,7 +323,7 @@ impl Body {
                         self.position[1] + ay / pieces as f64,
                         self.position[2],
                     ];
-                    if stuck || !world.blocked(candidate, self.height) {
+                    if stuck || !world.blocked(candidate, self.height, self.width) {
                         self.position[0] = candidate[0];
                         self.position[1] = candidate[1];
                         break;
@@ -325,19 +352,19 @@ impl Body {
 
         // give the sideways move back if the *finished* position is solid
         self.position[2] = z;
-        if world.blocked(self.position, self.height) {
+        if world.blocked(self.position, self.height, self.width) {
             let mut back = Body {
                 position: [was[0], was[1], z],
-                ..Body::sized([0.0; 3], 0.0, self.height)
+                ..Body::shaped([0.0; 3], 0.0, self.height, self.width)
             };
             back.on_ground = self.on_ground;
             back.velocity_z = self.velocity_z;
             let settled = back.settle(world, z);
-            if !world.blocked([was[0], was[1], settled], self.height) {
+            if !world.blocked([was[0], was[1], settled], self.height, self.width) {
                 self.position = [was[0], was[1], settled];
             }
         }
-        if world.blocked(self.position, self.height) {
+        if world.blocked(self.position, self.height, self.width) {
             self.inside += 1;
         }
         // and what it finishes the frame standing on
@@ -404,6 +431,45 @@ mod tests {
         }
     }
 
+    /// The same one plane stood on end: solid everywhere below x = 0.
+    fn wall() -> Collision {
+        let mut d = Vec::new();
+        for v in [1.0f32, 0.0, 0.0, 0.0] {
+            d.extend_from_slice(&v.to_le_bytes());
+        }
+        d.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        d.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        Collision {
+            nodes: 1,
+            trees: vec![Tree {
+                bsp: Bsp::parse(&d).unwrap(),
+                lo: [-100.0; 3],
+                hi: [100.0; 3],
+                gob: "the wall".into(),
+            }],
+        }
+    }
+
+    /// **A wide body does not fit where a narrow one does.** `def + 0x7c` is
+    /// the full width and omCollision halves it, so half of it is how far the
+    /// probe reaches sideways: a grunt is 3.8 wide and stops 1.9 short of a
+    /// wall its centre would have walked into.
+    #[test]
+    fn width_keeps_a_body_off_a_wall_its_centre_would_clear() {
+        let world = wall();
+        // one unit clear of the wall, standing
+        let point = [1.0, 0.0, EYE];
+        assert!(!world.blocked(point, EYE, 0.0), "a point one unit clear is clear");
+        assert!(
+            world.blocked(point, EYE, 3.8),
+            "a grunt's 3.8 reaches 1.9 sideways, which is past the wall"
+        );
+        assert!(
+            !world.blocked(point, EYE, 1.0),
+            "and half a unit does not"
+        );
+    }
+
     /// A tree names its object, which is what turns "the body hit
     /// something" into an `OnCollision` about *that* object.
     #[test]
@@ -448,7 +514,10 @@ mod tests {
     fn a_body_that_starts_buried_can_still_walk_out() {
         let world = floor();
         let mut body = Body::new([0.0, 0.0, -5.0], 0.0);
-        assert!(world.blocked(body.position, body.height), "five under the floor is solid");
+        assert!(
+            world.blocked(body.position, body.height, body.width),
+            "five under the floor is solid"
+        );
         for _ in 0..60 {
             body.step(&world, [1.0, 0.0], false, WALK, 1.0 / 60.0);
         }
