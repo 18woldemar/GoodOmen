@@ -1076,7 +1076,17 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         spawn.facing,
     );
     let mut state = api::Ticking::default();
-    let dt = 1.0 / 30.0;
+    // `--fps N` runs the same seconds at a different frame time. A window
+    // runs at over a thousand frames a second and a run at thirty, and that
+    // difference has already hidden one bug — a state that was re-decided
+    // every frame lost all of its walk on screen and most of it here — so
+    // the harness can now be asked for the window's rate.
+    let dt = 1.0
+        / std::env::args()
+            .position(|a| a == "--fps")
+            .and_then(|i| std::env::args().nth(i + 1))
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(30.0);
     let steps = (seconds / dt) as usize;
 
     for step in 0..steps {
@@ -1689,6 +1699,35 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 )
             {
                 eprintln!("goodomen: {e}");
+            }
+
+            // **and its population, not just its positions.** The draw list
+            // was built once at load, so everything made while playing — a
+            // bullet, a spawner's grunt, an explosion — existed in the arena
+            // and was never on screen. That is most of why a fight could be
+            // happening and look like nothing at all.
+            let fresh: Vec<(goodomen::game::world::Id, String)> = {
+                let drawn = scene.drawn();
+                goodomen::game::world::world(&level_scripts.lua)
+                    .map(|w| {
+                        w.iter()
+                            .filter(|(id, _)| !drawn.contains(id))
+                            .filter_map(|(id, g)| {
+                                Some((id, goodomen::game::api::model_for_type(g.kind)?))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            for (id, resource) in fresh {
+                if unsafe { scene.load(&video.gl, &mut install, &resource) } {
+                    // it takes its transform from the arena on the same frame,
+                    // in `follow` below, so identity is only where it starts
+                    scene.place(&resource, Mat4::IDENTITY, None, Some(id));
+                } else {
+                    // remember it as drawn anyway, or every frame retries it
+                    scene.place("", Mat4::IDENTITY, None, Some(id));
+                }
             }
 
             // the drawn world follows the arena: an object the scripts moved

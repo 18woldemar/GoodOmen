@@ -521,6 +521,12 @@ impl Scene {
         self.hidden.push(Vec::new());
     }
 
+    /// Which arena ids already have a draw, so the caller can find the ones
+    /// that appeared since the level loaded — a bullet, or a spawner's grunt.
+    pub fn drawn(&self) -> std::collections::BTreeSet<crate::game::world::Id> {
+        self.owners.iter().flatten().copied().collect()
+    }
+
     /// Follow the world: an object the scripts moved moves on screen, and one
     /// they told to play an animation plays that one.
     ///
