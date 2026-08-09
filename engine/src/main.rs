@@ -941,11 +941,19 @@ fn load_animation_keys(install: &mut Install, scripts: &Scripts) -> usize {
     }
     let mut found = 0;
     let mut keys = std::collections::BTreeMap::new();
+    // and how long each animation lasts, which the arena has no other way to
+    // learn: the record's own playback rate makes a loop `1 / |rate|` seconds
+    // long, and `Animation::loop_rate` is where the believable-rate rule
+    // already lives. Without it the engine can start an animation and never
+    // know it has finished, which is what a "play this and stand still until
+    // it ends" state needs.
+    let mut spans = std::collections::BTreeMap::new();
     for name in wanted {
         let Ok(bytes) = install.read(&format!("{name}.mod")) else { continue };
         let Ok(model) = Model::parse(&bytes) else { continue };
         let mut list = Vec::new();
         for anim in &model.animations {
+            spans.insert((name.clone(), anim.id as i64), 1.0 / anim.loop_rate() as f64);
             for channel in &anim.channels {
                 if channel.kind != 23 {
                     continue;
@@ -963,6 +971,7 @@ fn load_animation_keys(install: &mut Install, scripts: &Scripts) -> usize {
     }
     if let Some(mut boot) = scripts.lua.app_data_mut::<api::Boot>() {
         boot.keys = keys;
+        boot.spans = spans;
     }
     found
 }

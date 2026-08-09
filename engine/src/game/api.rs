@@ -373,6 +373,10 @@ pub struct Boot {
     pub keys: BTreeMap<String, Vec<(f64, f64, f64)>>,
     /// Keys that have fired, counted so a run can be held to a number.
     pub keys_fired: usize,
+    /// How long each animation lasts, `(model, animation) -> seconds`, from
+    /// the record's own playback rate. Filled by the driver, because the
+    /// arena has no models — the same reason [`Boot::keys`] is.
+    pub spans: BTreeMap<(String, i64), f64>,
     /// How many shots a run has fired, since `shots` only holds the live ones.
     pub fired: usize,
     /// How many of them hit something that took damage.
@@ -1110,6 +1114,15 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             // ponytail: states 4 and 0 are collapsed here into the burst
             // below, so what this adds is the two ways out to state 5.
             const ADVANCING: f64 = 3.0; // 0x432cde, 0x432ce1
+            // **and it stays in it.** The original enters state 5 and the
+            // state runs until something changes it; this function re-decides
+            // on every call, so without this the gait went back to 0 on the
+            // very next one. At 30 frames a second that cost most of the walk
+            // and in the window, which runs at over a thousand, it cost all of
+            // it: the same level gave 177 units headless and 8 in a window.
+            if cool > 0.0 && boot.gait.get(&who) == Some(&2) {
+                return Ok(0.0);
+            }
             if let Some(rec) = crate::game::world::ai(kind) {
                 let choosing = cool <= 0.0 && left <= 0.0 && dist >= near;
                 let advance = if dist >= rec.reach {
@@ -1126,6 +1139,60 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                     boot.cooldown.insert(who.clone(), ADVANCING);
                     boot.gait.insert(who, 2);
                     return Ok(0.0);
+                }
+            }
+
+            // **State 9: turn, and play what the chooser picked.** The
+            // engine can hold one now, because it knows how long an animation
+            // lasts — see [`Boot::spans`]. Three branches of the tree end
+            // here and all three are the same shape: pick an id, play it,
+            // stand still until it is over.
+            //
+            // - **the taunts** (0x432ba3): under `taunt`, a grunt or an
+            //   invisogrunt plays `ANIM_TAUNT0 - floor(rand * 3)` — the three
+            //   taunts at 0x70..0x72 — and anything else tosses a coin
+            //   between `ANIM_TAUNT1` and `ANIM_TAUNT0`
+            // - **the scared one** (0x432a36): below `hurt` of its health and
+            //   under `scared`, `ANIM_SCARED`
+            //
+            // ponytail: the original checks the model actually carries the
+            // animation (0x461650) before choosing it; here an id it does not
+            // have simply plays nothing.
+            const ANIM_TAUNT0: f64 = 0x70 as f64;
+            const ANIM_TAUNT1: f64 = 0x71 as f64;
+            const ANIM_SCARED: f64 = 0x12 as f64;
+            if let Some(rec) = crate::game::world::ai(kind) {
+                if cool <= 0.0 && left <= 0.0 {
+                    let hurt = with_gob(lua, args.first(), |g| {
+                        g.max_hitpoints > 0
+                            && (g.hitpoints as f64) < g.max_hitpoints as f64 * rec.hurt
+                    })
+                    .unwrap_or(false);
+                    let show = if hurt && boot.random.next() < rec.scared {
+                        Some(ANIM_SCARED)
+                    } else if boot.random.next() < rec.taunt {
+                        Some(if kind == GRUNT || kind == INVISOGRUNT {
+                            ANIM_TAUNT0 - (boot.random.next() * 3.0).floor()
+                        } else if boot.random.next() < 0.5 {
+                            ANIM_TAUNT1
+                        } else {
+                            ANIM_TAUNT0
+                        })
+                    } else {
+                        None
+                    };
+                    if let Some(id) = show {
+                        let span = crate::game::api::model_for_type(kind)
+                            .and_then(|m| boot.spans.get(&(m, id as i64)).copied())
+                            .unwrap_or(0.0);
+                        if span > 0.0 {
+                            boot.playing.insert(who.clone(), id);
+                            boot.since.insert(who.clone(), 0.0);
+                            boot.cooldown.insert(who.clone(), span);
+                            boot.gait.insert(who, 0);
+                            return Ok(0.0);
+                        }
+                    }
                 }
             }
 
@@ -2572,6 +2639,8 @@ const DOGANBOY: f64 = 207.0;
 /// `OBJ_INVISOGRUNT`, which 0x432b77 sends straight to the fight rather than
 /// letting it choose to close.
 const INVISOGRUNT: f64 = 219.0;
+/// `OBJ_GRUNT`, which taunts out of the three rather than the two.
+const GRUNT: f64 = 202.0;
 const DBGRENADE: f64 = 417.0;
 
 /// `ANIM_SHOOT` and `ANIM_THROW`. 0x4331f8 plays the first for every round of
@@ -3911,14 +3980,19 @@ mod tests {
         // long enough that the chooser's advance roll cannot starve it: a
         // hoser closes seven times in ten and each advance costs three
         // seconds, so three seconds of trying is not enough and thirty is
+        let mut aimed = false;
         for _ in 0..900 {
             scripts.lua.load("mdkDoganboyAttack(h)").exec().unwrap();
             let eye = [0.0, 20.0, crate::game::body::EYE];
             tick(&scripts, &rooms, eye, 0.0, 1.0 / 30.0, &mut ticking).unwrap();
+            // it does not *end* on `ANIM_SHOOT` any more, because the chooser
+            // sends it walking again afterwards -- what matters is that the
+            // animation came up at all, since that is what fires the shot
+            aimed |= scripts.lua.app_data_ref::<Boot>().unwrap().playing.get("h") == Some(&56.0);
         }
         let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
         assert!(boot.fired > 0, "it should have fired by now");
-        assert_eq!(boot.playing["h"], 56.0, "and it is playing ANIM_SHOOT");
+        assert!(aimed, "and the shot came off ANIM_SHOOT");
         drop(boot);
         let w = world::world(&scripts.lua).unwrap();
         assert!(

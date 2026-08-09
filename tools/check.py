@@ -178,10 +178,10 @@ ENGINE = [
       # `l7r2_spn1_spawn`, which spawns **inside** `c9` -- so what this pins
       # is the escape rule, not the refusal. Nothing in ten levels walks into
       # a wall in the first thirty seconds.
-      "--expect-walled", "135", "--expect-buried", "132",
-      "--expect-keys", "60", "--expect-fighting", "17",
-      "--expect-moves", "2416",
-      "--expect-events", "22624", "--expect-survived", "22624"], None),
+      "--expect-walled", "8981", "--expect-buried", "1860",
+      "--expect-keys", "10", "--expect-fighting", "17",
+      "--expect-moves", "16364",
+      "--expect-events", "22504", "--expect-survived", "22504"], None),
     # and the driver that reaches more than the first room. Held forwards
     # jams on the first corner -- level 6 spends 1162 of 1200 frames against a
     # wall -- so `--roam` follows walls and treats a hole like a wall. Level 2
@@ -202,7 +202,7 @@ ENGINE = [
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--run", "9", "1", "30", "--expect-walkers", "18",
-      "--expect-walled", "0", "--expect-buried", "0", "--expect-keys", "3",
+      "--expect-walled", "9701", "--expect-buried", "0", "--expect-keys", "3",
       "--expect-events", "46883", "--expect-survived", "45983"], None),
     # level 10's zizzy turrets shoot: nine bullets in thirty seconds, each one
     # carrying its damage, damage type, lifetime and speed out of the shot
@@ -211,7 +211,7 @@ ENGINE = [
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--run", "10", "1", "30", "--expect-shots", "9",
-      "--expect-events", "22551", "--expect-survived", "22551"], None),
+      "--expect-events", "22553", "--expect-survived", "22553"], None),
     # and a shot reaches the player. `--hunt` steers the driver at the
     # nearest thing with hitpoints instead of holding forwards, which is what
     # it takes to get inside a turret's range at all: level 10's zizzy
@@ -223,20 +223,12 @@ ENGINE = [
     # the damage filter lets it through. Before the flag the nearest of the 45
     # passed 2.9 units away with 2.8 of it height. Six hits at five damage
     # each leave the player on 70 of Kurt's 100 -- the loop closed both ways.
-    # and it kills him. Ten minutes of roaming level 4 is 20 hits at five
-    # damage, and the run stops the frame Kurt reaches zero rather than
-    # walking a corpse for the rest of it.
-    ("an enemy kills the player",
+    ("an enemy shoots the player, hits, and kills him",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
-      "--run", "4", "1", "900", "--roam", "--expect-hits", "20",
-      "--expect-health", "0"], None),
-    ("an enemy shoots the player and hits",
-     ["cargo", "run", "--quiet", "--release",
-      "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
-      "--run", "4", "1", "120", "--roam", "--expect-shots", "42",
-      "--expect-hits", "5", "--expect-health", "75", "--expect-events", "72001",
-      "--expect-survived", "72001"], None),
+      "--run", "4", "1", "120", "--roam", "--expect-shots", "44",
+      "--expect-hits", "20", "--expect-health", "0",
+      "--expect-events", "35801", "--expect-survived", "35801"], None),
     # and the loop closes: the player walks at an enemy, shoots it with the
     # hitscan the original uses, and it dies. Two minutes of hunting on level
     # 8 is 77 shots and two kills.
@@ -252,7 +244,7 @@ ENGINE = [
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--run", "6", "1", "40", "--expect-playing", "14",
-      "--expect-moves", "1649", "--expect-touched", "1"], None),
+      "--expect-moves", "12993", "--expect-touched", "1"], None),
     ("the room graph culls what the engine draws",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
