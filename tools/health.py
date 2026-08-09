@@ -357,15 +357,19 @@ def ai(args) -> int:
                 r[NAME:BASE].split(b"\0")[0].decode("latin1"))
         n += 1
 
-    print("  #  anim  melee   p_far  p_melee  p_hurt   near    far   reach"
-          "    fov   c11  lead  who")
+    # every column, including the +0x18 that an earlier version of this
+    # header skipped -- and that one is the branch at 0x432c56, the roll that
+    # decides whether an enemy closes the distance or stands and fires.
+    print("  #  +00   +04   +08   +0c   +10   +14   +18   near    far  reach"
+          "    fov   +2c  lead  who")
     for i in range(AI_RECORDS):
         r = _read(secs, AI + i * AI_STRIDE, AI_STRIDE)
         f = struct.unpack("<13f", r)
         v = struct.unpack("<13i", r)
-        print(f"  {i}  {v[0]:4d}  {f[2]:5g}  {f[3]:6g}  {f[4]:7g}  {f[5]:6g}  "
-              f"{f[7]:5g}  {f[8]:5g}  {f[9]:6g}  {f[10]:5.3f}  {f[11]:4g}  "
-              f"{v[12]:4d}  {', '.join(users.get(i, []))}")
+        print(f"  {i}  {v[0]:4d}  {f[1]:4g}  {f[2]:4g}  {f[3]:4g}  {f[4]:4g}  "
+              f"{f[5]:4g}  {f[6]:4g}  {f[7]:5g}  {f[8]:5g}  {f[9]:6g}  "
+              f"{f[10]:5.3f}  {f[11]:4g}  {v[12]:4d}  "
+              f"{', '.join(users.get(i, []))}")
     have = sum(len(u) for u in users.values())
     print(f"{AI_RECORDS} behaviours, {have} of the {n} enemy types use one "
           f"and {n - have} have no AI at all", file=sys.stderr)

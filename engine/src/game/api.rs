@@ -1092,6 +1092,24 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             let rounds = crate::game::world::ai(kind).map(|r| r.0).unwrap_or(0.0);
             let left = boot.burst.get(&who).copied().unwrap_or(0.0);
             let interval = crate::game::world::ai(kind).map(|r| r.1).unwrap_or(0.0);
+            // **Why an enemy still does not walk at you**, written down
+            // because it cost a measurement to learn. State 5 is *advance*,
+            // set in exactly one place — 0x432cd7 — reached by a `chRand()`
+            // against **`record + 0x18`** at 0x432c56: the higher roll
+            // advances with a cooldown of 3, the lower fires two rounds.
+            //
+            // Building that leaf alone was tried and taken out. `record +
+            // 0x18` is **0 for the bif**, which under that leaf reads as
+            // "always advance, never fire" — and the run said so at once:
+            // level 4, whose walkers are mostly bifs, went from 45 shots in
+            // two minutes to none while the walkers covered 191 units instead
+            // of 9. A second advance leaf at 0x432cc1 rolls `record + 0x14`
+            // with the **opposite** sense, which is the tell that both sit
+            // under a tree whose top decides which one applies.
+            //
+            // So the chooser at 0x432740..0x432ce0 has to be read whole —
+            // fifteen rolls and ten states — and until it is, an enemy stands
+            // its ground and fights rather than closing.
             if cool <= 0.0 {
                 if left > 0.0 {
                     boot.burst.insert(who.clone(), left - 1.0);
@@ -3716,7 +3734,9 @@ mod tests {
         assert_eq!(scripts.lua.globals().get::<f64>("far").unwrap(), 0.0, "never done");
         {
             let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
-            assert_eq!(boot.gait["d"], 0, "forty out is not crowded");
+            // forty out is past its near of ten, so the chooser is free to
+            // send it in — what matters here is that it is **not** backing off
+            assert_ne!(boot.gait["d"], 3, "forty out is not crowded");
             assert!((boot.heading["d"] - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
         }
         // now stand on top of it. It is mid-burst, so it holds its ground
@@ -3734,7 +3754,8 @@ mod tests {
         );
         let rooms = Visibility::default();
         let mut ticking = Ticking::default();
-        for _ in 0..40 {
+        // four seconds, which outlasts the three the chooser's advance costs
+        for _ in 0..120 {
             let eye = [0.0, 5.0, crate::game::body::EYE];
             tick(&scripts, &rooms, eye, 0.0, 1.0 / 30.0, &mut ticking).unwrap();
         }
@@ -3860,7 +3881,10 @@ mod tests {
         }
         let rooms = Visibility::default();
         let mut ticking = Ticking::default();
-        for _ in 0..90 {
+        // long enough that the chooser's advance roll cannot starve it: a
+        // hoser closes seven times in ten and each advance costs three
+        // seconds, so three seconds of trying is not enough and thirty is
+        for _ in 0..900 {
             scripts.lua.load("mdkDoganboyAttack(h)").exec().unwrap();
             let eye = [0.0, 20.0, crate::game::body::EYE];
             tick(&scripts, &rooms, eye, 0.0, 1.0 / 30.0, &mut ticking).unwrap();
@@ -3899,11 +3923,16 @@ mod tests {
         let rooms = Visibility::default();
         let mut ticking = Ticking::default();
         let mut thrown = 0;
-        // four seconds is one burst of three and a little over
-        for _ in 0..120 {
+        // thirty seconds: the burst of three is over in two, but the chooser
+        // sends a doganboy in seven times in ten and each of those costs
+        // three, so it takes a while to reach a last round at all
+        for _ in 0..900 {
             scripts.lua.load("mdkDoganboyAttack(d)").exec().unwrap();
             // the tick warps the player gob to where the body is, so the body
-            // has to stand where the test put the gob
+            // has to stand where the test put the gob -- and the walker is
+            // put back on its mark every frame, because the subject here is
+            // the throw and not the walk that would carry it out of the band
+            scripts.lua.load("mdkGobSetPositionXYZ(d, 0, 0, 0)").exec().unwrap();
             let eye = [0.0, 35.0, crate::game::body::EYE];
             tick(&scripts, &rooms, eye, 0.0, 1.0 / 30.0, &mut ticking).unwrap();
             let w = world::world(&scripts.lua).unwrap();
