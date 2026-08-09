@@ -1527,17 +1527,20 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         use sdl2::keyboard::{Keycode, Scancode};
         println!("OpenGL {version}\n{summary}");
         println!(
-            "{} -- W A S D, mouse to look, shift to run, C to turn culling off, escape to leave",
-            if std::env::args().any(|a| a == "--walk") {
-                format!("walking, {} trees under foot", collision.len())
-            } else {
+            "{} -- W A S D, mouse to look, shift to run, space to jump, \
+             left button to shoot, C to turn culling off, escape to leave",
+            if std::env::args().any(|a| a == "--fly") {
                 "flying".to_string()
+            } else {
+                format!("walking, {} trees under foot", collision.len())
             }
         );
         video.sdl.mouse().set_relative_mouse_mode(true);
-        // `--walk` puts the body on the ground with the controller the demo
-        // replay checks; without it the camera flies.
-        let walk = std::env::args().any(|a| a == "--walk");
+        // **Walking is what the game does**, so it is the default: the body
+        // goes on the ground with the controller the demo replay checks, and
+        // the camera stands behind it. `--fly` is the way out, for looking at
+        // a level from the outside.
+        let walk = !std::env::args().any(|a| a == "--fly");
         let mut body = goodomen::game::body::Body::new(
             [eye[0] as f64, eye[1] as f64, eye[2] as f64],
             yaw,
@@ -1785,11 +1788,31 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 pitch.sin() as f32,
             ];
             let from = if walk {
-                [
-                    (at[0] - look[0] as f64 * BEHIND) as f32,
-                    (at[1] - look[1] as f64 * BEHIND) as f32,
-                    (at[2] - look[2] as f64 * BEHIND + ABOVE) as f32,
-                ]
+                // and it comes in when there is a wall behind: without this
+                // the camera sits inside the geometry every time the player
+                // backs into a corner, and the room it culls by is the wrong
+                // one. `Collision::sees` is the same exact segment test the
+                // shooting uses.
+                let want = [
+                    at[0] - look[0] as f64 * BEHIND,
+                    at[1] - look[1] as f64 * BEHIND,
+                    at[2] - look[2] as f64 * BEHIND + ABOVE,
+                ];
+                let head = [at[0], at[1], at[2] + ABOVE];
+                let mut back = want;
+                if !collision.sees(head, want) {
+                    // walk it in until the line is clear, in eighths
+                    for i in 1..=8 {
+                        let t = 1.0 - i as f64 / 8.0;
+                        let step = [0, 1, 2].map(|c| head[c] + (want[c] - head[c]) * t);
+                        if collision.sees(head, step) {
+                            back = step;
+                            break;
+                        }
+                        back = head;
+                    }
+                }
+                [back[0] as f32, back[1] as f32, back[2] as f32]
             } else {
                 [at[0] as f32, at[1] as f32, at[2] as f32]
             };

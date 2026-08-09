@@ -31,6 +31,15 @@ use crate::formats::omn;
 use crate::game::install::Install;
 use crate::game::world::World;
 
+/// **These six are ours**, and the lead on the real ones is written down.
+/// Kurt has his own mover in mdkKurt.c — his constructor allocates its own
+/// block at `gob + 0x40` (0x416832) rather than the walker one — and the
+/// turn is at 0x419d0b: an axis, times the first float of `kurt + 0x64`,
+/// times **1/60** (0x48f9f4), with **0.05** (0x48f380) on the branch where
+/// the body is on the ground. The buttons 0x65 and 0x66 at 0x419e57 set the
+/// gait to 0 or 2, so the walk-versus-run split is the walker's own shape.
+/// What is not read is where `kurt + 0x64` points, which is where the
+/// numbers themselves are.
 pub const EYE: f64 = 1.7;
 pub const STEP: f64 = 0.6;
 pub const GRAVITY: f64 = 20.0;
