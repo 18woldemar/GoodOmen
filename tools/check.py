@@ -223,6 +223,14 @@ ENGINE = [
     # the damage filter lets it through. Before the flag the nearest of the 45
     # passed 2.9 units away with 2.8 of it height. Six hits at five damage
     # each leave the player on 70 of Kurt's 100 -- the loop closed both ways.
+    # and it kills him. Ten minutes of roaming level 4 is 20 hits at five
+    # damage, and the run stops the frame Kurt reaches zero rather than
+    # walking a corpse for the rest of it.
+    ("an enemy kills the player",
+     ["cargo", "run", "--quiet", "--release",
+      "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
+      "--run", "4", "1", "600", "--roam", "--expect-hits", "20",
+      "--expect-health", "0"], None),
     ("an enemy shoots the player and hits",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",

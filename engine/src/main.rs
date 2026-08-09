@@ -1059,6 +1059,8 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     const SHAKE: usize = 45;
     let mut jammed = 0usize;
     let mut shot_at = 0usize;
+    let mut died_at: Option<f64> = None;
+    let mut ran = 0usize;
 
     let mut body = Body::new(
         [spawn.position[0], spawn.position[1], spawn.position[2] + EYE],
@@ -1069,6 +1071,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     let steps = (seconds / dt) as usize;
 
     for step in 0..steps {
+        ran = step + 1;
         let was = body.position;
         match &frames {
             Some(f) if step < f.len() => body.replay(&collision, &f[step..step + 1], 1.0, WALK),
@@ -1201,6 +1204,22 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
             &touching,
         )
         .map_err(|e| e.to_string())?;
+
+        // ponytail: a dead player stops the run. The original respawns him at
+        // the checkpoint -- the class's damage handler off the table at
+        // 0x49bc58 does it -- and until that is built, walking a corpse for
+        // the rest of the run makes every number after this frame a lie.
+        let dead = world::world(&scripts.lua)
+            .and_then(|w| {
+                let name = scripts.lua.app_data_ref::<api::Boot>()?.player.clone()?;
+                w.find(&name).and_then(|i| w.get(i)).map(|g| g.max_hitpoints > 0 && g.hitpoints <= 0)
+            })
+            .unwrap_or(false);
+        if dead {
+            died_at = Some((step + 1) as f64 * dt);
+            ran = step + 1;
+            break;
+        }
     }
 
     // what the scripts actually did to the world while it ran
@@ -1264,7 +1283,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         }
     }
     Ok(format!(
-        "l{number} cp{checkpoint}: {steps} ticks of {seconds:.0}s on {} input, \
+        "l{number} cp{checkpoint}: {ran} ticks of {:.0}s on {} input, \
          travelled {:.0} units, met a wall on {} frames, inside geometry on {}, \
          {} rooms entered, {survived} of {fired} handler calls ran to the end, \
          {moved} object moves, {playing} animations chosen, \
@@ -1274,9 +1293,10 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
          and met a wall on {walled} frames ({buried} inside), \
          {shots} shots fired ({landed} hit, nearest {}, {drop:.1} of it height), \
          {anim_keys} keys in {struck} struck, {fighting} enemies fighting, {shot_at} shot by the player and {died} killed, \
-         the player on {} of {} hitpoints, \
+         the player on {} of {} hitpoints{}, \
          {} objects touched and {} of them \
          scripted{}{} [{}]{}",
+        ran as f64 * dt,
         if recorded { "the game's own recorded" } else if hunt && roam { "roaming and hunting" } else if hunt { "hunting" } else if roam { "roaming" } else { "held-forwards" },
         body.travelled,
         body.hits,
@@ -1285,6 +1305,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         match miss { Some(d) => format!("{d:.1}"), None => "never".into() },
         health.0,
         health.1,
+        match died_at { Some(t) => format!(" and dead after {t:.0}s"), None => String::new() },
         state.touched.len(),
         state.collisions,
         if state.touched.is_empty() {
