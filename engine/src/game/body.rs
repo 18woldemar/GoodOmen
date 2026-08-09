@@ -128,13 +128,13 @@ impl Collision {
     /// Which tree stops the body here, sampling exactly where
     /// [`Collision::blocked`] does — otherwise the two could disagree about
     /// whether there was a collision at all.
-    pub fn blocking(&self, p: [f64; 3]) -> Option<usize> {
+    pub fn blocking(&self, p: [f64; 3], tall: f64) -> Option<usize> {
         let mut h = STEP;
-        while h <= EYE + 1e-9 {
-            if let Some(t) = self.at([p[0], p[1], p[2] - EYE + h]) {
+        while h <= tall + 1e-9 {
+            if let Some(t) = self.at([p[0], p[1], p[2] - tall + h]) {
                 return Some(t);
             }
-            h += (EYE - STEP) / 2.0;
+            h += (tall - STEP).max(1e-9) / 2.0;
         }
         None
     }
@@ -147,8 +147,8 @@ impl Collision {
     /// The game's own floors are thick enough that either probe answers, and
     /// a floor that is one plane thick — which is what a test builds — only
     /// answers to this one.
-    pub fn footing(&self, p: [f64; 3]) -> Option<usize> {
-        self.at([p[0], p[1], p[2] - EYE - 0.05])
+    pub fn footing(&self, p: [f64; 3], tall: f64) -> Option<usize> {
+        self.at([p[0], p[1], p[2] - tall - 0.05])
     }
 
     /// Is there anything solid between the two points?
@@ -170,19 +170,20 @@ impl Collision {
     }
 
     /// Only the body above step height stops it; below is a kerb to walk over.
-    pub fn blocked(&self, p: [f64; 3]) -> bool {
+    pub fn blocked(&self, p: [f64; 3], tall: f64) -> bool {
         let mut h = STEP;
-        while h <= EYE + 1e-9 {
-            if self.solid([p[0], p[1], p[2] - EYE + h]) {
+        while h <= tall + 1e-9 {
+            if self.solid([p[0], p[1], p[2] - tall + h]) {
                 return true;
             }
-            h += (EYE - STEP) / 2.0;
+            // a walker shorter than the kerb still gets its three samples
+            h += (tall - STEP).max(1e-9) / 2.0;
         }
         false
     }
 
-    pub fn footed(&self, p: [f64; 3]) -> bool {
-        self.solid([p[0], p[1], p[2] - EYE + 0.05])
+    pub fn footed(&self, p: [f64; 3], tall: f64) -> bool {
+        self.solid([p[0], p[1], p[2] - tall + 0.05])
     }
 }
 
@@ -202,11 +203,21 @@ pub struct Body {
     /// it is the same handler called with `nil`, which is how the scripts
     /// spell "the collision ended".
     pub touching: std::collections::BTreeSet<usize>,
+    /// How tall this body is. The player's is `EYE`; a walker's is its type's
+    /// own `def + 0x78`, so a bfb sixteen units tall does not fit where a
+    /// hoser two units tall does.
+    pub height: f64,
 }
 
 impl Body {
     pub fn new(position: [f64; 3], yaw: f64) -> Body {
+        Body::sized(position, yaw, EYE)
+    }
+
+    /// A body of a named height, which is what a walker gets.
+    pub fn sized(position: [f64; 3], yaw: f64, height: f64) -> Body {
         Body {
+            height,
             position,
             yaw,
             velocity_z: 0.0,
@@ -221,11 +232,11 @@ impl Body {
     /// Rise out of the surface landed on, or stay glued over a kerb.
     fn settle(&mut self, world: &Collision, mut z: f64) -> f64 {
         let p = |b: &Body, z: f64| [b.position[0], b.position[1], z];
-        if world.footed(p(self, z)) {
+        if world.footed(p(self, z), self.height) {
             let mut lift = 0.0;
-            while lift < EYE
-                && world.footed(p(self, z + lift))
-                && !world.blocked(p(self, z + lift + 0.05))
+            while lift < self.height
+                && world.footed(p(self, z + lift), self.height)
+                && !world.blocked(p(self, z + lift + 0.05), self.height)
             {
                 lift += 0.05;
             }
@@ -235,7 +246,7 @@ impl Body {
         }
         if self.on_ground && self.velocity_z < 0.0 {
             let mut drop = 0.0;
-            while drop < STEP && !world.footed(p(self, z - drop)) {
+            while drop < STEP && !world.footed(p(self, z - drop), self.height) {
                 drop += 0.05;
             }
             if drop < STEP {
@@ -264,9 +275,9 @@ impl Body {
             let run = speed * dt;
             let (dx, dy) = (direction[0] / length * run, direction[1] / length * run);
             let ahead = [self.position[0] + dx, self.position[1] + dy, self.position[2]];
-            if world.blocked(ahead) {
+            if world.blocked(ahead, self.height) {
                 self.hits += 1;
-                if let Some(t) = world.blocking(ahead) {
+                if let Some(t) = world.blocking(ahead, self.height) {
                     self.touching.insert(t);
                 }
             }
@@ -275,7 +286,7 @@ impl Body {
             // which is not hypothetical: 39 of the game's own 625 waypoints
             // are inside a collision tree, and one grunt on level 7 spawns in
             // one and holds up every sequence queued behind it.
-            let stuck = world.blocked(self.position);
+            let stuck = world.blocked(self.position, self.height);
             // in pieces, so a fast frame cannot step over a thin wall
             let pieces = (run / 0.25).ceil().max(1.0) as usize;
             for _ in 0..pieces {
@@ -285,7 +296,7 @@ impl Body {
                         self.position[1] + ay / pieces as f64,
                         self.position[2],
                     ];
-                    if stuck || !world.blocked(candidate) {
+                    if stuck || !world.blocked(candidate, self.height) {
                         self.position[0] = candidate[0];
                         self.position[1] = candidate[1];
                         break;
@@ -303,7 +314,9 @@ impl Body {
         // the fall is walked in pieces too, or a frame passes through a floor
         let mut z = self.position[2];
         let mut left = self.velocity_z * dt;
-        while left.abs() > 1e-6 && !world.footed([self.position[0], self.position[1], z]) {
+        while left.abs() > 1e-6
+            && !world.footed([self.position[0], self.position[1], z], self.height)
+        {
             let bit = left.clamp(-0.5, 0.5);
             z += bit;
             left -= bit;
@@ -312,20 +325,23 @@ impl Body {
 
         // give the sideways move back if the *finished* position is solid
         self.position[2] = z;
-        if world.blocked(self.position) {
-            let mut back = Body { position: [was[0], was[1], z], ..Body::new([0.0; 3], 0.0) };
+        if world.blocked(self.position, self.height) {
+            let mut back = Body {
+                position: [was[0], was[1], z],
+                ..Body::sized([0.0; 3], 0.0, self.height)
+            };
             back.on_ground = self.on_ground;
             back.velocity_z = self.velocity_z;
             let settled = back.settle(world, z);
-            if !world.blocked([was[0], was[1], settled]) {
+            if !world.blocked([was[0], was[1], settled], self.height) {
                 self.position = [was[0], was[1], settled];
             }
         }
-        if world.blocked(self.position) {
+        if world.blocked(self.position, self.height) {
             self.inside += 1;
         }
         // and what it finishes the frame standing on
-        if let Some(t) = world.footing(self.position) {
+        if let Some(t) = world.footing(self.position, self.height) {
             self.touching.insert(t);
         }
         self.travelled += (0..3)
@@ -432,7 +448,7 @@ mod tests {
     fn a_body_that_starts_buried_can_still_walk_out() {
         let world = floor();
         let mut body = Body::new([0.0, 0.0, -5.0], 0.0);
-        assert!(world.blocked(body.position), "five under the floor is solid");
+        assert!(world.blocked(body.position, body.height), "five under the floor is solid");
         for _ in 0..60 {
             body.step(&world, [1.0, 0.0], false, WALK, 1.0 / 60.0);
         }
@@ -441,6 +457,29 @@ mod tests {
             "it should have covered the second, got {}",
             body.position[0]
         );
+    }
+
+    /// A body stands on its feet whatever its height, so a walker five units
+    /// tall settles with its head five above the floor and Kurt with his
+    /// 1.7. The heights are the walker record's own `def + 0x78` — the
+    /// doganboy's is 5.0 — and getting this wrong sinks every tall enemy into
+    /// the ground by the difference.
+    #[test]
+    fn a_body_settles_on_its_feet_at_whatever_height_it_is() {
+        let world = floor();
+        for tall in [EYE, 5.0, 16.0] {
+            let mut body = Body::sized([0.0, 0.0, 30.0], 0.0, tall);
+            for _ in 0..300 {
+                body.step(&world, [0.0, 0.0], false, WALK, 1.0 / 60.0);
+            }
+            assert!(body.on_ground, "{tall} tall should have landed");
+            assert!(
+                (body.position[2] - tall).abs() < 0.2,
+                "{tall} tall ended with its head at {}",
+                body.position[2]
+            );
+            assert_eq!(body.inside, 0, "and never inside the world");
+        }
     }
 
     #[test]

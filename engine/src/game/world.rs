@@ -438,6 +438,48 @@ pub fn limping(kind: f64, hitpoints: i16) -> bool {
         .any(|&(k, at)| k == kind && hitpoints <= at)
 }
 
+/// **How big a walker is**: `def + 0x78` and `def + 0x7c`, which the
+/// constructor at 0x42f539 copies into the gob's collision block at
+/// `gob + 0x68`, fields +0xec and +0xf0. omCollision reads them at 0x47361b
+/// and 0x47365c and **halves both**, so they are the full height and the full
+/// width and not half-extents.
+///
+/// The pair is **-1 on the shwang and the angel** and 0x4311a0 refuses to
+/// switch the block on unless both are above zero, so those two have no body
+/// at all. What settles the reading is Kurt: mdkKurt.c writes 2.0 and 0.8 into
+/// the same two fields at 0x416863, which is a person two units tall and
+/// eight tenths wide — so `EYE`'s 1.7 and these numbers are in one scale.
+pub const SIZE: [(f64, f64, f64); 19] = [
+    //  type    tall  wide
+    (201.0, 2.0, 2.0),   // samsmite
+    (215.0, 2.0, 2.0),   // samfire
+    (216.0, 2.0, 2.0),   // samrock
+    (203.0, 3.5, 1.0),   // conehead
+    (250.0, 3.1, 1.0),   // coneciv
+    (200.0, 6.0, 4.7),   // bif
+    (204.0, 16.0, 10.0), // hans
+    (205.0, 2.0, 1.0),   // hoser
+    (202.0, 4.4, 3.8),   // grunt
+    (219.0, 4.4, 3.8),   // grunt
+    (207.0, 5.0, 5.0),   // doganboy
+    (214.0, 11.0, 10.0), // ultradogan
+    (211.0, 4.7, 4.0),   // bfb
+    (220.0, -1.0, -1.0), // shwang — no body
+    (210.0, 4.0, 4.0),   // badmax
+    (217.0, 2.5, 2.0),   // poopsy
+    (206.0, -1.0, -1.0), // angel — no body
+    (208.0, 11.0, 10.0), // birdbrain1
+    (260.0, 24.0, 12.0), // zizzy
+];
+
+/// How tall a type is, if the table names it and it has a body at all.
+pub fn height(kind: f64) -> Option<f64> {
+    SIZE.iter()
+        .find(|(k, ..)| *k == kind)
+        .map(|&(_, tall, _)| tall)
+        .filter(|t| *t > 0.0)
+}
+
 /// Which animation a walker plays for a gait, given how hurt it is.
 pub fn gait_animation(kind: f64, gait: i64, hitpoints: i16) -> Option<f64> {
     let i = usize::try_from(gait).ok()?;

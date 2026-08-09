@@ -248,12 +248,12 @@ SLOW = [
     ("nine AI behaviours, and nine enemies with none",
      ["health.py", "$MDK2_GOG/mdk2Main.exe", "--ai", "--expect-ai", "10"],
      None),
-    # the gait animation tables, and the one walker in nineteen that limps.
-    # `world.rs` holds all three literals and `api.rs` tests them; this holds
-    # the count to the binary, because "only the doganboy" is the whole point.
-    ("one walker type in nineteen limps",
-     ["health.py", "$MDK2_GOG/mdk2Main.exe", "--gait", "--expect-limp", "1"],
-     None),
+    # the gait animation tables, the one walker in nineteen that limps, and
+    # the size of every walker's collision body -- which the engine now walks
+    # with, so its literal is compared column by column.
+    ("one walker type in nineteen limps, and 19 body sizes match",
+     ["health.py", "$MDK2_GOG/mdk2Main.exe", "--gait", "--engine",
+      "--expect-limp", "1"], None),
     ("the item table is the original's",
      ["health.py", "$MDK2_GOG/mdk2Main.exe", "--items", "--engine"], None),
     ("the controller walks every level",

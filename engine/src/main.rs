@@ -247,6 +247,13 @@ fn main() {
         return;
     }
 
+    if args.iter().any(|a| a == "--sizes") {
+        for (kind, tall, wide) in goodomen::game::world::SIZE {
+            println!("{} {tall} {wide}", kind as i64);
+        }
+        return;
+    }
+
     if let Some(i) = args.iter().position(|a| a == "--health") {
         use goodomen::game::world::{diff_scale, BASE_HITPOINTS, DIFFICULTY, LOCOMOTION};
         let scaled = |base: i32| -> String {

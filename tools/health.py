@@ -265,6 +265,13 @@ AI_RECORDS = 9
 GAIT_ANIM, GAIT_ANIM_HURT, LIMP = 0x0048FF58, 0x0048FF68, 0x40
 GAITS = ("still", "walk", "run", "back")
 
+# +0x78 and +0x7c: the height and the width of the walker's collision body.
+# 0x42f539 copies them into the gob's block at `gob + 0x68`, fields +0xec and
+# +0xf0, and omCollision halves both at 0x47361b and 0x47365c -- so they are
+# the full extents. mdkKurt.c writes 2.0 and 0.8 into the same two fields at
+# 0x416863, which is what fixes the scale. -1 means the type has no body.
+SIZE = (0x78, 0x7C)
+
 
 def gait(args) -> int:
     """The gait animation tables, and who limps."""
@@ -288,6 +295,42 @@ def gait(args) -> int:
         n += 1
     for name, at, base in limps:
         print(f"  {name} limps at {at} of {base}")
+
+    bodiless, want = [], []
+    n = 0
+    while True:
+        r = _read(secs, TABLE + n * STRIDE, STRIDE)
+        key = struct.unpack_from("<I", r, KEY)[0]
+        if key == 0:
+            break
+        tall, wide = (struct.unpack_from("<f", r, o)[0] for o in SIZE)
+        name = r[NAME:BASE].split(b"\0")[0].decode("latin1")
+        print(f"  {name:<12} {tall:5g} tall {wide:5g} wide")
+        want.append([str(key), "%g" % tall, "%g" % wide])
+        if tall <= 0 or wide <= 0:
+            bodiless.append(name)
+        n += 1
+    print(f"{len(bodiless)} of {n} walker types have no collision body "
+          f"({', '.join(bodiless)})", file=sys.stderr)
+
+    if args.engine:
+        out = subprocess.run(
+            ["cargo", "run", "--quiet", "--release", "--manifest-path",
+             str(Path(__file__).resolve().parent.parent / "engine/Cargo.toml"),
+             "--", "--sizes"],
+            capture_output=True, text=True, check=True).stdout
+        got = [l.split() for l in out.strip().splitlines() if l.strip()]
+        if got != want:
+            for a, b in zip(got, want):
+                if a != b:
+                    print(f"MISMATCH: the engine says {a}, the original {b}",
+                          file=sys.stderr)
+                    break
+            print(f"{len(want)} sizes from the binary, {len(got)} from the "
+                  "engine, and they differ", file=sys.stderr)
+            return 1
+        print(f"{len(want)} walker sizes identical to the original",
+              file=sys.stderr)
     print(f"{len(limps)} of {n} walker types limp", file=sys.stderr)
     if args.expect_limp is not None:
         return 0 if len(limps) == args.expect_limp else 1
