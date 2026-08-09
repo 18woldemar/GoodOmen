@@ -178,9 +178,9 @@ ENGINE = [
       # `l7r2_spn1_spawn`, which spawns **inside** `c9` -- so what this pins
       # is the escape rule, not the refusal. Nothing in ten levels walks into
       # a wall in the first thirty seconds.
-      "--expect-walled", "8981", "--expect-buried", "1860",
+      "--expect-walled", "9034", "--expect-buried", "1729",
       "--expect-keys", "10", "--expect-fighting", "17",
-      "--expect-moves", "16364",
+      "--expect-moves", "16676",
       "--expect-events", "22504", "--expect-survived", "22504"], None),
     # and the driver that reaches more than the first room. Held forwards
     # jams on the first corner -- level 6 spends 1162 of 1200 frames against a
@@ -190,7 +190,7 @@ ENGINE = [
     ("a roaming driver walks a level instead of one room",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
-      "--run", "2", "1", "120", "--roam", "--expect-rooms", "9",
+      "--run", "2", "1", "120", "--roam", "--expect-rooms", "23",
       "--expect-events", "54006", "--expect-survived", "50406"], None),
     # level 9 is where the walkers actually walk. Three of them cover 425
     # units in thirty seconds without the player doing anything -- their
@@ -202,7 +202,7 @@ ENGINE = [
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--run", "9", "1", "30", "--expect-walkers", "18",
-      "--expect-walled", "9701", "--expect-buried", "0", "--expect-keys", "3",
+      "--expect-walled", "9551", "--expect-buried", "184", "--expect-keys", "3",
       "--expect-events", "46883", "--expect-survived", "45983"], None),
     # level 10's zizzy turrets shoot: nine bullets in thirty seconds, each one
     # carrying its damage, damage type, lifetime and speed out of the shot
@@ -221,14 +221,20 @@ ENGINE = [
     # things right: the engine arms them, the shot table's 0x800 launches the
     # bullet **at the player** instead of flat out of the shooter's feet, and
     # the damage filter lets it through. Before the flag the nearest of the 45
-    # passed 2.9 units away with 2.8 of it height. Six hits at five damage
-    # each leave the player on 70 of Kurt's 100 -- the loop closed both ways.
-    ("an enemy shoots the player, hits, and kills him",
+    # passed 2.9 units away with 2.8 of it height.
+    #
+    # It then needed a fourth, and the player's real speed is what exposed it.
+    # At 15 units a second instead of the 4 that were ours, 51 shots landed
+    # **one**: a bullet aimed where the player is arrives where he was. The
+    # launch leads (0x4039cd) by `velocity * max(distance, 50) / speed *
+    # record[0x4c]`, and with that read out of the table it is 8 hits and 40
+    # of Kurt's 100 hitpoints in two minutes.
+    ("an enemy shoots the player, and leads him",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
-      "--run", "4", "1", "120", "--roam", "--expect-shots", "44",
-      "--expect-hits", "20", "--expect-health", "0",
-      "--expect-events", "35801", "--expect-survived", "35801"], None),
+      "--run", "4", "1", "120", "--roam", "--expect-shots", "51",
+      "--expect-hits", "8", "--expect-health", "60",
+      "--expect-events", "72002", "--expect-survived", "72002"], None),
     # and the loop closes: the player walks at an enemy, shoots it with the
     # hitscan the original uses, and it dies. Two minutes of hunting on level
     # 8 is 77 shots and two kills.
@@ -238,13 +244,13 @@ ENGINE = [
     ("the player kills something",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
-      "--run", "8", "1", "120", "--hunt", "--expect-shot-at", "77",
+      "--run", "8", "1", "120", "--hunt", "--expect-shot-at", "88",
       "--expect-killed", "2"], None),
     ("walking drives the player's own animation, and reaches the scripts",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--run", "6", "1", "40", "--expect-playing", "14",
-      "--expect-moves", "12993", "--expect-touched", "1"], None),
+      "--expect-moves", "11833", "--expect-touched", "1"], None),
     ("the room graph culls what the engine draws",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",

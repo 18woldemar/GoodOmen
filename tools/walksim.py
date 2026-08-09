@@ -283,15 +283,69 @@ TURN_RIGHT, TURN_LEFT, LOOK_DOWN, LOOK_UP = 1004, 1005, 1006, 1007
 JUMP = 1001
 JUMP_SPEED = 7.0                       # the same as the page's
 
+# A playable character's speed is a 3x3 table read at `table[fwd * 3 + side]`,
+# with the forward table and the strafe table 0x24 apart. mdkKurt.c reads
+# Kurt's at 0x4179cf; mdkMax, mdkHyde and mdkDoctor do the same at 0x421cb6,
+# 0x414710 and 0x40954a. The whole 18-float block is byte-identical in the
+# 2011 HD build (VA 0x4c3adc), indexed there by the same `eax*3 + [ebp+4]`.
+# `engine/src/game/world.rs` carries the same numbers and `health.py --speed`
+# reads them out of the binary to hold both to it.
+PLAYER_SPEED = {
+    100.0: (  # OBJ_KURT, 0x48f828 / 0x48f84c
+        (10.6, 15.0, 10.6, 0.0, 0.0, 0.0, -8.5, -12.0, -8.5),
+        (-10.6, 0.0, 10.6, -15.0, 0.0, 15.0, -8.5, 0.0, 8.5), 21.0),
+    103.0: (  # OBJ_HYDE, 0x48f6e0 / 0x48f704
+        (7.5, 10.0, 7.5, 0.0, 0.0, 0.0, -4.25, -6.0, -4.25),
+        (-4.5, 0.0, 4.5, -6.0, 0.0, 6.0, -4.25, 0.0, 4.25), 14.0),
+    101.0: (  # OBJ_MAX, 0x48fa28 / 0x48fa4c
+        (8.5, 12.0, 8.5, 0.0, 0.0, 0.0, -7.0, -10.0, -7.0),
+        (-8.5, 0.0, 8.5, -12.0, 0.0, 12.0, -7.0, 0.0, 7.0), 14.0),
+    102.0: (  # OBJ_DOC, 0x48f3d0 / 0x48f3f4
+        (8.5, 10.0, 8.5, 0.0, 0.0, 0.0, -5.0, -6.0, -5.0),
+        (-6.0, 0.0, 6.0, -7.0, 0.0, 7.0, -6.0, 0.0, 6.0), 14.0),
+}
+ACCELERATE, BRAKE = 60.0, 120.0        # 0x40ef40's two rates, at all four sites
+
+
+def player_speed(kind: float, ahead: int, side: int):
+    """-> (forward, strafe, the mover's fourth argument)."""
+    forward, strafe, arg = PLAYER_SPEED[kind]
+    i = (1 - max(-1, min(1, ahead))) * 3 + (1 + max(-1, min(1, side)))
+    return forward[i], strafe[i], arg
+
+
+def approach(current: float, target: float, dt: float) -> float:
+    """One step of 0x40ef40.
+
+    The low rate is taken **only** while the value is short of the target and
+    already on the target's side of zero; braking and reversing both take the
+    high one. Reading that off the four arms rather than assuming
+    "accelerate slowly, brake hard" is the whole of it.
+    """
+    if target > 0:
+        gaining = current < target and current >= 0
+    else:
+        gaining = current > target and current <= 0
+    rate = ACCELERATE if gaining else BRAKE
+    moved = current + rate * dt * (1.0 if target > current else -1.0)
+    if abs(moved - target) < 1e-12 or (target > current) == (moved > target):
+        return target
+    return moved
+
 
 def replay(w: World, start, yaw: float, frames: list, mouse: float = 1.0,
-           speed: float = WALK) -> dict:
+           kind: float = 100.0) -> dict:
     """Drive the controller from a parsed `.omn`. Same physics as walk().
 
-    `mouse` is radians per unit of the demo's axis values, and it is a guess:
-    the file does not carry the sensitivity and neither does any script.
+    The speeds are the character's own table, smoothed the way 0x40ef40 does;
+    the demo is Kurt's. `mouse` is radians per unit of the demo's axis values,
+    and it is still a guess: the file does not carry the sensitivity and
+    neither does any script. The turn rate itself is *not* a guess any more —
+    it is 45.0 at 0x416ad5, times 1/60 — but binding a demo command to an axis
+    index is not done, so this stays where it was.
     """
     pos = list(start)
+    forward = strafe = 0.0
     vz, ground, hits, inside = 0.0, False, 0, 0
     path = [tuple(pos)]
     for f in frames:
@@ -303,21 +357,17 @@ def replay(w: World, start, yaw: float, frames: list, mouse: float = 1.0,
         yaw -= mouse * held.get(TURN_RIGHT, 0.0)
         yaw += mouse * held.get(TURN_LEFT, 0.0)
         fx, fy = math.cos(yaw), math.sin(yaw)
-        rx, ry = -math.sin(yaw), math.cos(yaw)
-        dx = dy = 0.0
-        if FORWARD in held:
-            dx += fx
-            dy += fy
-        if BACKWARD in held:
-            dx -= fx
-            dy -= fy
-        if RIGHT in held:
-            dx += rx
-            dy += ry
-        if LEFT in held:
-            dx -= rx
-            dy -= ry
-        length = math.hypot(dx, dy)
+        want_f, want_s, _ = player_speed(
+            kind, (FORWARD in held) - (BACKWARD in held),
+            (RIGHT in held) - (LEFT in held))
+        forward = approach(forward, want_f, dt)
+        strafe = approach(strafe, want_s, dt)
+        # right is (-sin, cos), the same hand the engine uses. The table's own
+        # entries carry the diagonal, so this must not normalise them again.
+        dx = forward * fx - strafe * fy
+        dy = forward * fy + strafe * fx
+        speed = math.hypot(dx, dy)
+        length = speed
         if length > 0:
             run = speed * dt
             dx, dy = dx / length * run, dy / length * run

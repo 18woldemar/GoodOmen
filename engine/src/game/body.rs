@@ -31,25 +31,36 @@ use crate::formats::omn;
 use crate::game::install::Install;
 use crate::game::world::World;
 
-/// **These six are ours**, and the lead on the real ones is written down.
-/// Kurt has his own mover in mdkKurt.c — his constructor allocates its own
-/// block at `gob + 0x40` (0x416832) rather than the walker one — and the
-/// turn is at 0x419d0b: an axis, times the first float of `kurt + 0x64`,
-/// times **1/60** (0x48f9f4), with **0.05** (0x48f380) on the branch where
-/// the body is on the ground. The buttons 0x65 and 0x66 at 0x419e57 set the
-/// gait to 0 or 2, so the walk-versus-run split is the walker's own shape.
+/// **These are ours**, and the speeds no longer are: a playable character's
+/// are [`crate::game::world::PLAYER_SPEED`], read out of the binary.
 ///
-/// The 2011 HD build settles both constants by compiling the same arithmetic
-/// differently: at 0x41a4a2 it divides by the **double 60.0** and the
-/// on-ground branch is `* 3.0 / 60.0`, so 1/60 is confirmed and 0.05 is not
-/// a tuned number — it is **three units a second**.
+/// `kurt + 0x64` is resolved, and the earlier note here was one dereference
+/// short. It is not a float — it is a **pointer to a 236-byte block that
+/// omGob.c allocates** (0x46db30, at omGob.c:1982), and the turn rate is its
+/// first float. The default is 50.0; Kurt's constructor overwrites it with
+/// **45.0** at 0x416ad5, and so does the bullet camera at 0x41a270. The turn
+/// itself is at 0x419d1e:
 ///
-/// What is not read in either build is where `kurt + 0x64` points, which is
-/// where the numbers themselves are: both constructors zero it (0x416981
-/// here, 0x41841e there) and neither assigns it a static address.
+/// ```text
+/// mouse:    yaw += axis(1) * block[0] * 1/60          ; 0x48f9f4
+/// buttons:  yaw += dt * block[0] * (body[0xc0] ? 0.05 : 1/60)
+/// ```
+///
+/// so **0.75 radians per unit of axis**, and the keyboard turns three times
+/// faster while `body + 0xc0` is set. The HD build compiles the same two as
+/// `/ 60.0` and `* 3.0 / 60.0`, which is how 0.05 was settled. The pitch
+/// accumulates into the same block at +0x3c. None of that is wired here yet:
+/// the mouse path needs the `.omn` command bound to an axis index, and
+/// guessing it would silently move the demo replay's path.
+///
+/// [`EYE`] is still ours, though Kurt's constructor writes **1.2** to
+/// `mdkGob + 0x08` at 0x4168b1, beside his hitpoints — the field
+/// `mdkAILineOfSight` raises a sight line by. It is not adopted here because
+/// nothing has checked it against the other three characters.
 pub const EYE: f64 = 1.7;
 pub const STEP: f64 = 0.6;
 pub const GRAVITY: f64 = 20.0;
+/// Test speeds, not the game's. Anything driving a *player* takes the table.
 pub const WALK: f64 = 4.0;
 pub const SPRINT: f64 = 9.0;
 pub const JUMP_SPEED: f64 = 7.0;
@@ -398,28 +409,55 @@ impl Body {
     /// `mouse` is radians per unit of the demo's axis values and it is a
     /// guess: the file does not carry the sensitivity and neither does any
     /// script. Below about 0.2 the body grinds along walls.
-    pub fn replay(&mut self, world: &Collision, frames: &[omn::Frame], mouse: f64, speed: f64) {
+    pub fn replay(&mut self, world: &Collision, frames: &[omn::Frame], mouse: f64, kind: f64) {
+        let mut drive = Drive::default();
         for frame in frames {
             let dt = (frame.dt as f64).clamp(1e-4, 0.2);
             self.yaw -= mouse * frame.held(omn::TURN_RIGHT).unwrap_or(0.0) as f64;
             self.yaw += mouse * frame.held(omn::TURN_LEFT).unwrap_or(0.0) as f64;
-            let (fx, fy) = (self.yaw.cos(), self.yaw.sin());
-            let (rx, ry) = (-self.yaw.sin(), self.yaw.cos());
-            let mut d = [0.0f64, 0.0];
-            if frame.held(omn::FORWARD).is_some() {
-                d = [d[0] + fx, d[1] + fy];
-            }
-            if frame.held(omn::BACKWARD).is_some() {
-                d = [d[0] - fx, d[1] - fy];
-            }
-            if frame.held(omn::RIGHT).is_some() {
-                d = [d[0] + rx, d[1] + ry];
-            }
-            if frame.held(omn::LEFT).is_some() {
-                d = [d[0] - rx, d[1] - ry];
-            }
+            let ahead = frame.held(omn::FORWARD).is_some() as i32
+                - frame.held(omn::BACKWARD).is_some() as i32;
+            let side = frame.held(omn::RIGHT).is_some() as i32
+                - frame.held(omn::LEFT).is_some() as i32;
+            drive.push(kind, ahead, side, dt);
+            let (d, speed) = drive.heading(self.yaw);
             self.step(world, d, frame.held(omn::JUMP).is_some(), speed, dt);
         }
+    }
+}
+
+/// A playable character's two speeds, smoothed toward what the table asks for.
+///
+/// The original keeps them at `kurt + 0x0c` and `kurt + 0x10` and steps each
+/// through 0x40ef40 every frame; the table is read fresh each time, so an
+/// input change moves the *target* and the body catches up at
+/// [`crate::game::world::ACCELERATE`]. Holding both is what makes the
+/// diagonals right: the table's own entries are pre-normalised, so this must
+/// **not** normalise them again — only the direction is a unit vector.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Drive {
+    pub forward: f64,
+    pub strafe: f64,
+}
+
+impl Drive {
+    /// `ahead` and `side` are -1, 0 or +1 — the intent, not a speed.
+    pub fn push(&mut self, kind: f64, ahead: i32, side: i32, dt: f64) {
+        let (f, s, _) = crate::game::world::player_speed(kind, ahead, side).unwrap_or_default();
+        self.forward = crate::game::world::approach(self.forward, f, dt);
+        self.strafe = crate::game::world::approach(self.strafe, s, dt);
+    }
+
+    /// `-> (a unit direction in the plane, how fast to go along it)`. Right is
+    /// `(-sin yaw, cos yaw)`, the same hand the rest of the engine uses.
+    pub fn heading(&self, yaw: f64) -> ([f64; 2], f64) {
+        let (fx, fy) = (yaw.cos(), yaw.sin());
+        let v = [
+            self.forward * fx - self.strafe * fy,
+            self.forward * fy + self.strafe * fx,
+        ];
+        let n = (v[0] * v[0] + v[1] * v[1]).sqrt();
+        if n < 1e-9 { ([0.0, 0.0], 0.0) } else { ([v[0] / n, v[1] / n], n) }
     }
 }
 

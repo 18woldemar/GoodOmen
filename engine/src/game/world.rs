@@ -146,6 +146,107 @@ pub const PLAYER: [(f64, i16, i16); 3] = [
     (101.0, 200, 0x8d6), // OBJ_MAX
 ];
 
+/// **A playable character's speed is a 3x3 table**, and there is one pair per
+/// character. `mdkKurt.c` reads it at 0x4179cf as
+/// `table[kurt[0] * 3 + kurt[4]]`, so the row is the forward intent — 0 ahead,
+/// 1 still, 2 back — and the column the strafe: 0 left, 1 none, 2 right. The
+/// forward table and the strafe table sit 0x24 apart, nine floats each:
+///
+/// | | forward | strafe | 0x40eba0's fourth argument |
+/// |---|---|---|---|
+/// | kurt | 0x48f828 | 0x48f84c | 21.0 |
+/// | hyde | 0x48f6e0 | 0x48f704 | 14.0 |
+/// | max | 0x48fa28 | 0x48fa4c | 14.0 |
+/// | doctor | 0x48f3d0 | 0x48f3f4 | 14.0 |
+///
+/// **Kurt's and Max's diagonals are pre-normalised in the data** — Kurt's 15
+/// forward becomes 10.6 with 10.6 sideways, and nothing but normalisation
+/// explains 10.6 and 8.5 sitting beside 15 and 12. They are rounded by hand
+/// rather than computed: 15/sqrt(2) is 10.6066.
+///
+/// The other two are **not**, and assuming they were would have been an
+/// invention: Hyde's forward-right is 8.75 against a straight 10, so he is an
+/// eighth slower on the diagonal, and the doctor's is 10.4 against 10, so he
+/// is a twenty-fifth faster. Nine hand-set entries, not a formula.
+///
+/// The whole 18-float block is **byte-identical in the 2011 HD build** (file
+/// offset 0xc2cdc, VA 0x4c3adc) and indexed there by the same `eax*3 + [ebp+4]`
+/// at 0x419e1b, so a second and independently compiled source confirms both
+/// the table and the way it is read.
+///
+/// The result is scaled by `kurt + 0x24`, which the constructor sets to **1.0**
+/// at 0x4168f0 and nothing else writes — so these are the speeds outright.
+pub const PLAYER_SPEED: [(f64, [f64; 9], [f64; 9], f64); 4] = [
+    // ahead-left, ahead, ahead-right | left, still, right | back-left, back, back-right
+    (
+        100.0, // OBJ_KURT
+        [10.6, 15.0, 10.6, 0.0, 0.0, 0.0, -8.5, -12.0, -8.5],
+        [-10.6, 0.0, 10.6, -15.0, 0.0, 15.0, -8.5, 0.0, 8.5],
+        21.0,
+    ),
+    (
+        103.0, // OBJ_HYDE
+        [7.5, 10.0, 7.5, 0.0, 0.0, 0.0, -4.25, -6.0, -4.25],
+        [-4.5, 0.0, 4.5, -6.0, 0.0, 6.0, -4.25, 0.0, 4.25],
+        14.0,
+    ),
+    (
+        101.0, // OBJ_MAX
+        [8.5, 12.0, 8.5, 0.0, 0.0, 0.0, -7.0, -10.0, -7.0],
+        [-8.5, 0.0, 8.5, -12.0, 0.0, 12.0, -7.0, 0.0, 7.0],
+        14.0,
+    ),
+    (
+        102.0, // OBJ_DOC — mdkDoctor.c, 0x40954a
+        [8.5, 10.0, 8.5, 0.0, 0.0, 0.0, -5.0, -6.0, -5.0],
+        [-6.0, 0.0, 6.0, -7.0, 0.0, 7.0, -6.0, 0.0, 6.0],
+        14.0,
+    ),
+];
+
+/// How fast a player's speed moves toward the table's value, from 0x40ef40 —
+/// the same two literals at all four call sites, `push 60.0; push 120.0`.
+/// The function takes the frame time, picks a rate by comparing the current
+/// value's sign against the target's, adds `dt * rate`, and clamps at the
+/// target. So **60 a second while gaining and 120 while turning round**: a
+/// character that is already going the wrong way is pulled back twice as hard.
+pub const ACCELERATE: f64 = 60.0;
+pub const BRAKE: f64 = 120.0;
+
+/// `-> (forward, strafe, the fourth argument to the mover)`, or `None` for
+/// anything that is not one of the four playable characters. `ahead` and
+/// `side` are -1, 0 or +1, and the table's row and column are `1 - ahead`
+/// and `1 + side`.
+pub fn player_speed(kind: f64, ahead: i32, side: i32) -> Option<(f64, f64, f64)> {
+    let (_, forward, strafe, arg) = PLAYER_SPEED.iter().find(|(k, ..)| *k == kind)?;
+    let i = (1 - ahead.clamp(-1, 1)) as usize * 3 + (1 + side.clamp(-1, 1)) as usize;
+    Some((forward[i], strafe[i], *arg))
+}
+
+/// One step of 0x40ef40, which is longer than it looks: it compares the target
+/// against zero, the current value against the target, and — only on one of
+/// the four arms — the current value against zero as well.
+///
+/// The low rate is taken **only while the value is still short of the target
+/// and already on the target's own side of zero**. Every other arm takes the
+/// high one: braking from an overshoot, and reversing. So stopping from a run
+/// costs 120 and getting up to it costs 60, which is the opposite of what
+/// "accelerate slowly, brake gently" would suggest and is worth not inventing.
+pub fn approach(current: f64, target: f64, dt: f64) -> f64 {
+    let gaining = if target > 0.0 {
+        current < target && current >= 0.0
+    } else {
+        current > target && current <= 0.0
+    };
+    let rate = if gaining { ACCELERATE } else { BRAKE };
+    let moved = current + rate * dt * if target > current { 1.0 } else { -1.0 };
+    if (moved - target).abs() < 1e-12 || (target > current) == (moved > target) {
+        target
+    } else {
+        moved
+    }
+}
+
 /// **The shot table**, at 0x497388: 69 records of 0x58 bytes, in the same
 /// shape as the enemy table and found the same way — a run of plausible
 /// `OBJ_*` ids at a fixed stride. `mdkBullet.c` (the path is at 0x498f1c) is
@@ -178,84 +279,84 @@ pub const PLAYER: [(f64, i16, i16); 3] = [
 /// flat out of its feet and a two-unit step is enough to miss with.
 pub const AT_PLAYER: i32 = 0x800;
 
-pub const BULLET: [(f64, &str, i16, i16, f64, f64, i32); 69] = [
-    (400.0, "bifshot", 1026, 5, 5.0, 60.0, 0x802),
-    (404.0, "birdshot", 2, 3, 4.0, 60.0, 0x800),
-    (420.0, "rpmissl", 2, 5, 30.0, 20.0, 0x803),
-    (417.0, "dbgrenade", 1026, 10, 30.0, 20.0, 0x2809),
-    (403.0, "dboy1shot", 2, 2, 4.0, 40.0, 0x0),
-    (423.0, "pdboy1shot", 2, 4, 4.0, 40.0, 0x0),
-    (412.0, "powergenshot", 1026, 5, 5.0, 60.0, 0x802),
-    (421.0, "hansshot", 1026, 3, 4.0, 60.0, 0x800),
-    (435.0, "badmaxshot1", 2, 8, 4.0, 70.0, 0x801),
-    (441.0, "badmaxshot2", 3, 5, 5.0, 60.0, 0x1802),
-    (427.0, "gruntshot", 2, 2, 4.0, 40.0, 0x800),
-    (425.0, "udboy1shot", 1026, 10, 4.0, 100.0, 0x2800),
-    (432.0, "udboy2shot", 1027, 5, 5.0, 60.0, 0x1802),
-    (428.0, "hosershot", 2, 2, 4.0, 40.0, 0xc00),
-    (413.0, "turshot01", 2, 2, 4.0, 60.0, 0x0),
-    (419.0, "turshot02", 2, 1, 4.0, 60.0, 0x0),
-    (452.0, "turshot03", 2, 2, 4.0, 60.0, 0x0),
-    (453.0, "turshot04", 2, 2, 4.0, 500.0, 0x800),
-    (454.0, "turshot04", 2, 2, 4.0, 500.0, 0x800),
-    (455.0, "turshot06", 2, 10, 10.0, 90.0, 0x20801),
-    (456.0, "grmissl", 0, 0, 5.0, 35.0, 0x2),
-    (457.0, "turshot01", 2, 2, 4.0, 60.0, 0x0),
-    (458.0, "turshot09", 2, 2, 4.0, 70.0, 0x0),
-    (459.0, "turshot10", 2, 10, 5.0, 80.0, 0x801),
-    (460.0, "turshot11", 2, 10, 5.0, 80.0, 0x801),
-    (461.0, "turshot12", 2, 10, 5.0, 80.0, 0x801),
-    (462.0, "turshot13", 2, 5, 5.0, 160.0, 0x800),
-    (463.0, "turshot14", 2, 10, 5.0, 80.0, 0x801),
-    (464.0, "turshot15", 2, 10, 5.0, 80.0, 0x801),
-    (465.0, "turshot16", 2, 10, 5.0, 80.0, 0x801),
-    (466.0, "turshot17", 2, 10, 5.0, 80.0, 0x801),
-    (467.0, "turshot18", 2, 10, 5.0, 80.0, 0x801),
-    (468.0, "turshot19", 2, 10, 5.0, 80.0, 0x801),
-    (469.0, "turshot20", 2, 10, 5.0, 80.0, 0x801),
-    (416.0, "toast_missle", 1, 15, 10.0, 50.0, 0x831),
-    (422.0, "blackhole", 1, 0, 30.0, 25.0, 0x28c8),
-    (405.0, "grenade", 1027, 10, 30.0, 25.0, 0x2c09),
-    (424.0, "decoygrenade", 0, 0, 30.0, 25.0, 0x28c8),
-    (401.0, "grmissl", 1027, 12, 30.0, 20.0, 0xa03),
-    (418.0, "moltov", 1025, 12, 30.0, 25.0, 0x809),
-    (414.0, "rpmissl", 3, 6, 10.0, 20.0, 0xa03),
-    (415.0, "toast_flop", 1, 0, 30.0, 25.0, 0x831),
-    (406.0, "sniperbullet", 1, 25, 6.0, 300.0, 0x804),
-    (407.0, "snipergrenade", 1027, 40, 6.0, 200.0, 0x805),
-    (408.0, "sniperhoming", 1025, 60, 30.0, 100.0, 0xa06),
-    (411.0, "snipermortar", 1027, 20, 30.0, 50.0, 0xc0d),
-    (410.0, "sniperbounce", 1027, 20, 30.0, 60.0, 0x915),
-    (430.0, "lasershot", 1, 25, 1.0, 90.0, 0x4),
-    (431.0, "lasershot2", 1, 40, 1.0, 90.0, 0x4),
-    (433.0, "toastbaguette", 1, 50, 30.0, 50.0, 0xa33),
-    (436.0, "toastpumper", 1027, 20, 30.0, 50.0, 0xc0d),
-    (434.0, "bfbshot", 2, 4, 4.0, 40.0, 0x0),
-    (437.0, "sniperlock", 0, 0, -1.0, 20.0, 0x1a008),
-    (451.0, "sniperlock", 0, 0, -1.0, 25.0, 0x1a008),
-    (438.0, "bfbshotseek", 0, 0, 30.0, 0.0, 0x2c08),
-    (439.0, "bfbshotseek2", 1026, 5, 30.0, 30.0, 0x5802),
-    (444.0, "bfbshotseekb", 0, 0, 30.0, 0.0, 0x2c08),
-    (445.0, "bfbshotseek2b", 1026, 5, 30.0, 30.0, 0x1802),
-    (440.0, "bfbshotpsi", 0, 0, 30.0, 0.0, 0x2c08),
-    (446.0, "bfbbomb", 1026, 20, 30.0, 20.0, 0x2809),
-    (442.0, "turshot11", 2, 2, 4.0, 120.0, 0x800),
-    (443.0, "turshot10", 2, 3, 30.0, 80.0, 0x801),
-    (447.0, "zizshot01", 1026, 15, 30.0, 70.0, 0x140810),
-    (448.0, "zizbub", 0, 0, 600.0, 40.0, 0x2008),
-    (449.0, "zizshot03", 2, 5, 4.0, 200.0, 0x160800),
-    (450.0, "bilebelch", 1026, 5, 10.0, 25.0, 0x183802),
-    (480.0, "zizeye", 0, 0, -1.0, 1.0, 0x1a008),
-    (481.0, "gastricjuice", 2, 4, 4.0, 30.0, 0x140012),
-    (482.0, "zizbrain", 1026, 5, 30.0, 30.0, 0x1802),
+pub const BULLET: [(f64, &str, i16, i16, f64, f64, f64, i32); 69] = [
+    (400.0, "bifshot", 1026, 5, 5.0, 60.0, 1.0, 0x802),
+    (404.0, "birdshot", 2, 3, 4.0, 60.0, 0.0, 0x800),
+    (420.0, "rpmissl", 2, 5, 30.0, 20.0, 0.0, 0x803),
+    (417.0, "dbgrenade", 1026, 10, 30.0, 20.0, 0.0, 0x2809),
+    (403.0, "dboy1shot", 2, 2, 4.0, 40.0, 1.0, 0x0),
+    (423.0, "pdboy1shot", 2, 4, 4.0, 40.0, 0.0, 0x0),
+    (412.0, "powergenshot", 1026, 5, 5.0, 60.0, 1.0, 0x802),
+    (421.0, "hansshot", 1026, 3, 4.0, 60.0, 1.0, 0x800),
+    (435.0, "badmaxshot1", 2, 8, 4.0, 70.0, 1.0, 0x801),
+    (441.0, "badmaxshot2", 3, 5, 5.0, 60.0, 1.0, 0x1802),
+    (427.0, "gruntshot", 2, 2, 4.0, 40.0, 0.0, 0x800),
+    (425.0, "udboy1shot", 1026, 10, 4.0, 100.0, 0.0, 0x2800),
+    (432.0, "udboy2shot", 1027, 5, 5.0, 60.0, 1.0, 0x1802),
+    (428.0, "hosershot", 2, 2, 4.0, 40.0, 0.0, 0xc00),
+    (413.0, "turshot01", 2, 2, 4.0, 60.0, 0.0, 0x0),
+    (419.0, "turshot02", 2, 1, 4.0, 60.0, 0.0, 0x0),
+    (452.0, "turshot03", 2, 2, 4.0, 60.0, 0.0, 0x0),
+    (453.0, "turshot04", 2, 2, 4.0, 500.0, 0.0, 0x800),
+    (454.0, "turshot04", 2, 2, 4.0, 500.0, 0.0, 0x800),
+    (455.0, "turshot06", 2, 10, 10.0, 90.0, 1.4, 0x20801),
+    (456.0, "grmissl", 0, 0, 5.0, 35.0, 0.0, 0x2),
+    (457.0, "turshot01", 2, 2, 4.0, 60.0, 1.0, 0x0),
+    (458.0, "turshot09", 2, 2, 4.0, 70.0, 1.0, 0x0),
+    (459.0, "turshot10", 2, 10, 5.0, 80.0, 0.0, 0x801),
+    (460.0, "turshot11", 2, 10, 5.0, 80.0, 0.0, 0x801),
+    (461.0, "turshot12", 2, 10, 5.0, 80.0, 0.0, 0x801),
+    (462.0, "turshot13", 2, 5, 5.0, 160.0, 0.0, 0x800),
+    (463.0, "turshot14", 2, 10, 5.0, 80.0, 0.0, 0x801),
+    (464.0, "turshot15", 2, 10, 5.0, 80.0, 0.0, 0x801),
+    (465.0, "turshot16", 2, 10, 5.0, 80.0, 0.0, 0x801),
+    (466.0, "turshot17", 2, 10, 5.0, 80.0, 0.0, 0x801),
+    (467.0, "turshot18", 2, 10, 5.0, 80.0, 0.0, 0x801),
+    (468.0, "turshot19", 2, 10, 5.0, 80.0, 0.0, 0x801),
+    (469.0, "turshot20", 2, 10, 5.0, 80.0, 0.0, 0x801),
+    (416.0, "toast_missle", 1, 15, 10.0, 50.0, 0.0, 0x831),
+    (422.0, "blackhole", 1, 0, 30.0, 25.0, 0.0, 0x28c8),
+    (405.0, "grenade", 1027, 10, 30.0, 25.0, 0.0, 0x2c09),
+    (424.0, "decoygrenade", 0, 0, 30.0, 25.0, 0.0, 0x28c8),
+    (401.0, "grmissl", 1027, 12, 30.0, 20.0, 0.0, 0xa03),
+    (418.0, "moltov", 1025, 12, 30.0, 25.0, 0.0, 0x809),
+    (414.0, "rpmissl", 3, 6, 10.0, 20.0, 0.0, 0xa03),
+    (415.0, "toast_flop", 1, 0, 30.0, 25.0, 0.0, 0x831),
+    (406.0, "sniperbullet", 1, 25, 6.0, 300.0, 0.0, 0x804),
+    (407.0, "snipergrenade", 1027, 40, 6.0, 200.0, 0.0, 0x805),
+    (408.0, "sniperhoming", 1025, 60, 30.0, 100.0, 0.0, 0xa06),
+    (411.0, "snipermortar", 1027, 20, 30.0, 50.0, 0.0, 0xc0d),
+    (410.0, "sniperbounce", 1027, 20, 30.0, 60.0, 0.0, 0x915),
+    (430.0, "lasershot", 1, 25, 1.0, 90.0, 0.0, 0x4),
+    (431.0, "lasershot2", 1, 40, 1.0, 90.0, 0.0, 0x4),
+    (433.0, "toastbaguette", 1, 50, 30.0, 50.0, 0.0, 0xa33),
+    (436.0, "toastpumper", 1027, 20, 30.0, 50.0, 0.0, 0xc0d),
+    (434.0, "bfbshot", 2, 4, 4.0, 40.0, 0.0, 0x0),
+    (437.0, "sniperlock", 0, 0, -1.0, 20.0, 0.0, 0x1a008),
+    (451.0, "sniperlock", 0, 0, -1.0, 25.0, 0.0, 0x1a008),
+    (438.0, "bfbshotseek", 0, 0, 30.0, 0.0, 0.0, 0x2c08),
+    (439.0, "bfbshotseek2", 1026, 5, 30.0, 30.0, 1.0, 0x5802),
+    (444.0, "bfbshotseekb", 0, 0, 30.0, 0.0, 0.0, 0x2c08),
+    (445.0, "bfbshotseek2b", 1026, 5, 30.0, 30.0, 1.0, 0x1802),
+    (440.0, "bfbshotpsi", 0, 0, 30.0, 0.0, 0.0, 0x2c08),
+    (446.0, "bfbbomb", 1026, 20, 30.0, 20.0, 0.0, 0x2809),
+    (442.0, "turshot11", 2, 2, 4.0, 120.0, 0.0, 0x800),
+    (443.0, "turshot10", 2, 3, 30.0, 80.0, 0.0, 0x801),
+    (447.0, "zizshot01", 1026, 15, 30.0, 70.0, 0.0, 0x140810),
+    (448.0, "zizbub", 0, 0, 600.0, 40.0, 0.0, 0x2008),
+    (449.0, "zizshot03", 2, 5, 4.0, 200.0, 1.0, 0x160800),
+    (450.0, "bilebelch", 1026, 5, 10.0, 25.0, 0.0, 0x183802),
+    (480.0, "zizeye", 0, 0, -1.0, 1.0, 0.0, 0x1a008),
+    (481.0, "gastricjuice", 2, 4, 4.0, 30.0, 0.0, 0x140012),
+    (482.0, "zizbrain", 1026, 5, 30.0, 30.0, 1.0, 0x1802),
 ];
 
 /// What a shot of this type does, if the table names it.
-pub fn bullet(kind: f64) -> Option<(&'static str, i16, i16, f64, f64, i32)> {
+pub fn bullet(kind: f64) -> Option<(&'static str, i16, i16, f64, f64, f64, i32)> {
     BULLET
         .iter()
         .find(|(k, ..)| *k == kind)
-        .map(|(_, m, f, d, l, s, g)| (*m, *f, *d, *l, *s, *g))
+        .map(|(_, m, f, d, l, s, e, g)| (*m, *f, *d, *l, *s, *e, *g))
 }
 
 
@@ -1062,5 +1163,46 @@ mod tests {
         world.make_destructable(id, 350);
         assert_eq!(world.get(id).unwrap().hitpoints, 350);
         assert!(world.hurt(id, 349) == false && world.hurt(id, 1), "and 350 hits kill it");
+    }
+
+    /// The row and column are easy to transpose and the data says which is
+    /// which: only the forward row moves you forwards, and only the outer
+    /// columns move you sideways. Kurt and Max normalise their diagonals;
+    /// Hyde and the doctor do not, which is why this asserts the shape and
+    /// not a formula.
+    #[test]
+    fn the_speed_table_is_indexed_the_way_the_original_indexes_it() {
+        for (kind, ..) in PLAYER_SPEED {
+            let (ahead, no_drift, _) = player_speed(kind, 1, 0).unwrap();
+            assert!(ahead > 0.0 && no_drift == 0.0, "{kind} walks straight ahead");
+            assert!(player_speed(kind, -1, 0).unwrap().0 < 0.0, "{kind} backs up");
+            let (still, side, _) = player_speed(kind, 0, -1).unwrap();
+            assert!(still == 0.0 && side < 0.0, "{kind} strafes left without walking");
+            assert_eq!(player_speed(kind, 0, 1).unwrap().1, -side, "and right by as much");
+            assert_eq!(player_speed(kind, 0, 0).unwrap(), (0.0, 0.0, ahead * 0.0 + PLAYER_SPEED
+                .iter().find(|(k, ..)| *k == kind).unwrap().3));
+        }
+        // Kurt 15 and Max 12 go the same speed on the diagonal; the other two
+        // are hand-set and do not, so this is data and not arithmetic
+        for (kind, straight) in [(100.0, 15.0), (101.0, 12.0)] {
+            let (f, s, _) = player_speed(kind, 1, 1).unwrap();
+            assert!(((f * f + s * s).sqrt() - straight).abs() < 0.05);
+        }
+        assert!(player_speed(202.0, 1, 0).is_none(), "a grunt is not playable");
+    }
+
+    /// 0x40ef40's rates are not "accelerate and brake": the low one is taken
+    /// only while the value is short of the target *and* on its side of zero.
+    /// Stopping is the fast rate, and so is a reversal.
+    #[test]
+    fn a_speed_approaches_its_target_and_stops_there() {
+        assert_eq!(approach(0.0, 15.0, 1.0), 15.0, "one second covers 60, so it clamps");
+        assert!((approach(0.0, 15.0, 0.1) - 6.0).abs() < 1e-9, "getting up to speed is 60");
+        assert!((approach(-15.0, 15.0, 0.1) - -3.0).abs() < 1e-9, "reversing is 120");
+        assert!((approach(15.0, 0.0, 0.1) - 3.0).abs() < 1e-9, "and so is stopping");
+        assert!((approach(20.0, 15.0, 0.01) - 18.8).abs() < 1e-9, "so is losing an overshoot");
+        assert_eq!(approach(15.0, 15.0, 0.1), 15.0);
+        assert_eq!(approach(15.0, 0.0, 1.0), 0.0, "and it never steps past the target");
+        assert_eq!(approach(-6.0, 0.0, 1.0), 0.0);
     }
 }

@@ -1280,7 +1280,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                         None => return Ok(0.0),
                     }
                 };
-                let Some((_, filter, damage, life, speed, _)) = crate::game::world::bullet(kind)
+                let Some((_, filter, damage, life, speed, _, _)) = crate::game::world::bullet(kind)
                 else {
                     return Ok(0.0); // not a shot type, so there is nothing to fly
                 };
@@ -2589,9 +2589,13 @@ fn facing_within(yaw: f64, heading: f64, slack: f64) -> bool {
 /// the bullet leaves along the shooter's yaw, flat, out of its feet — and
 /// the run said exactly what that costs: level 4 fired 45 shots and the
 /// nearest passed 2.9 units away with **2.8 of it height**.
+/// The shortest a shot's flight time is worked out from — the float at
+/// 0x48f37c. A target ten units away is led as though it were fifty.
+const MIN_LEAD_RANGE: f64 = 50.0;
+
 fn fire_key_object(lua: &Lua, who: &str, kind: f64) -> Result<(), Error> {
     let Some((at, yaw)) = stance(lua, who) else { return Ok(()) };
-    let Some((_, filter, damage, life, speed, flags)) = crate::game::world::bullet(kind) else {
+    let Some((_, filter, damage, life, speed, lead, flags)) = crate::game::world::bullet(kind) else {
         return Ok(()); // an effect or a prop, and the engine has nowhere to put it
     };
     let mut direction = [yaw.cos(), yaw.sin(), 0.0];
@@ -2602,7 +2606,35 @@ fn fire_key_object(lua: &Lua, who: &str, kind: f64) -> Result<(), Error> {
             .and_then(|p| p.get::<String>("name").ok())
             .and_then(|n| stance(lua, &n).map(|(p, _)| p));
         if let Some(to) = hero {
-            let d = [0, 1, 2].map(|c| to[c] - at[c]);
+            let mut d = [0, 1, 2].map(|c| to[c] - at[c]);
+            let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            // **And it leads its target**, which is the launch's own
+            // arithmetic at 0x4039cd and not the AI's: the flight time is
+            // `max(distance, 50) / speed` — the 50 is the float at 0x48f37c
+            // and the clamp is skipped only for a shot with flag 0x20000 —
+            // and the aim point is `target + velocity * time * record[0x4c]`.
+            // That column is **0 for 55 of the 69 shots**, 1.0 for thirteen
+            // and 1.4 for one, so most shots do not lead at all.
+            //
+            // One gate is deliberately missing and is marked rather than
+            // guessed: when the target is Kurt the original also calls
+            // 0x419060, which reads `kurt + 0x40`'s field at +0x3c, and drops
+            // the velocity when that is zero. What that field is has not been
+            // read, and defaulting to "lead" is the branch a moving target
+            // takes.
+            if lead != 0.0 && len > 1e-6 {
+                let travel = len.max(MIN_LEAD_RANGE) / speed.max(1e-6);
+                let name = lua
+                    .named_registry_value::<mlua::Table>("player")
+                    .ok()
+                    .and_then(|p| p.get::<String>("name").ok());
+                let moving = boot_ref(lua)
+                    .ok()
+                    .and_then(|b| name.and_then(|n| b.velocity.get(&n).copied()));
+                if let Some(v) = moving {
+                    d = [0, 1, 2].map(|c| d[c] + v[c] * travel * lead);
+                }
+            }
             let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
             if len > 1e-6 {
                 direction = d.map(|c| c / len);

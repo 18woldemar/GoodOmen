@@ -129,7 +129,8 @@ def scale(exe: Path, bases: list[int]) -> dict[tuple[float, int], int]:
 # whose path string sits at 0x498f1c -- reads every field kept here.
 SHOTS = 0x00497388
 SHOT_STRIDE = 0x58
-SHOT_COLUMNS = ((0x04, "<i"), (0x08, "<i"), (0x20, "<f"), (0x2C, "<f"))
+SHOT_COLUMNS = ((0x04, "<i"), (0x08, "<i"), (0x20, "<f"), (0x2C, "<f"),
+                (0x4C, "<f"))
 # +0x54, the flags. 0x800 is "launch it at the player" and it is set on
 # almost every enemy shot, which is what lets a bullet find a player who is
 # not standing at the shooter's own height.
@@ -156,7 +157,7 @@ def bullets(args) -> int:
         i += 1
 
     if not args.engine:
-        print("type model damage_type damage life speed flags")
+        print("type model damage_type damage life speed lead flags")
         for row in want:
             print(" ".join(row))
         return 0

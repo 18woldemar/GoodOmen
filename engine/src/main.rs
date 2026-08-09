@@ -241,8 +241,8 @@ fn main() {
 
     // the shot table, the same way: one row per record so a tool can diff it
     if args.iter().any(|a| a == "--bullets") {
-        for (kind, model, filter, damage, life, speed, flags) in goodomen::game::world::BULLET {
-            println!("{} {model} {filter} {damage} {life} {speed} {flags:#x}", kind as i64);
+        for (kind, model, filter, damage, life, speed, lead, flags) in goodomen::game::world::BULLET {
+            println!("{} {model} {filter} {damage} {life} {speed} {lead} {flags:#x}", kind as i64);
         }
         return;
     }
@@ -865,7 +865,7 @@ fn replay(
     mouse: f64,
 ) -> Result<String, String> {
     use goodomen::formats::omn;
-    use goodomen::game::body::{Body, Collision, EYE, WALK};
+    use goodomen::game::body::{Body, Collision, EYE};
     use goodomen::game::{script::Scripts, world};
 
     let mut install = Install::open(root).map_err(|e| e.to_string())?;
@@ -889,7 +889,8 @@ fn replay(
     let frames = &frames[1.min(frames.len())..];
 
     let mut body = Body::new([start[0], start[1], start[2] + EYE], yaw);
-    body.replay(&collision, frames, mouse, WALK);
+    // the demo is Kurt's, so the speeds are Kurt's own table
+    body.replay(&collision, frames, mouse, 100.0);
 
     let seconds: f32 = frames.iter().map(|f| f.dt).sum();
     let drift = (0..3)
@@ -979,7 +980,7 @@ fn load_animation_keys(install: &mut Install, scripts: &Scripts) -> usize {
 fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Result<String, String> {
     use goodomen::formats::omn;
     use goodomen::game::api;
-    use goodomen::game::body::{Body, Collision, EYE, WALK};
+    use goodomen::game::body::{Body, Collision, EYE};
     use goodomen::game::script::Scripts;
     use goodomen::game::world;
 
@@ -1089,11 +1090,27 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
             .unwrap_or(30.0);
     let steps = (seconds / dt) as usize;
 
+    // The speeds are the character's own table, not a number of ours. The
+    // steering below is still the harness's -- hold forwards, hunt, or follow
+    // a wall -- so only the forward column is asked for.
+    let who = {
+        let w = world::world(&scripts.lua).expect("a world");
+        scripts
+            .lua
+            .app_data_ref::<api::Boot>()
+            .and_then(|b| b.player.clone())
+            .and_then(|n| w.find(&n))
+            .and_then(|i| w.get(i))
+            .map(|g| g.kind)
+            .unwrap_or(100.0)
+    };
+    let mut drive = goodomen::game::body::Drive::default();
+
     for step in 0..steps {
         ran = step + 1;
         let was = body.position;
         match &frames {
-            Some(f) if step < f.len() => body.replay(&collision, &f[step..step + 1], 1.0, WALK),
+            Some(f) if step < f.len() => body.replay(&collision, &f[step..step + 1], 1.0, who),
             // forwards, which is enough to cross a room — or, with `--hunt`,
             // **toward the nearest thing that has hitpoints**. That is the
             // harness's own idea and not the game's: the AI only runs when a
@@ -1165,7 +1182,8 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
                     }
                 }
                 let met = body.hits;
-                body.step(&collision, d, false, WALK, dt);
+                drive.push(who, 1, 0, dt);
+                body.step(&collision, d, false, drive.forward, dt);
                 jammed = jammed.saturating_sub(1);
                 if roam && body.hits > met {
                     body.yaw += TURN;
@@ -1556,6 +1574,20 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
             yaw,
         );
         let mut at = body.position;
+        // The character's own speeds, smoothed the way 0x40ef40 does. Whose
+        // they are is settled by the level: level 6 is played as Hyde.
+        let mut drive = goodomen::game::body::Drive::default();
+        let who = {
+            let w = goodomen::game::world::world(&level_scripts.lua).expect("a world");
+            level_scripts
+                .lua
+                .app_data_ref::<goodomen::game::api::Boot>()
+                .and_then(|b| b.player.clone())
+                .and_then(|n| w.find(&n))
+                .and_then(|i| w.get(i))
+                .map(|g| g.kind)
+                .unwrap_or(100.0)
+        };
         let mut cull = true;
         let mut shot_at: std::collections::BTreeSet<String> = Default::default();
         // -1 is not an environment, so the first frame always sets one; the
@@ -1649,13 +1681,19 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
             if held(Scancode::D) { d = [d[0] - fy, d[1] + fx]; }
             if held(Scancode::A) { d = [d[0] + fy, d[1] - fx]; }
             if walk {
-                body.step(
-                    &collision,
-                    d,
-                    held(Scancode::Space),
-                    if fast { goodomen::game::body::SPRINT } else { goodomen::game::body::WALK },
+                // On foot the speed is the table's, so there is no run key:
+                // one row is all a playable character has. Shift still makes
+                // the free camera quick, which is the harness's own.
+                body.yaw = yaw;
+                drive.push(
+                    who,
+                    held(Scancode::W) as i32 - held(Scancode::S) as i32,
+                    held(Scancode::D) as i32 - held(Scancode::A) as i32,
                     dt,
                 );
+                let (step, speed) = drive.heading(yaw);
+                body.step(&collision, step, held(Scancode::Space), speed, dt);
+                let _ = d;
                 at = body.position;
                 // the engine drives the player's locomotion, which is what
                 // the original calls `mdkWalkerAnimUpdate`
