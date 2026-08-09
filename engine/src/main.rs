@@ -1138,7 +1138,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     }
 
     // what the scripts actually did to the world while it ran
-    let (moved, playing, what, fired_sounds, spawned, jumped, shots, landed, struck, fighting) = {
+    let (moved, playing, what, fired_sounds, spawned, jumped, shots, landed, struck, fighting, died) = {
         let w = world::world(&scripts.lua).expect("a world");
         let boot = scripts.lua.app_data_ref::<api::Boot>().expect("boot state");
         let what: Vec<String> = boot
@@ -1149,7 +1149,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         // what the run asked to be heard: `omGobGSPlay` calls that reached a
         // sound the scripts had hung on an object
         let sounds: usize = boot.gob_sounds.iter().map(|g| g.played).sum();
-        (w.generation(), boot.playing.len(), what, sounds, boot.spawned.len(), boot.jumped, boot.fired, boot.hits, boot.keys_fired, boot.fighting.len())
+        (w.generation(), boot.playing.len(), what, sounds, boot.spawned.len(), boot.jumped, boot.fired, boot.hits, boot.keys_fired, boot.fighting.len(), boot.died.len())
     };
     let (fired, survived) = state.total();
     let mut stopped: Vec<(&String, &usize)> = state.why.iter().collect();
@@ -1176,6 +1176,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         ("animation keys", struck, expect_flag("--expect-keys")),
         ("enemies fighting", fighting, expect_flag("--expect-fighting")),
         ("things the player shot", shot_at, expect_flag("--expect-shot-at")),
+        ("things killed", died, expect_flag("--expect-killed")),
     ] {
         if let Some(want) = want {
             if got != want {
@@ -1190,7 +1191,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
          {moved} object moves, {playing} animations chosen, \
          {fired_sounds} sounds fired, {spawned} objects spawned, \
          {jumped} walkers launched, {shots} shots fired ({landed} hit), \
-         {anim_keys} keys in {struck} struck, {fighting} enemies fighting, {shot_at} shot by the player, \
+         {anim_keys} keys in {struck} struck, {fighting} enemies fighting, {shot_at} shot by the player and {died} killed, \
          {} objects touched and {} of them \
          scripted{}{} [{}]{}",
         if recorded { "the game's own recorded" } else if hunt { "hunting" } else { "held-forwards" },

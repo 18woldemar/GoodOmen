@@ -194,6 +194,14 @@ ENGINE = [
       "--run", "10", "1", "40", "--hunt", "--expect-shots", "12",
       "--expect-hits", "1", "--expect-events", "3667",
       "--expect-survived", "3667"], None),
+    # and the loop closes: the player walks at an enemy, shoots it with the
+    # hitscan the original uses, and it dies. Two minutes of hunting on level
+    # 8 is 77 shots and two kills.
+    ("the player kills something",
+     ["cargo", "run", "--quiet", "--release",
+      "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
+      "--run", "8", "1", "120", "--hunt", "--expect-shot-at", "77",
+      "--expect-killed", "2"], None),
     ("walking drives the player's own animation, and reaches the scripts",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
