@@ -178,9 +178,9 @@ ENGINE = [
       # `l7r2_spn1_spawn`, which spawns **inside** `c9` -- so what this pins
       # is the escape rule, not the refusal. Nothing in ten levels walks into
       # a wall in the first thirty seconds.
-      "--expect-walled", "65", "--expect-buried", "65",
+      "--expect-walled", "93", "--expect-buried", "93",
       "--expect-keys", "6", "--expect-fighting", "17",
-      "--expect-moves", "2176",
+      "--expect-moves", "2312",
       "--expect-events", "22504", "--expect-survived", "22504"], None),
     # and the driver that reaches more than the first room. Held forwards
     # jams on the first corner -- level 6 spends 1162 of 1200 frames against a
@@ -203,7 +203,7 @@ ENGINE = [
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--run", "9", "1", "30", "--expect-walkers", "18",
       "--expect-walled", "0", "--expect-buried", "0", "--expect-keys", "3",
-      "--expect-events", "46885", "--expect-survived", "45985"], None),
+      "--expect-events", "46883", "--expect-survived", "45983"], None),
     # level 10's zizzy turrets shoot: nine bullets in thirty seconds, each one
     # carrying its damage, damage type, lifetime and speed out of the shot
     # table at 0x497388 rather than out of the call.
@@ -216,12 +216,18 @@ ENGINE = [
     # nearest thing with hitpoints instead of holding forwards, which is what
     # it takes to get inside a turret's range at all: level 10's zizzy
     # turrets fire twelve and one lands.
-    ("a shot fired in a level hits the player",
+    # and an enemy shoots back and lands it. Level 4's walkers fire 45 rounds
+    # in two minutes and six reach the player -- which needs three separate
+    # things right: the engine arms them, the shot table's 0x800 launches the
+    # bullet **at the player** instead of flat out of the shooter's feet, and
+    # the damage filter lets it through. Before the flag the nearest of the 45
+    # passed 2.9 units away with 2.8 of it height.
+    ("an enemy shoots the player and hits",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
-      "--run", "10", "1", "40", "--hunt", "--expect-shots", "12",
-      "--expect-hits", "1", "--expect-events", "30067",
-      "--expect-survived", "30067"], None),
+      "--run", "4", "1", "120", "--roam", "--expect-shots", "45",
+      "--expect-hits", "6", "--expect-events", "72001",
+      "--expect-survived", "72001"], None),
     # and the loop closes: the player walks at an enemy, shoots it with the
     # hitscan the original uses, and it dies. Two minutes of hunting on level
     # 8 is 77 shots and two kills.
@@ -234,7 +240,7 @@ ENGINE = [
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--run", "6", "1", "40", "--expect-playing", "14",
-      "--expect-moves", "1441", "--expect-touched", "1"], None),
+      "--expect-moves", "1563", "--expect-touched", "1"], None),
     ("the room graph culls what the engine draws",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",

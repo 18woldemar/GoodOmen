@@ -241,8 +241,8 @@ fn main() {
 
     // the shot table, the same way: one row per record so a tool can diff it
     if args.iter().any(|a| a == "--bullets") {
-        for (kind, model, filter, damage, life, speed) in goodomen::game::world::BULLET {
-            println!("{} {model} {filter} {damage} {life} {speed}", kind as i64);
+        for (kind, model, filter, damage, life, speed, flags) in goodomen::game::world::BULLET {
+            println!("{} {model} {filter} {damage} {life} {speed} {flags:#x}", kind as i64);
         }
         return;
     }
@@ -1084,9 +1084,17 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
                 if hunt && jammed == 0 {
                     if let Some(w) = world::world(&scripts.lua) {
                         let me = body.position;
+                        // not the player's own gob: it has 100 hitpoints of
+                        // its own now, it is always the nearest thing with
+                        // any, and hunting it is standing still
+                        let me_gob = scripts
+                            .lua
+                            .app_data_ref::<api::Boot>()
+                            .and_then(|b| b.player.clone());
                         let near = w
                             .iter()
                             .filter(|(_, g)| g.hitpoints > 0 && !g.name.is_empty())
+                            .filter(|(_, g)| Some(&g.name) != me_gob.as_ref())
                             .map(|(_, g)| {
                                 let v = [g.position[0] - me[0], g.position[1] - me[1]];
                                 (v[0] * v[0] + v[1] * v[1], v)
@@ -1196,7 +1204,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     }
 
     // what the scripts actually did to the world while it ran
-    let (moved, playing, what, fired_sounds, spawned, jumped, shots, landed, struck, fighting, died, walled, buried, walkers, walked, started) = {
+    let (moved, playing, what, fired_sounds, spawned, jumped, shots, landed, struck, fighting, died, walled, buried, walkers, walked, started, miss, drop) = {
         let w = world::world(&scripts.lua).expect("a world");
         let boot = scripts.lua.app_data_ref::<api::Boot>().expect("boot state");
         let what: Vec<String> = boot
@@ -1213,7 +1221,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         // and how far they got, which is what says whether any of it ran
         // `max` only so an empty sum prints 0 and not -0
         let walked: f64 = boot.bodies.values().map(|b| b.travelled).sum::<f64>().max(0.0);
-        (w.generation(), boot.playing.len(), what, sounds, boot.spawned.len(), boot.jumped, boot.fired, boot.hits, boot.keys_fired, boot.fighting.len(), boot.died.len(), walled, boot.bodies.values().map(|b| b.inside).sum::<usize>(), boot.bodies.len(), walked, boot.ever_scripted.len())
+        (w.generation(), boot.playing.len(), what, sounds, boot.spawned.len(), boot.jumped, boot.fired, boot.hits, boot.keys_fired, boot.fighting.len(), boot.died.len(), walled, boot.bodies.values().map(|b| b.inside).sum::<usize>(), boot.bodies.len(), walked, boot.ever_scripted.len(), boot.nearest_miss, boot.nearest_drop)
     };
     let (fired, survived) = state.total();
     let mut stopped: Vec<(&String, &usize)> = state.why.iter().collect();
@@ -1261,7 +1269,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
          {jumped} walkers launched, {started} objects given a script, \
          {walkers} walkers walked {walked:.0} units \
          and met a wall on {walled} frames ({buried} inside), \
-         {shots} shots fired ({landed} hit), \
+         {shots} shots fired ({landed} hit, nearest {}, {drop:.1} of it height), \
          {anim_keys} keys in {struck} struck, {fighting} enemies fighting, {shot_at} shot by the player and {died} killed, \
          {} objects touched and {} of them \
          scripted{}{} [{}]{}",
@@ -1270,6 +1278,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         body.hits,
         body.inside,
         state.rooms_entered,
+        match miss { Some(d) => format!("{d:.1}"), None => "never".into() },
         state.touched.len(),
         state.collisions,
         if state.touched.is_empty() {

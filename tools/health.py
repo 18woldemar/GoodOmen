@@ -130,6 +130,10 @@ def scale(exe: Path, bases: list[int]) -> dict[tuple[float, int], int]:
 SHOTS = 0x00497388
 SHOT_STRIDE = 0x58
 SHOT_COLUMNS = ((0x04, "<i"), (0x08, "<i"), (0x20, "<f"), (0x2C, "<f"))
+# +0x54, the flags. 0x800 is "launch it at the player" and it is set on
+# almost every enemy shot, which is what lets a bullet find a player who is
+# not standing at the shooter's own height.
+SHOT_FLAGS = 0x54
 
 
 def bullets(args) -> int:
@@ -147,11 +151,12 @@ def bullets(args) -> int:
         for off, fmt in SHOT_COLUMNS:
             v = struct.unpack_from(fmt, r, off)[0]
             row.append("%g" % v)
+        row.append("%#x" % struct.unpack_from("<I", r, SHOT_FLAGS)[0])
         want.append(row)
         i += 1
 
     if not args.engine:
-        print("type model damage_type damage life speed")
+        print("type model damage_type damage life speed flags")
         for row in want:
             print(" ".join(row))
         return 0

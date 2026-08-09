@@ -326,6 +326,20 @@ pub struct Boot {
     /// is asked to move and never removed — a walker that stops still stands
     /// on something.
     pub bodies: BTreeMap<String, crate::game::body::Body>,
+    /// Which walkers are **mid-turn** — `walker + 0x2c`, the memory half of
+    /// the turn's hysteresis. A walker starts turning when it is more than
+    /// [`FACING`] off and keeps going until it is inside [`SQUARE`].
+    pub turning: BTreeSet<String>,
+    /// The closest any shot has passed to the player, in units. A run that
+    /// fires and never hits needs to say whether the aim is out by a metre or
+    /// by a mile, and `0 shots that hit` cannot.
+    pub nearest_miss: Option<f64>,
+    /// How much of that nearest miss was **height**, which is the difference
+    /// between "the aim is out" and "the bullet flies flat out of the feet".
+    pub nearest_drop: f64,
+    /// How fast each object the tick moves is going, differenced between
+    /// frames. The arena keeps no velocity and the aim needs one.
+    pub velocity: BTreeMap<String, [f64; 3]>,
     /// Shots in the air, by the arena id of the bullet gob — **not by name**,
     /// because the scripts create them with `mdkCreateObjectLua("", ...)` and
     /// a bullet has none.
@@ -1029,11 +1043,11 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 let Some(w) = world::world(lua) else { return Ok(0.0) };
                 w.find(&who).and_then(|i| w.get(i)).map(|g| g.kind).unwrap_or(0.0)
             };
-            let target = lua
+            let hero = lua
                 .named_registry_value::<mlua::Table>("player")
                 .ok()
-                .and_then(|p| p.get::<String>("name").ok())
-                .and_then(|n| stance(lua, &n).map(|(p, _)| p));
+                .and_then(|p| p.get::<String>("name").ok());
+            let target = hero.as_deref().and_then(|n| stance(lua, n).map(|(p, _)| p));
             /// The cooldown a walker with nothing to fight falls back to,
             /// from the float stored at 0x43254c.
             const IDLE: f64 = 0.3;
@@ -1046,7 +1060,21 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             let d = [to[0] - at[0], to[1] - at[1], to[2] - at[2]];
             let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
             let near = crate::game::world::ai(kind).map(|r| r.3).unwrap_or(0.0);
+            // **and it leads.** 0x432d90 aims at `target + velocity * (dist *
+            // 0.025)`, which is the flight time at the shot's own speed, and
+            // the AI record's last column says whether this type bothers.
+            // Without it a walker aims where the player *was*: level 4 fired
+            // 45 shots and the nearest passed 2.9 units away, which is four
+            // units a second times the three quarters of a second the bullet
+            // was in the air.
+            const LEAD: f64 = 0.025; // 0x4901c4
+            let lead = crate::game::world::ai(kind).map(|r| r.7).unwrap_or(false);
             let mut boot = boot_mut(lua)?;
+            let moving = hero.as_deref().and_then(|n| boot.velocity.get(n)).copied();
+            let d = match moving {
+                Some(v) if lead => [0, 1, 2].map(|c| d[c] + v[c] * dist * LEAD),
+                _ => d,
+            };
             boot.heading.insert(who.clone(), d[1].atan2(d[0]));
             let cool = boot.cooldown.get(&who).copied().unwrap_or(0.0);
             // too close and off cooldown: give ground, still facing
@@ -1143,7 +1171,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                         None => return Ok(0.0),
                     }
                 };
-                let Some((_, filter, damage, life, speed)) = crate::game::world::bullet(kind)
+                let Some((_, filter, damage, life, speed, _)) = crate::game::world::bullet(kind)
                 else {
                     return Ok(0.0); // not a shot type, so there is nothing to fly
                 };
@@ -2426,13 +2454,33 @@ fn facing_within(yaw: f64, heading: f64, slack: f64) -> bool {
 
 /// An animation key of 100 or more **creates an object of that type** at the
 /// object playing it (0x42c02e). When the type is one the shot table names,
-/// the new object is a projectile and it leaves along the shooter's own yaw —
-/// which is ours; the original gives it the muzzle node's orientation.
+/// the new object is a projectile.
+///
+/// Where it goes is the shot table's own business: bit **0x800** of `+0x54`
+/// says "at the player", and it is set on almost every enemy shot. Without it
+/// the bullet leaves along the shooter's yaw, flat, out of its feet — and
+/// the run said exactly what that costs: level 4 fired 45 shots and the
+/// nearest passed 2.9 units away with **2.8 of it height**.
 fn fire_key_object(lua: &Lua, who: &str, kind: f64) -> Result<(), Error> {
     let Some((at, yaw)) = stance(lua, who) else { return Ok(()) };
-    let Some((_, filter, damage, life, speed)) = crate::game::world::bullet(kind) else {
+    let Some((_, filter, damage, life, speed, flags)) = crate::game::world::bullet(kind) else {
         return Ok(()); // an effect or a prop, and the engine has nowhere to put it
     };
+    let mut direction = [yaw.cos(), yaw.sin(), 0.0];
+    if flags & crate::game::world::AT_PLAYER != 0 {
+        let hero = lua
+            .named_registry_value::<mlua::Table>("player")
+            .ok()
+            .and_then(|p| p.get::<String>("name").ok())
+            .and_then(|n| stance(lua, &n).map(|(p, _)| p));
+        if let Some(to) = hero {
+            let d = [0, 1, 2].map(|c| to[c] - at[c]);
+            let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            if len > 1e-6 {
+                direction = d.map(|c| c / len);
+            }
+        }
+    }
     let name = format!("{who}_key{}", kind as i64);
     let id = {
         let Some(mut w) = world::world_mut(lua) else { return Ok(()) };
@@ -2444,7 +2492,7 @@ fn fire_key_object(lua: &Lua, who: &str, kind: f64) -> Result<(), Error> {
         id,
         Shot {
             kind,
-            direction: [yaw.cos(), yaw.sin(), 0.0],
+            direction,
             speed,
             life: if life < 0.0 { f64::INFINITY } else { life },
             damage,
@@ -2473,6 +2521,12 @@ const ANIM_THROW: f64 = 57.0;
 /// it — 0x4318a0, 0x431b80 and 0x431f70, all with 0x48f618 PI, 0x48f61c -PI
 /// and 0x48f5a0 2*PI.
 const FACING: f64 = 0.17;
+
+/// And how near it has to come back before it stops turning, from the
+/// **double** at 0x4901b8 — read as a float it looks like 2.0, and the
+/// instruction that reads it is `fcomp QWORD`, not `fcomp DWORD`. `walker +
+/// 0x2c` remembers which of the two thresholds applies.
+const SQUARE: f64 = 0.02;
 
 fn facing(yaw: f64, heading: f64) -> bool {
     let mut d = yaw - heading;
@@ -2817,11 +2871,18 @@ pub fn tick_touching(
     if let Ok(player) = scripts.lua.named_registry_value::<mlua::Table>("player") {
         // the body's position is its **eye**; a model stands on its feet, so
         // the object goes an eye-height lower
-        place(
-            &scripts.lua,
-            &player,
-            [at[0], at[1], at[2] - crate::game::body::EYE],
-        )?;
+        let feet = [at[0], at[1], at[2] - crate::game::body::EYE];
+        // and how fast it is going, which is what the AI's aim leads by. The
+        // arena keeps no velocity, so it is differenced here, before the warp.
+        if let Ok(name) = player.get::<String>("name") {
+            let was = world::world(&scripts.lua)
+                .and_then(|w| w.find(&name).and_then(|i| w.get(i)).map(|g| g.position));
+            if let Some(was) = was.filter(|_| dt > 0.0) {
+                let v = [0, 1, 2].map(|c| (feet[c] - was[c]) / dt);
+                boot_mut(&scripts.lua)?.velocity.insert(name, v);
+            }
+        }
+        place(&scripts.lua, &player, feet)?;
         // and it faces where the body faces: a yaw about Z, in the (w,x,y,z)
         // order everything here stores a quaternion in
         if let (Some(id), Some(mut w)) = (
@@ -2989,7 +3050,7 @@ pub fn tick_touching(
     // sequence, it is *already* inside the geometry when it appears, so all
     // three slide candidates are refused too, and every sequence behind it
     // waits. A body that is already buried now moves anyway.
-    let steps: Vec<(world::Id, String, [f64; 3], f64, f64, f64, f64)> = {
+    let steps: Vec<(world::Id, String, [f64; 3], f64, f64, f64, f64, bool)> = {
         let boot = boot_ref(&scripts.lua)?;
         let Some(w) = crate::game::world::world(&scripts.lua) else {
             return Err(Error::Pragma("no world".into()));
@@ -3014,9 +3075,15 @@ pub fn tick_touching(
                 } else if d > std::f64::consts::PI {
                     d -= std::f64::consts::TAU;
                 }
-                // the outer threshold only; `walker + 0x2c` is the inner
-                // half of the hysteresis and the engine keeps no walker block
-                let turning = d.abs() > FACING;
+                // both halves of the hysteresis, and the inner one matters
+                // more than it looks: stopping at 0.17 rad leaves five units
+                // of lateral error at thirty out, so an enemy that fired
+                // would miss the player every time.
+                let turning = if boot.turning.contains(name) {
+                    d.abs() > SQUARE
+                } else {
+                    d.abs() > FACING
+                };
                 if !turning && speed == 0.0 {
                     return None; // standing still and already square
                 }
@@ -3026,7 +3093,7 @@ pub fn tick_touching(
                 // does not name — a spawner's own gob, say
                 let (tall, wide) = crate::game::world::size(g.kind)
                     .unwrap_or((crate::game::body::EYE, 0.0));
-                Some((id, name.clone(), g.position, yaw, speed, tall, wide))
+                Some((id, name.clone(), g.position, yaw, speed, tall, wide, turning))
             })
             .collect()
     };
@@ -3041,7 +3108,7 @@ pub fn tick_touching(
         .app_data_ref::<std::rc::Rc<crate::game::body::Collision>>()
         .map(|c| c.clone())
         .filter(|c| !c.is_empty());
-    for (id, name, from, yaw, speed, tall, wide) in steps {
+    for (id, name, from, yaw, speed, tall, wide, turning) in steps {
         let at = match &solid {
             Some(world) => {
                 let mut boot = boot_mut(&scripts.lua)?;
@@ -3063,6 +3130,14 @@ pub fn tick_touching(
                 from[2],
             ],
         };
+        {
+            let mut boot = boot_mut(&scripts.lua)?;
+            if turning {
+                boot.turning.insert(name.clone());
+            } else {
+                boot.turning.remove(&name);
+            }
+        }
         if let Ok(gob) = globals.get::<mlua::Table>(name.as_str()) {
             place(&scripts.lua, &gob, at)?;
         }
@@ -3124,6 +3199,9 @@ pub fn tick_touching(
         /// How near a shot has to pass to count as a hit. Ours: the original
         /// sweeps the bullet's own hull against the world.
         const REACH: f64 = 2.0;
+        let player = boot.player.clone().and_then(|n| w.find(&n));
+        let mut near = boot.nearest_miss;
+        let mut drop = boot.nearest_drop;
         let mut out = Vec::new();
         boot.shots.retain(|&id, shot| {
             let Some(from) = w.get(id).map(|g| g.position) else { return false };
@@ -3133,14 +3211,31 @@ pub fn tick_touching(
                 .iter()
                 .filter(|(i, g)| *i != id && g.hitpoints > 0 && !g.name.is_empty())
                 .filter(|(_, g)| Some(&g.name) != shot.shooter.as_ref())
+                // and it has to be able to hurt what it meets. 0x40e87d is
+                // the whole rule -- `damagetype & mdkGob[0x10]` -- and
+                // without it a `gruntshot`, which is `DAMAGE_BADGUY`, stops
+                // dead on the next grunt, whose filter is `DAMAGE_GOODGUY |
+                // DAMAGE_SNIPER`. Level 8 fired 25 and reported 25 hits.
+                .filter(|(_, g)| g.damage_filter & shot.filter != 0)
                 .find(|(_, g)| {
                     (0..3).map(|c| (g.position[c] - at[c]).powi(2)).sum::<f64>() < REACH * REACH
                 })
                 .map(|(_, g)| g.name.clone());
+            // how near it came to the player, whoever that is this frame
+            if let Some(me) = player.and_then(|p| w.get(p)) {
+                let d2: f64 = (0..3).map(|c| (me.position[c] - at[c]).powi(2)).sum();
+                let d = d2.sqrt();
+                if near.is_none_or(|n: f64| d < n) {
+                    drop = (me.position[2] - at[2]).abs();
+                }
+                near = Some(near.map_or(d, |n: f64| n.min(d)));
+            }
             let alive = hit.is_none() && shot.life > 0.0;
             out.push((id, at, hit, shot.clone()));
             alive
         });
+        boot.nearest_miss = near;
+        boot.nearest_drop = drop;
         out
     };
     for (id, at, hit, shot) in shots {

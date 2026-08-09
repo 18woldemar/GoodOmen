@@ -121,6 +121,31 @@ pub const BASE_HITPOINTS: [(f64, &str, i32); 19] = [
 ];
 
 
+/// **The three heroes.** Each has a constructor in its own file that writes
+/// its hitpoints and its damage filter as literals — and **not through
+/// `mdkDiffScale`**, so the difficulty changes what you fight and never what
+/// you are.
+///
+/// | who | at | hitpoints | filter |
+/// |---|---|---|---|
+/// | Kurt | 0x4168b8 | 100 | 0x9d6 |
+/// | Hyde | 0x413f5a | 240 | 0x8d6 |
+/// | Max | 0x420af8 | 200 | 0x8d6 |
+///
+/// The masks are `DAMAGE_BADGUY | LAVA | FALLING | LAVAFALL | LAVAFLOAT |
+/// LAVADEATH` and the one bit that differs is **0x100, `DAMAGE_BLACKHOLE`**:
+/// Kurt can be hurt by one and the other two cannot. None of the three has
+/// `DAMAGE_GOODGUY`, which is why the player cannot shoot himself.
+///
+/// Kurt's constructor writes the **current** hitpoints and never the maximum,
+/// so the 100 here stands for both and where the original's maximum comes
+/// from is unread. Hyde and Max write both.
+pub const PLAYER: [(f64, i16, i16); 3] = [
+    (100.0, 100, 0x9d6), // OBJ_KURT
+    (103.0, 240, 0x8d6), // OBJ_HYDE
+    (101.0, 200, 0x8d6), // OBJ_MAX
+];
+
 /// **The shot table**, at 0x497388: 69 records of 0x58 bytes, in the same
 /// shape as the enemy table and found the same way — a run of plausible
 /// `OBJ_*` ids at a fixed stride. `mdkBullet.c` (the path is at 0x498f1c) is
@@ -136,88 +161,101 @@ pub const BASE_HITPOINTS: [(f64, &str, i32); 19] = [
 /// | +0x2c | the speed (0x4039f4 divides a distance by it) |
 /// | +0x30 | the model name |
 /// | +0x4c | how much the shot leads a moving target |
-/// | +0x54 | flags: 0x40 fixed heading, 0x400 aim at the gob, 0x800 at the player |
+/// | +0x54 | flags: 0x40 fixed heading, 0x400 aim at the gob, **0x800 at the player** |
+///
+/// The last of those is on almost every enemy shot — `gruntshot` 0x800,
+/// `hansshot` 0x800, `hosershot` 0xc00, `dbgrenade` 0x2809 — and it is what
+/// makes an enemy's bullet find a player who is not at its own height. See
+/// [`AT_PLAYER`].
 ///
 /// The numbers read like a weapon list should: `sniperbullet` is 25 damage at
 /// 300 units a second and lives 6, `grenade` is 10 at 25 and lives 30,
 /// `lasershot` 25 at 90 and lives **1**. `tools/health.py --bullets` reads
 /// the same six columns out of the binary and `check.py` holds this literal
 /// to them.
-pub const BULLET: [(f64, &str, i16, i16, f64, f64); 69] = [
-    (400.0, "bifshot", 1026, 5, 5.0, 60.0),
-    (404.0, "birdshot", 2, 3, 4.0, 60.0),
-    (420.0, "rpmissl", 2, 5, 30.0, 20.0),
-    (417.0, "dbgrenade", 1026, 10, 30.0, 20.0),
-    (403.0, "dboy1shot", 2, 2, 4.0, 40.0),
-    (423.0, "pdboy1shot", 2, 4, 4.0, 40.0),
-    (412.0, "powergenshot", 1026, 5, 5.0, 60.0),
-    (421.0, "hansshot", 1026, 3, 4.0, 60.0),
-    (435.0, "badmaxshot1", 2, 8, 4.0, 70.0),
-    (441.0, "badmaxshot2", 3, 5, 5.0, 60.0),
-    (427.0, "gruntshot", 2, 2, 4.0, 40.0),
-    (425.0, "udboy1shot", 1026, 10, 4.0, 100.0),
-    (432.0, "udboy2shot", 1027, 5, 5.0, 60.0),
-    (428.0, "hosershot", 2, 2, 4.0, 40.0),
-    (413.0, "turshot01", 2, 2, 4.0, 60.0),
-    (419.0, "turshot02", 2, 1, 4.0, 60.0),
-    (452.0, "turshot03", 2, 2, 4.0, 60.0),
-    (453.0, "turshot04", 2, 2, 4.0, 500.0),
-    (454.0, "turshot04", 2, 2, 4.0, 500.0),
-    (455.0, "turshot06", 2, 10, 10.0, 90.0),
-    (456.0, "grmissl", 0, 0, 5.0, 35.0),
-    (457.0, "turshot01", 2, 2, 4.0, 60.0),
-    (458.0, "turshot09", 2, 2, 4.0, 70.0),
-    (459.0, "turshot10", 2, 10, 5.0, 80.0),
-    (460.0, "turshot11", 2, 10, 5.0, 80.0),
-    (461.0, "turshot12", 2, 10, 5.0, 80.0),
-    (462.0, "turshot13", 2, 5, 5.0, 160.0),
-    (463.0, "turshot14", 2, 10, 5.0, 80.0),
-    (464.0, "turshot15", 2, 10, 5.0, 80.0),
-    (465.0, "turshot16", 2, 10, 5.0, 80.0),
-    (466.0, "turshot17", 2, 10, 5.0, 80.0),
-    (467.0, "turshot18", 2, 10, 5.0, 80.0),
-    (468.0, "turshot19", 2, 10, 5.0, 80.0),
-    (469.0, "turshot20", 2, 10, 5.0, 80.0),
-    (416.0, "toast_missle", 1, 15, 10.0, 50.0),
-    (422.0, "blackhole", 1, 0, 30.0, 25.0),
-    (405.0, "grenade", 1027, 10, 30.0, 25.0),
-    (424.0, "decoygrenade", 0, 0, 30.0, 25.0),
-    (401.0, "grmissl", 1027, 12, 30.0, 20.0),
-    (418.0, "moltov", 1025, 12, 30.0, 25.0),
-    (414.0, "rpmissl", 3, 6, 10.0, 20.0),
-    (415.0, "toast_flop", 1, 0, 30.0, 25.0),
-    (406.0, "sniperbullet", 1, 25, 6.0, 300.0),
-    (407.0, "snipergrenade", 1027, 40, 6.0, 200.0),
-    (408.0, "sniperhoming", 1025, 60, 30.0, 100.0),
-    (411.0, "snipermortar", 1027, 20, 30.0, 50.0),
-    (410.0, "sniperbounce", 1027, 20, 30.0, 60.0),
-    (430.0, "lasershot", 1, 25, 1.0, 90.0),
-    (431.0, "lasershot2", 1, 40, 1.0, 90.0),
-    (433.0, "toastbaguette", 1, 50, 30.0, 50.0),
-    (436.0, "toastpumper", 1027, 20, 30.0, 50.0),
-    (434.0, "bfbshot", 2, 4, 4.0, 40.0),
-    (437.0, "sniperlock", 0, 0, -1.0, 20.0),
-    (451.0, "sniperlock", 0, 0, -1.0, 25.0),
-    (438.0, "bfbshotseek", 0, 0, 30.0, 0.0),
-    (439.0, "bfbshotseek2", 1026, 5, 30.0, 30.0),
-    (444.0, "bfbshotseekb", 0, 0, 30.0, 0.0),
-    (445.0, "bfbshotseek2b", 1026, 5, 30.0, 30.0),
-    (440.0, "bfbshotpsi", 0, 0, 30.0, 0.0),
-    (446.0, "bfbbomb", 1026, 20, 30.0, 20.0),
-    (442.0, "turshot11", 2, 2, 4.0, 120.0),
-    (443.0, "turshot10", 2, 3, 30.0, 80.0),
-    (447.0, "zizshot01", 1026, 15, 30.0, 70.0),
-    (448.0, "zizbub", 0, 0, 600.0, 40.0),
-    (449.0, "zizshot03", 2, 5, 4.0, 200.0),
-    (450.0, "bilebelch", 1026, 5, 10.0, 25.0),
-    (480.0, "zizeye", 0, 0, -1.0, 1.0),
-    (481.0, "gastricjuice", 2, 4, 4.0, 30.0),
-    (482.0, "zizbrain", 1026, 5, 30.0, 30.0),
+/// `+0x54` bit: the shot is launched **at the player**, in three dimensions,
+/// rather than along the shooter's yaw. Without it a walker's bullet flies
+/// flat out of its feet and a two-unit step is enough to miss with.
+pub const AT_PLAYER: i32 = 0x800;
+
+pub const BULLET: [(f64, &str, i16, i16, f64, f64, i32); 69] = [
+    (400.0, "bifshot", 1026, 5, 5.0, 60.0, 0x802),
+    (404.0, "birdshot", 2, 3, 4.0, 60.0, 0x800),
+    (420.0, "rpmissl", 2, 5, 30.0, 20.0, 0x803),
+    (417.0, "dbgrenade", 1026, 10, 30.0, 20.0, 0x2809),
+    (403.0, "dboy1shot", 2, 2, 4.0, 40.0, 0x0),
+    (423.0, "pdboy1shot", 2, 4, 4.0, 40.0, 0x0),
+    (412.0, "powergenshot", 1026, 5, 5.0, 60.0, 0x802),
+    (421.0, "hansshot", 1026, 3, 4.0, 60.0, 0x800),
+    (435.0, "badmaxshot1", 2, 8, 4.0, 70.0, 0x801),
+    (441.0, "badmaxshot2", 3, 5, 5.0, 60.0, 0x1802),
+    (427.0, "gruntshot", 2, 2, 4.0, 40.0, 0x800),
+    (425.0, "udboy1shot", 1026, 10, 4.0, 100.0, 0x2800),
+    (432.0, "udboy2shot", 1027, 5, 5.0, 60.0, 0x1802),
+    (428.0, "hosershot", 2, 2, 4.0, 40.0, 0xc00),
+    (413.0, "turshot01", 2, 2, 4.0, 60.0, 0x0),
+    (419.0, "turshot02", 2, 1, 4.0, 60.0, 0x0),
+    (452.0, "turshot03", 2, 2, 4.0, 60.0, 0x0),
+    (453.0, "turshot04", 2, 2, 4.0, 500.0, 0x800),
+    (454.0, "turshot04", 2, 2, 4.0, 500.0, 0x800),
+    (455.0, "turshot06", 2, 10, 10.0, 90.0, 0x20801),
+    (456.0, "grmissl", 0, 0, 5.0, 35.0, 0x2),
+    (457.0, "turshot01", 2, 2, 4.0, 60.0, 0x0),
+    (458.0, "turshot09", 2, 2, 4.0, 70.0, 0x0),
+    (459.0, "turshot10", 2, 10, 5.0, 80.0, 0x801),
+    (460.0, "turshot11", 2, 10, 5.0, 80.0, 0x801),
+    (461.0, "turshot12", 2, 10, 5.0, 80.0, 0x801),
+    (462.0, "turshot13", 2, 5, 5.0, 160.0, 0x800),
+    (463.0, "turshot14", 2, 10, 5.0, 80.0, 0x801),
+    (464.0, "turshot15", 2, 10, 5.0, 80.0, 0x801),
+    (465.0, "turshot16", 2, 10, 5.0, 80.0, 0x801),
+    (466.0, "turshot17", 2, 10, 5.0, 80.0, 0x801),
+    (467.0, "turshot18", 2, 10, 5.0, 80.0, 0x801),
+    (468.0, "turshot19", 2, 10, 5.0, 80.0, 0x801),
+    (469.0, "turshot20", 2, 10, 5.0, 80.0, 0x801),
+    (416.0, "toast_missle", 1, 15, 10.0, 50.0, 0x831),
+    (422.0, "blackhole", 1, 0, 30.0, 25.0, 0x28c8),
+    (405.0, "grenade", 1027, 10, 30.0, 25.0, 0x2c09),
+    (424.0, "decoygrenade", 0, 0, 30.0, 25.0, 0x28c8),
+    (401.0, "grmissl", 1027, 12, 30.0, 20.0, 0xa03),
+    (418.0, "moltov", 1025, 12, 30.0, 25.0, 0x809),
+    (414.0, "rpmissl", 3, 6, 10.0, 20.0, 0xa03),
+    (415.0, "toast_flop", 1, 0, 30.0, 25.0, 0x831),
+    (406.0, "sniperbullet", 1, 25, 6.0, 300.0, 0x804),
+    (407.0, "snipergrenade", 1027, 40, 6.0, 200.0, 0x805),
+    (408.0, "sniperhoming", 1025, 60, 30.0, 100.0, 0xa06),
+    (411.0, "snipermortar", 1027, 20, 30.0, 50.0, 0xc0d),
+    (410.0, "sniperbounce", 1027, 20, 30.0, 60.0, 0x915),
+    (430.0, "lasershot", 1, 25, 1.0, 90.0, 0x4),
+    (431.0, "lasershot2", 1, 40, 1.0, 90.0, 0x4),
+    (433.0, "toastbaguette", 1, 50, 30.0, 50.0, 0xa33),
+    (436.0, "toastpumper", 1027, 20, 30.0, 50.0, 0xc0d),
+    (434.0, "bfbshot", 2, 4, 4.0, 40.0, 0x0),
+    (437.0, "sniperlock", 0, 0, -1.0, 20.0, 0x1a008),
+    (451.0, "sniperlock", 0, 0, -1.0, 25.0, 0x1a008),
+    (438.0, "bfbshotseek", 0, 0, 30.0, 0.0, 0x2c08),
+    (439.0, "bfbshotseek2", 1026, 5, 30.0, 30.0, 0x5802),
+    (444.0, "bfbshotseekb", 0, 0, 30.0, 0.0, 0x2c08),
+    (445.0, "bfbshotseek2b", 1026, 5, 30.0, 30.0, 0x1802),
+    (440.0, "bfbshotpsi", 0, 0, 30.0, 0.0, 0x2c08),
+    (446.0, "bfbbomb", 1026, 20, 30.0, 20.0, 0x2809),
+    (442.0, "turshot11", 2, 2, 4.0, 120.0, 0x800),
+    (443.0, "turshot10", 2, 3, 30.0, 80.0, 0x801),
+    (447.0, "zizshot01", 1026, 15, 30.0, 70.0, 0x140810),
+    (448.0, "zizbub", 0, 0, 600.0, 40.0, 0x2008),
+    (449.0, "zizshot03", 2, 5, 4.0, 200.0, 0x160800),
+    (450.0, "bilebelch", 1026, 5, 10.0, 25.0, 0x183802),
+    (480.0, "zizeye", 0, 0, -1.0, 1.0, 0x1a008),
+    (481.0, "gastricjuice", 2, 4, 4.0, 30.0, 0x140012),
+    (482.0, "zizbrain", 1026, 5, 30.0, 30.0, 0x1802),
 ];
 
 /// What a shot of this type does, if the table names it.
-pub fn bullet(kind: f64) -> Option<(&'static str, i16, i16, f64, f64)> {
-    BULLET.iter().find(|(k, ..)| *k == kind).map(|(_, m, f, d, l, s)| (*m, *f, *d, *l, *s))
+pub fn bullet(kind: f64) -> Option<(&'static str, i16, i16, f64, f64, i32)> {
+    BULLET
+        .iter()
+        .find(|(k, ..)| *k == kind)
+        .map(|(_, m, f, d, l, s, g)| (*m, *f, *d, *l, *s, *g))
 }
 
 
@@ -549,6 +587,11 @@ impl World {
             gob.max_hitpoints = diff_scale(self.difficulty(), base) as i16;
             gob.hitpoints = gob.max_hitpoints;
             gob.damage_filter = FILTER_GOODGUY_SNIPER;
+        }
+        if let Some(&(_, hp, filter)) = PLAYER.iter().find(|(k, ..)| *k == gob.kind) {
+            gob.max_hitpoints = hp;
+            gob.hitpoints = hp;
+            gob.damage_filter = filter;
         }
         let id = self.gobs.len() as Id;
         self.by_name.insert(gob.name.clone(), id);
