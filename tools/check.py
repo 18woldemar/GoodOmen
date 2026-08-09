@@ -240,6 +240,9 @@ ENGINE = [
     # and the loop closes: the player walks at an enemy, shoots it with the
     # hitscan the original uses, and it dies. Two minutes of hunting on level
     # 8 is 77 shots and two kills.
+    # and what it kills falls over: the walker's own OnDamage (0x430a60) plays
+    # ANIM_DIE at 0x430be2, stops the walker and switches its collision body
+    # off. Both of level 8's dead coneheads finish on animation 17.
     ("the player kills something",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",

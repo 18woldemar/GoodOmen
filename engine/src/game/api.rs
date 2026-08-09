@@ -2309,9 +2309,28 @@ fn deal_damage(
     Ok(())
 }
 
+/// `ANIM_DIE`, which is what a walker plays when its hitpoints reach zero.
+/// 0x430be2 in the walker's own `OnDamage` (0x430a60): stop it, clear the
+/// gait and the strafe, play 17, and switch the collision body at
+/// `gob + 0x68` off with `+0xcc = 0`.
+const ANIM_DIE: f64 = 17.0;
+
 /// `OnDie(gob, 1)`, from 0x40e1b0 — **two arguments**, the object and a
 /// literal 1.0 the original pushes as a number.
 fn die(lua: &Lua, name: &str) -> mlua::Result<()> {
+    // and a walker falls over where it stood. The body goes too, so the
+    // corpse stops blocking and stops walking.
+    let walker = world::world(lua)
+        .and_then(|w| w.find(name).and_then(|i| w.get(i)).map(|g| g.kind))
+        .is_some_and(|k| crate::game::world::base_hitpoints(k).is_some());
+    if walker {
+        let mut boot = boot_mut(lua)?;
+        boot.playing.insert(name.to_string(), ANIM_DIE);
+        boot.since.insert(name.to_string(), 0.0);
+        boot.gait.remove(name);
+        boot.bodies.remove(name);
+        boot.fighting.remove(name);
+    }
     boot_mut(lua)?.died.push(name.to_string());
     if let Ok(gob) = lua.globals().get::<mlua::Table>(name) {
         if let Ok(handler) = gob.get::<mlua::Function>("OnDie") {
