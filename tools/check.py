@@ -182,6 +182,16 @@ ENGINE = [
       "--expect-keys", "0", "--expect-fighting", "1",
       "--expect-moves", "1826",
       "--expect-events", "8104", "--expect-survived", "8104"], None),
+    # and the driver that reaches more than the first room. Held forwards
+    # jams on the first corner -- level 6 spends 1162 of 1200 frames against a
+    # wall -- so `--roam` follows walls and treats a hole like a wall. Level 2
+    # goes from 2 rooms to **9**, and stops falling: without the edge rule the
+    # same run "travels" 114368 units, which is a body accelerating downwards.
+    ("a roaming driver walks a level instead of one room",
+     ["cargo", "run", "--quiet", "--release",
+      "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
+      "--run", "2", "1", "120", "--roam", "--expect-rooms", "9",
+      "--expect-events", "28802", "--expect-survived", "25202"], None),
     # level 9 is where the walkers actually walk. Three of them cover 425
     # units in thirty seconds without the player doing anything -- their
     # scripts start at level load, which is why every checkpoint gives the

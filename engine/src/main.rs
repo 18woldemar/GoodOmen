@@ -1046,6 +1046,18 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         .map(|f| f[1.min(f.len())..].to_vec());
     let recorded = frames.is_some();
     let hunt = std::env::args().any(|a| a == "--hunt");
+    // ponytail: a wall follower. Held forwards jams on the first corner --
+    // level 6 spends 1162 of 1200 frames against a wall and enters one room --
+    // so `--roam` turns a fixed step whenever the last one met something and
+    // always the same way, which is the left-hand rule and is enough to walk
+    // a level. Nobody plays like this; it is a way to reach the triggers.
+    let roam = std::env::args().any(|a| a == "--roam");
+    const TURN: f64 = 0.35;
+    /// Frames of wall following after a jam before the hunt may steer again.
+    /// A second and a half: less and the driver turns back into the same
+    /// corner, more and it walks away from what it was going to shoot.
+    const SHAKE: usize = 45;
+    let mut jammed = 0usize;
     let mut shot_at = 0usize;
 
     let mut body = Body::new(
@@ -1069,7 +1081,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
             // attack task and it was always out of range.
             _ => {
                 let mut d = [body.yaw.cos(), body.yaw.sin()];
-                if hunt {
+                if hunt && jammed == 0 {
                     if let Some(w) = world::world(&scripts.lua) {
                         let me = body.position;
                         let near = w
@@ -1080,7 +1092,13 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
                                 (v[0] * v[0] + v[1] * v[1], v)
                             })
                             .min_by(|a, b| a.0.total_cmp(&b.0));
-                        if let Some((d2, v)) = near {
+                        // with `--roam` as well, the hunt only takes over
+                        // inside the gun's own hundred units and the wall
+                        // follower has the rest of the level -- otherwise the
+                        // driver beelines at something across the map and
+                        // grinds along whatever is between.
+                        let reach = if roam { 100.0 * 100.0 } else { f64::INFINITY };
+                        if let Some((d2, v)) = near.filter(|(d2, _)| *d2 < reach) {
                             if d2 > 4.0 {
                                 let len = d2.sqrt();
                                 d = [v[0] / len, v[1] / len];
@@ -1089,7 +1107,40 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
                         }
                     }
                 }
+                // and it does not walk off the edge. Three of the ten levels
+                // start over open ground -- level 2 roams 114368 units in two
+                // minutes, which is a body accelerating downwards, not a body
+                // walking -- because the game kills you for that in a script
+                // the harness never reaches. So the wall follower treats a
+                // hole like a wall, but only while it is standing on
+                // something: on the twenty checkpoints with no floor at all
+                // it would otherwise just spin.
+                if roam && body.on_ground {
+                    // a step down is not a hole: anything within four units
+                    // below counts as ground, which is about what the body
+                    // falls in a fifth of a second
+                    const DROP: f64 = 4.0;
+                    let ahead = [
+                        body.position[0] + d[0] * 1.5,
+                        body.position[1] + d[1] * 1.5,
+                        body.position[2],
+                    ];
+                    let ground = (0..=8).any(|i| {
+                        collision.footing(ahead, EYE + DROP * i as f64 / 8.0).is_some()
+                    });
+                    if !ground {
+                        body.yaw += TURN;
+                        jammed = SHAKE;
+                        d = [body.yaw.cos(), body.yaw.sin()];
+                    }
+                }
+                let met = body.hits;
                 body.step(&collision, d, false, WALK, dt);
+                jammed = jammed.saturating_sub(1);
+                if roam && body.hits > met {
+                    body.yaw += TURN;
+                    jammed = SHAKE;
+                }
                 // and it shoots. The hitscan is the original's — 100 units,
                 // 2 damage, `DAMAGE_GOODGUY`, through the collision world —
                 // but **once a second is the harness's**, because the weapon's
@@ -1212,7 +1263,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
          {anim_keys} keys in {struck} struck, {fighting} enemies fighting, {shot_at} shot by the player and {died} killed, \
          {} objects touched and {} of them \
          scripted{}{} [{}]{}",
-        if recorded { "the game's own recorded" } else if hunt { "hunting" } else { "held-forwards" },
+        if recorded { "the game's own recorded" } else if hunt && roam { "roaming and hunting" } else if hunt { "hunting" } else if roam { "roaming" } else { "held-forwards" },
         body.travelled,
         body.hits,
         body.inside,
