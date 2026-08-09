@@ -363,10 +363,10 @@ pub fn base_hitpoints(kind: f64) -> Option<i32> {
 /// multiplies it by the frame time), and +0x2c, the strafe speed, which is
 /// multiplied by `walker + 0x10`.
 ///
-/// **A walker below `def[0x40]` hitpoints moves at half speed** — the branch
-/// at 0x42fd4c takes the same slot and multiplies by the 0.5 at 0x48f2fc.
-/// Most records hold 0xffffffff there and never limp, so that is not modelled
-/// here.
+/// **A walker at or below `def[0x40]` hitpoints moves at half speed** — the
+/// branch at 0x42fd4c takes the same slot and multiplies by the 0.5 at
+/// 0x48f2fc. See `LIMP_AT` for who that is; the same threshold also changes
+/// which animations it plays.
 ///
 /// `tools/health.py --walk` reads the same six columns out of the binary and
 /// `check.py` holds this literal to them.
@@ -400,6 +400,52 @@ pub const LOCOMOTION: [(f64, [f64; 4], f64, f64); 19] = [
 pub fn locomotion(kind: f64, gait: i64) -> Option<(f64, f64)> {
     let (_, speeds, turn, _) = LOCOMOTION.iter().find(|(k, ..)| *k == kind)?;
     Some((*speeds.get(gait.max(0) as usize).unwrap_or(&0.0), *turn))
+}
+
+/// The four animations a walker plays to move, indexed by its gait: the table
+/// at **0x48ff58**, which `mdkWalkerAnimUpdate` reads with `walker + 0x0c` at
+/// 0x42fde9 and hands straight to the animation player. The engine drives a
+/// character's legs, in other words, and no script ever asks it to.
+pub const GAIT_ANIM: [f64; 4] = [
+    107.0, // ANIM_READY0   — standing
+    6.0,   // ANIM_WALK
+    7.0,   // ANIM_RUN
+    8.0,   // ANIM_WALKBACK — the back speed is negative, so the clip reverses
+];
+
+/// The set a limping walker plays instead, at **0x48ff68**. 0x42fdd0 clamps
+/// the gait from 2 to 1 before indexing it, so a limping walker cannot run:
+/// asking it to gives `ANIM_ACTION00`, the same clip its walk uses.
+pub const GAIT_ANIM_HURT: [f64; 4] = [
+    82.0, // ANIM_ACTION05
+    77.0, // ANIM_ACTION00
+    7.0,  // unreachable — the run is clamped to the walk above
+    8.0,  // ANIM_WALKBACK
+];
+
+/// `def + 0x40`: the hitpoints at or below which a walker limps — half speed
+/// (0x42fd4c) and the second animation set (0x42fdc6), off the one threshold.
+///
+/// Eighteen of the nineteen records hold 0xffffffff and never limp. **Only the
+/// doganboy does**, at 20 of its 100, so the game has exactly one enemy that
+/// visibly slows down when you have nearly killed it.
+pub const LIMP_AT: [(f64, i16); 1] = [(207.0, 20)];
+
+/// Whether a walker of this type is hurt enough to limp.
+pub fn limping(kind: f64, hitpoints: i16) -> bool {
+    LIMP_AT
+        .iter()
+        .any(|&(k, at)| k == kind && hitpoints <= at)
+}
+
+/// Which animation a walker plays for a gait, given how hurt it is.
+pub fn gait_animation(kind: f64, gait: i64, hitpoints: i16) -> Option<f64> {
+    let i = usize::try_from(gait).ok()?;
+    if limping(kind, hitpoints) {
+        GAIT_ANIM_HURT.get(if i == 2 { 1 } else { i }).copied()
+    } else {
+        GAIT_ANIM.get(i).copied()
+    }
 }
 
 /// Scale a base by the difficulty, exactly as 0x42d020 does — the routine the

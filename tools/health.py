@@ -258,6 +258,42 @@ AI_STRIDE = 0x34
 AI_RECORDS = 9
 
 
+# The two animation tables `mdkWalkerAnimUpdate` indexes by the gait, and the
+# `def` column that chooses between them. 0x42fde9 reads the first, 0x42fdc6
+# picks the second when the hitpoints are at or below `def + 0x40`, and
+# 0x42fd4c halves the speed on the same test.
+GAIT_ANIM, GAIT_ANIM_HURT, LIMP = 0x0048FF58, 0x0048FF68, 0x40
+GAITS = ("still", "walk", "run", "back")
+
+
+def gait(args) -> int:
+    """The gait animation tables, and who limps."""
+    secs = _sections(args.exe)
+    plain = struct.unpack("<4i", _read(secs, GAIT_ANIM, 16))
+    hurt = struct.unpack("<4i", _read(secs, GAIT_ANIM_HURT, 16))
+    for i, name in enumerate(GAITS):
+        # a limping walker's run is clamped to its walk before the index
+        print(f"  {i} {name:<6} {plain[i]:4d}   {hurt[1 if i == 2 else i]:4d}")
+
+    limps = []
+    n = 0
+    while True:
+        r = _read(secs, TABLE + n * STRIDE, STRIDE)
+        if struct.unpack_from("<I", r, KEY)[0] == 0:
+            break
+        at = struct.unpack_from("<i", r, LIMP)[0]
+        if at >= 0:
+            limps.append((r[NAME:BASE].split(b"\0")[0].decode("latin1"), at,
+                          struct.unpack_from("<i", r, BASE)[0]))
+        n += 1
+    for name, at, base in limps:
+        print(f"  {name} limps at {at} of {base}")
+    print(f"{len(limps)} of {n} walker types limp", file=sys.stderr)
+    if args.expect_limp is not None:
+        return 0 if len(limps) == args.expect_limp else 1
+    return 0
+
+
 def ai(args) -> int:
     """The nine behaviours, and which of the 19 enemy types use each."""
     secs = _sections(args.exe)
@@ -308,6 +344,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ai", action="store_true",
                     help="the AI behaviour table at 0x48ff78, and which "
                          "enemies index it")
+    ap.add_argument("--gait", action="store_true",
+                    help="the two gait animation tables at 0x48ff58 and "
+                         "0x48ff68, and which walkers limp")
+    ap.add_argument("--expect-limp", type=int, metavar="N",
+                    help="succeed only if exactly N walker types limp")
     ap.add_argument("--engine", action="store_true",
                     help="compare the engine's own table against this one")
     args = ap.parse_args(argv)
@@ -322,6 +363,8 @@ def main(argv: list[str] | None = None) -> int:
         return items(args)
     if args.ai:
         return ai(args)
+    if args.gait:
+        return gait(args)
 
     rows = table(args.exe)
     # bases too small for the doubling to survive truncation. The table has no

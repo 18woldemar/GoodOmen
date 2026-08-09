@@ -2995,7 +2995,10 @@ pub fn tick_touching(
                 let id = w.find(name)?;
                 let g = w.get(id)?;
                 let want = *boot.heading.get(name)?;
-                let (speed, turn) = crate::game::world::locomotion(g.kind, gait)?;
+                let (mut speed, turn) = crate::game::world::locomotion(g.kind, gait)?;
+                if crate::game::world::limping(g.kind, g.hitpoints) {
+                    speed *= 0.5; // 0x42fd4c, the 0.5 at 0x48f2fc
+                }
                 let q = g.rotation;
                 let yaw = (2.0 * (q[0] * q[3] + q[1] * q[2]))
                     .atan2(1.0 - 2.0 * (q[2] * q[2] + q[3] * q[3]));
@@ -3030,6 +3033,40 @@ pub fn tick_touching(
             let half = yaw / 2.0;
             w.set_rotation(id, [half.cos(), 0.0, 0.0, half.sin()]);
         }
+    }
+
+    // and the legs. `mdkWalkerAnimUpdate` plays the gait's own animation every
+    // frame, and 0x461670 sorts out what may interrupt what.
+    //
+    // ponytail: the engine has no animation priorities, so it plays the gait
+    // animation only when the walker is **moving**, or when what is up is
+    // already a gait animation. That keeps an attack pose from being wiped the
+    // frame after the AI struck it, at the cost of a walker that stands still
+    // holding the last pose it was given — which is what it looks like anyway.
+    let poses: Vec<(String, f64)> = {
+        let boot = boot_ref(&scripts.lua)?;
+        let Some(w) = crate::game::world::world(&scripts.lua) else {
+            return Err(Error::Pragma("no world".into()));
+        };
+        boot.gait
+            .iter()
+            .filter(|(name, _)| !boot.stasis.contains(*name) && !boot.jumps.contains_key(*name))
+            .filter_map(|(name, &gait)| {
+                let g = w.get(w.find(name)?)?;
+                let want = crate::game::world::gait_animation(g.kind, gait, g.hitpoints)?;
+                let now = boot.playing.get(name).copied();
+                let idle = now.is_none_or(|a| {
+                    crate::game::world::GAIT_ANIM.contains(&a)
+                        || crate::game::world::GAIT_ANIM_HURT.contains(&a)
+                });
+                (now != Some(want) && (gait != 0 || idle)).then(|| (name.clone(), want))
+            })
+            .collect()
+    };
+    for (name, id) in poses {
+        let mut boot = boot_mut(&scripts.lua)?;
+        boot.playing.insert(name.clone(), id);
+        boot.since.insert(name, 0.0);
     }
 
     // the shots. A bullet travels its type's speed along the direction it was
@@ -3553,6 +3590,61 @@ mod tests {
         scripts.lua.load("mdkDoganboyAttack(d)").exec().unwrap();
         let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
         assert_eq!(boot.gait["d"], 3, "five is inside a doganboy's ten");
+    }
+
+    /// **Only the doganboy limps.** `def + 0x40` holds 0xffffffff in eighteen
+    /// of the nineteen walker records and **20** in the doganboy's, and that
+    /// one threshold does two things: 0x42fd4c halves the gait's speed and
+    /// 0x42fdc6 swaps the animation table at 0x48ff58 for the one at 0x48ff68.
+    /// So a doganboy on its last twenty hitpoints covers three units a second
+    /// instead of six, and plays `ANIM_ACTION00` where it played `ANIM_WALK`.
+    #[test]
+    fn a_doganboy_on_its_last_hitpoints_walks_at_half_speed() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                // due +x, a hundred out, and the walker already faces it
+                "points.wp = {x = 100, y = 0, z = 0, f = 0}\n\
+                 mdkRegisterObject('d', 207, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkWalkerGotoPoint(d, 'wp', 0, 0, 0, 0)\n\
+                 hp = mdkGetHitpoints(d)",
+            )
+            .exec()
+            .unwrap();
+        let rooms = Visibility::default();
+        let mut ticking = Ticking::default();
+        let walk = |scripts: &Scripts, ticking: &mut Ticking| {
+            for _ in 0..30 {
+                tick(scripts, &rooms, [0.0; 3], 0.0, 1.0 / 30.0, ticking).unwrap();
+            }
+            let w = world::world(&scripts.lua).unwrap();
+            w.get(w.find("d").unwrap()).unwrap().position[0]
+        };
+        let hale = walk(&scripts, &mut ticking);
+        assert!((hale - 6.0).abs() < 1e-6, "a doganboy walks at six: {hale}");
+        assert_eq!(
+            scripts.lua.app_data_ref::<Boot>().unwrap().playing["d"],
+            6.0,
+            "ANIM_WALK, from the gait table the engine reads for it"
+        );
+        // now leave it twenty. `mdkDealDamage` wants a dealer, and the walker
+        // may deal to itself -- the filter is what gates the path, not who.
+        let hp = scripts.lua.globals().get::<f64>("hp").unwrap();
+        scripts
+            .lua
+            .load(format!("mdkDealDamage(d, d, {}, DAMAGE_GOODGUY, -1)", hp - 20.0))
+            .exec()
+            .unwrap();
+        let hurt = walk(&scripts, &mut ticking) - hale;
+        assert!((hurt - 3.0).abs() < 1e-6, "and half of six when hurt: {hurt}");
+        assert_eq!(
+            scripts.lua.app_data_ref::<Boot>().unwrap().playing["d"],
+            77.0,
+            "ANIM_ACTION00, off the second table"
+        );
     }
 
     /// **The player's gun is hitscan**: 100 units along the nose, 2 damage,
