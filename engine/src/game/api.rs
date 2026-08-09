@@ -2350,6 +2350,70 @@ fn spawn(lua: &Lua, spawner: &str) -> mlua::Result<Option<mlua::Table>> {
     Ok(Some(made))
 }
 
+/// **Kurt's ordinary gun is hitscan, not a projectile.** 0x417ebe builds a
+/// segment **100 units** (0x42c80000) along the muzzle's forward, hands it to
+/// the world ray at 0x471c50, and on a hit calls `0x40e660(kurt, victim,
+/// damage, 1, -1)` — damage **5 when `kurt[0x58]` is 1 and 2 otherwise**,
+/// type 1, which is `DAMAGE_GOODGUY`. Only weapon mode 2 makes a real bullet
+/// (type 431, `lasershot2`), which is why no column of the item table links a
+/// weapon to a shot: for most of the list there is nothing to link.
+///
+/// `mode` is `kurt + 0x58`. Returns what was hit, if anything.
+///
+/// ponytail: the original rays against the world's own hulls; here a gob is a
+/// point, so the shot takes the nearest thing inside a narrow cone that the
+/// collision world can see. A wall stops it — [`Collision::sees`] is exact —
+/// but a near miss on a wide target counts as a hit.
+pub fn hitscan(lua: &Lua, shooter: &str, mode: i64) -> Option<String> {
+    /// How far Kurt's gun reaches, from the 100.0 pushed at 0x417e9c.
+    const REACH: f64 = 100.0;
+    /// Ours: how far off the nose a gob still counts as under the crosshair.
+    const CONE: f64 = 0.15;
+    let (at, yaw) = stance(lua, shooter)?;
+    let eye = [at[0], at[1], at[2] + crate::game::body::EYE];
+    let solid = lua.app_data_ref::<std::rc::Rc<crate::game::body::Collision>>();
+    let victim = {
+        let w = world::world(lua)?;
+        let mut best: Option<(f64, String)> = None;
+        for (_, g) in w.iter() {
+            if g.hitpoints <= 0 || g.name.is_empty() || g.name == shooter {
+                continue;
+            }
+            let d = [g.position[0] - at[0], g.position[1] - at[1], g.position[2] - at[2]];
+            let flat = (d[0] * d[0] + d[1] * d[1]).sqrt();
+            if flat > REACH || flat <= 0.0 || !facing_within(yaw, d[1].atan2(d[0]), CONE) {
+                continue;
+            }
+            let head = [g.position[0], g.position[1], g.position[2] + crate::game::body::EYE];
+            if solid.as_ref().is_some_and(|c| !c.sees(eye, head)) {
+                continue;
+            }
+            if best.as_ref().is_none_or(|(near, _)| flat < *near) {
+                best = Some((flat, g.name.clone()));
+            }
+        }
+        best.map(|(_, n)| n)?
+    };
+    drop(solid);
+    let globals = lua.globals();
+    let source = globals.get::<mlua::Table>(shooter).ok().map(Value::Table);
+    let hit = globals.get::<mlua::Table>(victim.as_str()).ok()?;
+    let damage = if mode == 1 { 5 } else { 2 };
+    deal_damage(lua, source, Value::Table(hit), damage, DAMAGE_GOODGUY as i64, -1, true).ok()?;
+    Some(victim)
+}
+
+/// The same wrap as [`facing`], to an angle the caller chooses.
+fn facing_within(yaw: f64, heading: f64, slack: f64) -> bool {
+    let mut d = yaw - heading;
+    if d < -std::f64::consts::PI {
+        d += std::f64::consts::TAU;
+    } else if d > std::f64::consts::PI {
+        d -= std::f64::consts::TAU;
+    }
+    d.abs() < slack
+}
+
 /// An animation key of 100 or more **creates an object of that type** at the
 /// object playing it (0x42c02e). When the type is one the shot table names,
 /// the new object is a projectile and it leaves along the shooter's own yaw —
@@ -3489,6 +3553,40 @@ mod tests {
         scripts.lua.load("mdkDoganboyAttack(d)").exec().unwrap();
         let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
         assert_eq!(boot.gait["d"], 3, "five is inside a doganboy's ten");
+    }
+
+    /// **The player's gun is hitscan**: 100 units along the nose, 2 damage,
+    /// `DAMAGE_GOODGUY`, and the collision world decides whether the shot
+    /// arrives. A conehead in front loses two hitpoints; one behind loses
+    /// none, because 0x417ebe rays forwards and nowhere else.
+    #[test]
+    fn the_player_s_gun_reaches_a_hundred_units_and_only_forwards() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                // the player faces +x; one conehead ahead, one behind, one
+                // beyond the hundred
+                "mdkRegisterObject('kurt', 100, scene, nil, -1, 0,0,0,                  1,0,0,0, nil,0,0,0,0, nil, nil, 0)
+                 mdkRegisterObject('ahead', 203, scene, nil, -1, 30,0,0,                  1,0,0,0, nil,0,0,0,0, nil, nil, 0)
+                 mdkRegisterObject('behind', 203, scene, nil, -1, -30,0,0,                  1,0,0,0, nil,0,0,0,0, nil, nil, 0)
+                 mdkRegisterObject('far', 203, scene, nil, -1, 300,0,0,                  1,0,0,0, nil,0,0,0,0, nil, nil, 0)
+                 mdkSetPlayModeGobs(0, kurt)",
+            )
+            .exec()
+            .unwrap();
+        let health = |name: &str| {
+            let w = world::world(&scripts.lua).unwrap();
+            w.get(w.find(name).unwrap()).unwrap().hitpoints
+        };
+        let (was_ahead, was_behind) = (health("ahead"), health("behind"));
+        assert_eq!(hitscan(&scripts.lua, "kurt", 0).as_deref(), Some("ahead"));
+        assert_eq!(health("ahead"), was_ahead - 2, "two, which is mode 0");
+        assert_eq!(health("behind"), was_behind, "and nothing behind is touched");
+        // mode 1 is the five-damage one
+        assert_eq!(hitscan(&scripts.lua, "kurt", 1).as_deref(), Some("ahead"));
+        assert_eq!(health("ahead"), was_ahead - 7);
     }
 
     /// **An enemy shoots**, and the whole chain runs: the AI loads a burst

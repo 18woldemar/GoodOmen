@@ -1039,6 +1039,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         .map(|f| f[1.min(f.len())..].to_vec());
     let recorded = frames.is_some();
     let hunt = std::env::args().any(|a| a == "--hunt");
+    let mut shot_at = 0usize;
 
     let mut body = Body::new(
         [spawn.position[0], spawn.position[1], spawn.position[2] + EYE],
@@ -1082,6 +1083,21 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
                     }
                 }
                 body.step(&collision, d, false, WALK, dt);
+                // and it shoots. The hitscan is the original's — 100 units,
+                // 2 damage, `DAMAGE_GOODGUY`, through the collision world —
+                // but **once a second is the harness's**, because the weapon's
+                // own rate is a column of the item table that is not read.
+                if step % 30 == 0 {
+                    if let Some(name) = scripts
+                        .lua
+                        .app_data_ref::<api::Boot>()
+                        .and_then(|b| b.player.clone())
+                    {
+                        if api::hitscan(&scripts.lua, &name, 0).is_some() {
+                            shot_at += 1;
+                        }
+                    }
+                }
             }
         }
         // the same locomotion the window drives, so it can be checked
@@ -1159,6 +1175,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         ("shots that hit", landed, expect_flag("--expect-hits")),
         ("animation keys", struck, expect_flag("--expect-keys")),
         ("enemies fighting", fighting, expect_flag("--expect-fighting")),
+        ("things the player shot", shot_at, expect_flag("--expect-shot-at")),
     ] {
         if let Some(want) = want {
             if got != want {
@@ -1173,7 +1190,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
          {moved} object moves, {playing} animations chosen, \
          {fired_sounds} sounds fired, {spawned} objects spawned, \
          {jumped} walkers launched, {shots} shots fired ({landed} hit), \
-         {anim_keys} keys in {struck} struck, {fighting} enemies fighting, \
+         {anim_keys} keys in {struck} struck, {fighting} enemies fighting, {shot_at} shot by the player, \
          {} objects touched and {} of them \
          scripted{}{} [{}]{}",
         if recorded { "the game's own recorded" } else if hunt { "hunting" } else { "held-forwards" },
