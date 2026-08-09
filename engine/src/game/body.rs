@@ -38,8 +38,15 @@ use crate::game::world::World;
 /// times **1/60** (0x48f9f4), with **0.05** (0x48f380) on the branch where
 /// the body is on the ground. The buttons 0x65 and 0x66 at 0x419e57 set the
 /// gait to 0 or 2, so the walk-versus-run split is the walker's own shape.
-/// What is not read is where `kurt + 0x64` points, which is where the
-/// numbers themselves are.
+///
+/// The 2011 HD build settles both constants by compiling the same arithmetic
+/// differently: at 0x41a4a2 it divides by the **double 60.0** and the
+/// on-ground branch is `* 3.0 / 60.0`, so 1/60 is confirmed and 0.05 is not
+/// a tuned number — it is **three units a second**.
+///
+/// What is not read in either build is where `kurt + 0x64` points, which is
+/// where the numbers themselves are: both constructors zero it (0x416981
+/// here, 0x41841e there) and neither assigns it a static address.
 pub const EYE: f64 = 1.7;
 pub const STEP: f64 = 0.6;
 pub const GRAVITY: f64 = 20.0;
