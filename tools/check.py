@@ -184,6 +184,16 @@ ENGINE = [
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--run", "10", "1", "30", "--expect-shots", "9",
       "--expect-events", "2751", "--expect-survived", "2751"], None),
+    # and a shot reaches the player. `--hunt` steers the driver at the
+    # nearest thing with hitpoints instead of holding forwards, which is what
+    # it takes to get inside a turret's range at all: level 10's zizzy
+    # turrets fire twelve and one lands.
+    ("a shot fired in a level hits the player",
+     ["cargo", "run", "--quiet", "--release",
+      "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
+      "--run", "10", "1", "40", "--hunt", "--expect-shots", "12",
+      "--expect-hits", "1", "--expect-events", "3667",
+      "--expect-survived", "3667"], None),
     ("walking drives the player's own animation, and reaches the scripts",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",

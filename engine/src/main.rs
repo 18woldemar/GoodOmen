@@ -1038,6 +1038,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         .and_then(|b| omn::parse(&b).ok())
         .map(|f| f[1.min(f.len())..].to_vec());
     let recorded = frames.is_some();
+    let hunt = std::env::args().any(|a| a == "--hunt");
 
     let mut body = Body::new(
         [spawn.position[0], spawn.position[1], spawn.position[2] + EYE],
@@ -1051,9 +1052,35 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         let was = body.position;
         match &frames {
             Some(f) if step < f.len() => body.replay(&collision, &f[step..step + 1], 1.0, WALK),
-            // forwards, which is enough to cross a room
+            // forwards, which is enough to cross a room — or, with `--hunt`,
+            // **toward the nearest thing that has hitpoints**. That is the
+            // harness's own idea and not the game's: the AI only runs when a
+            // player is inside an enemy's reach, and a driver that holds
+            // forwards never gets there. Sweeping ten levels at twelve
+            // checkpoints, exactly one enemy in the game ever reached its
+            // attack task and it was always out of range.
             _ => {
-                let d = [body.yaw.cos(), body.yaw.sin()];
+                let mut d = [body.yaw.cos(), body.yaw.sin()];
+                if hunt {
+                    if let Some(w) = world::world(&scripts.lua) {
+                        let me = body.position;
+                        let near = w
+                            .iter()
+                            .filter(|(_, g)| g.hitpoints > 0 && !g.name.is_empty())
+                            .map(|(_, g)| {
+                                let v = [g.position[0] - me[0], g.position[1] - me[1]];
+                                (v[0] * v[0] + v[1] * v[1], v)
+                            })
+                            .min_by(|a, b| a.0.total_cmp(&b.0));
+                        if let Some((d2, v)) = near {
+                            if d2 > 4.0 {
+                                let len = d2.sqrt();
+                                d = [v[0] / len, v[1] / len];
+                                body.yaw = v[1].atan2(v[0]);
+                            }
+                        }
+                    }
+                }
                 body.step(&collision, d, false, WALK, dt);
             }
         }
@@ -1149,7 +1176,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
          {anim_keys} keys in {struck} struck, {fighting} enemies fighting, \
          {} objects touched and {} of them \
          scripted{}{} [{}]{}",
-        if recorded { "the game's own recorded" } else { "held-forwards" },
+        if recorded { "the game's own recorded" } else if hunt { "hunting" } else { "held-forwards" },
         body.travelled,
         body.hits,
         body.inside,
