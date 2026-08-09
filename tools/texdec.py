@@ -95,6 +95,12 @@ def levels(data: bytes) -> list[tuple[int, int, int, int]]:
     no offset table, pixels straight from 0x2c at 0x10 bytes each. Two of the
     755 in `base.zip` are stored that way — `font.tex` and `dialogfont.tex` —
     and so is every texture the 1C release adds in its `Local.zip`.
+
+    **0x24 really is a codec selector and the Dreamcast release proves it**:
+    its `.TEX` files carry the same tag, version, width, height and channel
+    count, and 0x24 is **10** — a third value, and a payload about half the
+    size, which is the PowerVR's own texture format. Nothing here reads it;
+    it is recorded so that 0 is not mistaken for "anything that is not 32".
     """
     width, height = struct.unpack_from("<2I", data, 8)
     if struct.unpack_from("<I", data, 0x24)[0] != CODED:

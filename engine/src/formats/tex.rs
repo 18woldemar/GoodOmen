@@ -32,8 +32,12 @@
 //! over the whole corpus.
 
 const TYPE_TEX: u32 = 2001;
-/// `u32` at 0x24: 32 means a compressed `TEXC` chunk, 0 means raw BGRA. Only
-/// the two fonts are raw.
+/// `u32` at 0x24 selects the codec: 32 is the block-coded `TEXC` chunk and 0
+/// is raw, one level from 0x2c at `channels` bytes a pixel. Only the two
+/// fonts are raw in `base.zip`; every texture the 1C release adds is, three
+/// of them at three bytes a pixel. The Dreamcast release writes **10** here
+/// for the PowerVR's own format, which is how this is known to be a selector
+/// and not a flag — so treat anything that is not 32 or 0 as unread.
 const COMPRESSED: u32 = 32;
 /// Level 0 of a compressed texture, past the header and the offset table.
 const DATA_OFFSET: usize = 0x68;
