@@ -68,9 +68,42 @@ is `-R^T t`, with GL's column-major layout putting `R`'s columns at 0,4,8 /
 1,5,9 / 2,6,10 and `t` at 12,13,14. The facing is `R`'s third row negated --
 GL looks down -Z in eye space.
 
+**The camera is not the player, and the offset is exact.** On a pure turn --
+the demo's frames 14 to 30, where the only input is the turn axis -- the body
+does not move and the camera swings three units around it. So a camera track
+compared against a body track is comparing two different things. The camera
+*looks at* the player, so `player = eye + 4 * facing` recovers him, and the
+4 is not fitted: at the first frame that lands on **(271, -69)**, which is
+level 1 checkpoint 5 to the unit.
+
+**Measuring the turn (`--demo`).** With the player recovered, the camera's own
+heading is his heading, and the demo supplies the axis that produced it. So
+integrating the axis through a candidate turn law and comparing the angle
+against the capture measures the law over 1348 samples at once, without
+touching a position -- which matters, because position integrates every other
+error too and diverges within forty frames whatever the turn does.
+
+The answer over `demo1_5` is **a flat 0.306 radians per unit of recorded
+axis**: 8.3 degrees RMS across 45 seconds and 0.4 degrees of error at the end,
+against 633 degrees RMS for the flat 1.0 the replay had been using. Two
+findings come with it:
+
+  - **The flat law beats `turn_from_axis`.** Feeding the recorded axis through
+    the shaping curve read out of the binary gives 10.3 degrees RMS at best,
+    and the extra parameter buys nothing. The recorded axis reaches **1.15**
+    in magnitude, which a normalised stick cannot, so `chRecordInput` stores
+    the value *after* the input layer shaped it. Applying the curve on a demo
+    path would apply it twice.
+  - **The turn was never the reason the replay wandered.** With the measured
+    turn the body meets a wall on **338** frames instead of 66 and finishes
+    **inside geometry on 28**, because it is still a point: no width, no
+    sweep. A turn three times too fast had been swinging it clear.
+
 Usage:
     python3 tools/camtrace.py mats.txt              # frame x y z fx fy fz
+    python3 tools/camtrace.py mats.txt --player     # the body, not the camera
     python3 tools/camtrace.py mats.txt --summary    # spans and speeds
+    python3 tools/camtrace.py mats.txt --demo demo1_5.omn    # the turn law
     python3 tools/camtrace.py --selftest
 """
 
@@ -80,6 +113,7 @@ import argparse
 import math
 import re
 import sys
+from pathlib import Path
 from collections import Counter
 
 MATRIX = re.compile(r"glLoadMatrixf\(\{([^}]*)\}\)")
@@ -163,6 +197,61 @@ def spans(rows: list) -> list[tuple[int, int]]:
     return out
 
 
+# How far behind the player the camera sits. Not fitted: at the first frame
+# of demo1_5 `eye + FOLLOW * facing` is (271, -69), which is level 1
+# checkpoint 5 exactly.
+FOLLOW = 4.0
+
+# The demo's two turn commands, right and left. omn.py lists them as axes.
+TURN_RIGHT, TURN_LEFT = 1004, 1005
+
+
+def player(eye_xyz, face, follow: float = FOLLOW):
+    """Where the man the camera is looking at stands."""
+    n = math.hypot(face[0], face[1]) or 1.0
+    return (eye_xyz[0] + follow * face[0] / n,
+            eye_xyz[1] + follow * face[1] / n, eye_xyz[2])
+
+
+def turn_scale(rows: list, demo_frames: list) -> tuple[float, float, float]:
+    """Radians of yaw per unit of recorded axis, and how well it fits.
+
+    Returns (scale, RMS in radians, final error in radians).
+
+    **The fit is on the accumulated angle, not on the per-frame change**, and
+    that is not a detail. A chase camera is smoothed: it does not reach the
+    player's heading on the frame he turns, it catches up over several. So a
+    per-frame regression of angle change on axis is attenuated by the lag and
+    reads **0.1488 rad per unit at 145 degrees RMS** -- less than half the
+    truth, and confidently wrong. The lag cancels in the integral, because a
+    camera that ends up behind the player has turned exactly as far as he has.
+    Fitting the cumulative series gives 0.306 at 8.3 degrees.
+    """
+    n = min(len(rows), len(demo_frames))
+    angle = [math.atan2(f[1], f[0]) for _, _, f in rows[:n]]
+    for i in range(1, n):                                  # unwrap
+        d = (angle[i] - angle[i - 1] + math.pi) % (2 * math.pi) - math.pi
+        angle[i] = angle[i - 1] + d
+    raw = []
+    for f in demo_frames[:n]:
+        held = {c: v for c, v in f["input"]}
+        raw.append(held.get(TURN_RIGHT, 0.0) - held.get(TURN_LEFT, 0.0))
+    # The accumulated axis, against which the accumulated angle is fitted.
+    # yaw falls as the right axis rises, hence the sign on the prediction.
+    total, swept = 0.0, [0.0]
+    for r in raw[:n - 1]:
+        total += r
+        swept.append(total)
+    num = sum(-c * (angle[i] - angle[0]) for i, c in enumerate(swept))
+    den = sum(c * c for c in swept) or 1.0
+    scale = num / den
+    mine = [angle[0]]
+    for r in raw[:n - 1]:
+        mine.append(mine[-1] - scale * r)
+    rms = (sum((a - b) ** 2 for a, b in zip(mine, angle)) / n) ** 0.5
+    return scale, rms, mine[-1] - angle[-1]
+
+
 def selftest() -> None:
     """Build a view matrix from a known camera and read the camera back."""
     def view(px, py, pz, yaw):
@@ -190,6 +279,27 @@ def selftest() -> None:
     got = track(per)
     assert len(got) == 2, got
     assert abs(got[1][1][0] - 10.1) < 1e-4, got[1]
+    # A camera that lags the player must still yield the player's turn rate.
+    # This is the case a per-frame fit gets badly wrong, so it is pinned:
+    # the player turns 0.3 rad per unit of a square wave, the camera follows
+    # a fifth of the way to him each frame, and the scale must come back 0.3.
+    want, heading, lens = 0.3, 0.0, 0.0
+    rows_, demo = [], []
+    for i in range(400):
+        axis = 1.0 if (i // 40) % 2 == 0 else -0.5
+        heading -= want * axis
+        lens += (heading - lens) * 0.2               # the smoothing
+        rows_.append((i, (0.0, 0.0, 0.0),
+                      (math.cos(lens), math.sin(lens), 0.0)))
+        demo.append({"input": [(TURN_RIGHT, max(axis, 0.0)),
+                               (TURN_LEFT, max(-axis, 0.0))]})
+    scale, rms, _ = turn_scale(rows_, demo)
+    assert abs(scale - want) < 0.01, scale
+    # The residual is not small here and is not meant to be: this camera lags
+    # far harder than the real one, so it sits tens of degrees behind through
+    # every swing. What the integral recovers is the *rate*, and that is the
+    # claim under test. The real capture's residual is 8 degrees.
+    assert math.degrees(rms) < 60, math.degrees(rms)
     print("camtrace: self-tests pass")
 
 
@@ -197,6 +307,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     ap.add_argument("dump", nargs="?", help="apitrace dump, filtered")
     ap.add_argument("--summary", action="store_true")
+    ap.add_argument("--player", action="store_true",
+                    help="emit where the player stands, not the camera")
+    ap.add_argument("--demo", type=Path, metavar="OMN",
+                    help="measure the turn law against this recording")
+    ap.add_argument("--expect-rms", type=float, metavar="DEG",
+                    help="fail unless the fitted law tracks this closely")
     # A recorded demo is not 60 Hz: omn.py reads 29.94 out of demo1_5, and
     # assuming otherwise doubles every speed this prints.
     ap.add_argument("--fps", type=float, default=29.94)
@@ -212,6 +328,21 @@ def main() -> int:
         print("no world frames in this dump", file=sys.stderr)
         return 1
 
+    if args.demo:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import omn
+        recorded = omn.parse(args.demo.read_bytes())[1:]  # 0 is the load
+        scale, rms, end = turn_scale(rows, recorded)
+        print(f"{args.demo.name}: {len(recorded)} frames against "
+              f"{len(rows)} captured")
+        print(f"  turn is a flat {scale:.4f} rad per unit of recorded axis")
+        print(f"  tracks the capture to {math.degrees(rms):.1f} deg RMS, "
+              f"{math.degrees(end):+.1f} deg at the end")
+        if args.expect_rms is not None and math.degrees(rms) > args.expect_rms:
+            print(f"FAIL: wanted {args.expect_rms} deg RMS or better")
+            return 1
+        return 0
+
     if args.summary:
         by = {n: (e, f) for n, e, f in rows}
         for a, b in spans(rows):
@@ -226,8 +357,13 @@ def main() -> int:
         return 0
 
     for n, e, f in rows:
-        print(f"{n} {e[0]:.4f} {e[1]:.4f} {e[2]:.4f} "
-              f"{f[0]:.4f} {f[1]:.4f} {f[2]:.4f}")
+        if args.player:
+            p = player(e, f)
+            print(f"{n} {p[0]:.4f} {p[1]:.4f} {p[2]:.4f} "
+                  f"{f[0]:.4f} {f[1]:.4f} {f[2]:.4f}")
+        else:
+            print(f"{n} {e[0]:.4f} {e[1]:.4f} {e[2]:.4f} "
+                  f"{f[0]:.4f} {f[1]:.4f} {f[2]:.4f}")
     return 0
 
 

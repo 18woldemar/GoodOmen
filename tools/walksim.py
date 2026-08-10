@@ -544,6 +544,10 @@ def _replay(args) -> int:
     w = World(args.src, args.resources)
     r = replay(w, start, cp.get("4") or 0.0, frames, args.mouse)
 
+    if args.track:
+        args.track.write_text("".join(f"{p[0]:.4f} {p[1]:.4f} {p[2]:.4f}\n"
+                                      for p in r["path"]))
+
     seen, order = set(), []
     for p in r["path"]:
         for name in rm.where(table, p):
@@ -589,6 +593,10 @@ def main(argv: list[str] | None = None) -> int:
                          "same body")
     ap.add_argument("--mouse", type=float, default=1.0,
                     help="radians per unit of the demo's axis value; flat, and not what the original does -- see turn_from_axis")
+    ap.add_argument("--track", type=Path, metavar="FILE",
+                    help="write the replayed body's path, one 'x y z' a "
+                         "frame, to hold against camtrace.py's capture of "
+                         "the original replaying the same demo")
     args = ap.parse_args(argv)
 
     if args.keys:
