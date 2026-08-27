@@ -65,6 +65,9 @@ __pycache__/
 
 # the engine's build output
 engine/target/
+# peek.c is source; the library it builds is not
+tools/libpeek.so
+tools/peek.conf
 
 # Working files: the agent's instructions and the running notes it keeps
 # while it works. They describe how the work was driven, not what the work

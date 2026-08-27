@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parent.parent
 EXTRACTED = ROOT / "extracted"
 
 SELFTESTS = ["scene", "mod2obj", "mod2html", "texdec", "luaapi", "luarun",
-             "rooms", "dcassert", "camtrace"]
+             "rooms", "dcassert", "camtrace", "peek"]
 
 # (name, argv, what has to exist first)
 CORPUS = [
