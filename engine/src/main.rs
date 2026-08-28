@@ -1674,6 +1674,9 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         let mut track: Option<goodomen::audio::Track> = None;
         let started = std::time::Instant::now();
         let mut last = std::time::Instant::now();
+        // the same two the headless run counts, so a session says whether a
+        // blower ever lifted you and what the floor cost you
+        let (mut blown, mut fell) = (0usize, 0usize);
         loop {
             for event in video.events.poll_iter() {
                 match event {
@@ -1683,7 +1686,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                         let (fired, survived) = ticking.total();
                         // the same combat numbers a headless run reports, so
                         // that playing a level says as much as running one
-                        let (died, fighting, shots, hit, near, walked, health) = level_scripts
+                        let (died, fighting, shots, hit, near, walked, doors, health) = level_scripts
                             .lua
                             .app_data_ref::<goodomen::game::api::Boot>()
                             .map(|b| {
@@ -1700,6 +1703,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                                     b.hits,
                                     b.nearest_miss,
                                     b.bodies.values().map(|x| x.travelled).sum::<f64>(),
+                                    b.doors,
                                     health.unwrap_or((0, 0)),
                                 )
                             })
@@ -1710,6 +1714,8 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                              {} shot by you and {died} killed, \
                              {fighting} enemies fighting, {shots} shots fired at you \
                              ({hit} hit, nearest {}), walkers walked {walked:.0} units, \
+                             {doors} door movements, {blown} frames in a blower, \
+                             {fell} hitpoints lost to landings, \
                              you on {} of {} hitpoints",
                             ticking.clock,
                             ticking.rooms_entered,
@@ -1786,15 +1792,16 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 );
                 let (step, speed) = drive.heading(yaw);
                 // and the blowers push here too -- see `api::blowers`
-                body.blow(
-                    goodomen::game::api::blowers(
-                        &level_scripts.lua,
-                        [body.position[0], body.position[1],
-                         body.position[2] - goodomen::game::body::EYE],
-                        [0.0, 0.0, body.velocity_z],
-                    )[2],
-                    dt,
-                );
+                let up = goodomen::game::api::blowers(
+                    &level_scripts.lua,
+                    [body.position[0], body.position[1],
+                     body.position[2] - goodomen::game::body::EYE],
+                    [0.0, 0.0, body.velocity_z],
+                )[2];
+                if up != 0.0 {
+                    blown += 1;
+                }
+                body.blow(up, dt);
                 body.step(&collision, step, held(Scancode::Space), speed, dt);
                 let _ = d;
                 at = body.position;
@@ -1812,6 +1819,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                             hurt,
                             goodomen::game::api::DAMAGE_FALLING,
                         );
+                        fell += hurt as usize;
                     }
                 }
                 // the engine drives the player's locomotion, which is what
