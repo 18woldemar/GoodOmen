@@ -281,6 +281,18 @@ impl Collision {
         })
     }
 
+    /// **The bottom of the world**: below every collision tree there is, so a
+    /// body under it can never land on anything again.
+    ///
+    /// Ours, and it is a measurement rather than a rule — nothing in the
+    /// original stops a falling body, and `0x40ee00`, the move a walker's
+    /// gait goes through, has no ground check at all. This exists so a run
+    /// can *say* that a body left the world instead of reporting the
+    /// hundreds of thousands of units it accrues on the way down.
+    pub fn underworld(&self) -> f64 {
+        self.trees.iter().map(|t| t.lo[2]).fold(f64::INFINITY, f64::min)
+    }
+
     /// Only the body above step height stops it; below is a kerb to walk over.
     pub fn blocked(&self, p: [f64; 3], tall: f64, wide: f64) -> bool {
         self.blocking(p, tall, wide).is_some()

@@ -1326,7 +1326,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     }
 
     // what the scripts actually did to the world while it ran
-    let (moved, playing, doors, what, fired_sounds, spawned, jumped, shots, landed, struck, fighting, died, walled, buried, walkers, walked, started, miss, drop, health) = {
+    let (moved, playing, doors, what, fired_sounds, spawned, jumped, shots, landed, struck, fighting, died, walled, buried, walkers, walked, lost, started, miss, drop, health) = {
         let w = world::world(&scripts.lua).expect("a world");
         let boot = scripts.lua.app_data_ref::<api::Boot>().expect("boot state");
         let what: Vec<String> = boot
@@ -1343,7 +1343,14 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         // and how far they got, which is what says whether any of it ran
         // `max` only so an empty sum prints 0 and not -0
         let walked: f64 = boot.bodies.values().map(|b| b.travelled).sum::<f64>().max(0.0);
-        (w.generation(), boot.playing.len(), boot.doors, what, sounds, boot.spawned.len(), boot.jumped, boot.fired, boot.hits, boot.keys_fired, boot.fighting.len(), boot.died.len(), walled, boot.bodies.values().map(|b| b.inside).sum::<usize>(), boot.bodies.len(), walked, boot.ever_scripted.len(), boot.nearest_miss, boot.nearest_drop,
+        // and how many of them are past saving. A body below every collision
+        // tree can never land again, so the hundreds of thousands of units it
+        // goes on to accrue say nothing about the mover -- see
+        // `Collision::underworld`.
+        let bottom = collision.underworld();
+        let lost = boot.bodies.values().filter(|b| b.position[2] < bottom).count()
+            + (body.position[2] < bottom) as usize;
+        (w.generation(), boot.playing.len(), boot.doors, what, sounds, boot.spawned.len(), boot.jumped, boot.fired, boot.hits, boot.keys_fired, boot.fighting.len(), boot.died.len(), walled, boot.bodies.values().map(|b| b.inside).sum::<usize>(), boot.bodies.len(), walked, lost, boot.ever_scripted.len(), boot.nearest_miss, boot.nearest_drop,
          boot.player.as_deref().and_then(|n| w.find(n)).and_then(|i| w.get(i))
              .map(|g| (g.hitpoints, g.max_hitpoints)).unwrap_or((0, 0)))
     };
@@ -1363,6 +1370,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         ("animations chosen", playing, expect_flag("--expect-playing")),
         ("door movements", doors, expect_flag("--expect-doors")),
         ("frames inside a blower", blown, expect_flag("--expect-blown")),
+        ("bodies that left the world", lost, expect_flag("--expect-lost")),
         ("object moves", moved as usize, expect_flag("--expect-moves")),
         ("sounds fired", fired_sounds, expect_flag("--expect-sounds")),
         ("collisions", state.collisions, expect_flag("--expect-collisions")),
@@ -1395,7 +1403,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
          {moved} object moves, {playing} animations chosen, \
          {fired_sounds} sounds fired, {spawned} objects spawned, \
          {jumped} walkers launched, {started} objects given a script, \
-         {walkers} walkers walked {walked:.0} units \
+         {walkers} walkers walked {walked:.0} units ({lost} left the world) \
          and met a wall on {walled} frames ({buried} inside), \
          {shots} shots fired ({landed} hit, nearest {}, {drop:.1} of it height), \
          {doors} door movements, {blown} frames in a blower, {anim_keys} keys in {struck} struck, {fighting} enemies fighting, {shot_at} shot by the player and {died} killed, \

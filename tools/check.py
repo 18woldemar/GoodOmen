@@ -175,6 +175,9 @@ ENGINE = [
     # runs to the end. All ten levels are 100% for the first time; four of
     # them used to fail 900 times a run on a minigame's own state.
       "--run", "1", "5", "45", "--expect-rooms", "1",
+      # and on the game's own recorded input **nothing leaves the world**,
+      # which is the number that must stay zero however the others move
+      "--expect-lost", "0",
       "--expect-events", "20250", "--expect-survived", "20250",
       "--expect-shot-at", "0", "--expect-killed", "0",
       "--expect-touched", "1"], None),
@@ -204,6 +207,16 @@ ENGINE = [
       # stops missing the frames `l7r2_spn1_spawn` really is inside `c9` on.
       # Where it shows plainly is level 2, whose walkers went from **422
       # frames inside geometry to 45**.
+      # and **five of its bodies are already out of the world at 30 seconds**,
+      # which is the number this pins. Two of them, `l7r7_grnt1` and
+      # `l7r7_grnt2`, are placed by the scene graph at z=165 with no floor
+      # anywhere beneath -- level 7's task list is what jumps its pilots onto
+      # their perches, and until that runs they have nothing to stand on. The
+      # other three walk off a ledge, because nothing here paths. Neither is
+      # the mover: 0x40ee00, the move a walker's gait goes through, has no
+      # ground check at all, so the original walks off ledges too and it is
+      # the AI that does not send it there.
+      "--expect-lost", "5",
       "--expect-walled", "5952", "--expect-buried", "1477",
       "--expect-keys", "13", "--expect-fighting", "12",
       "--expect-moves", "8366",
@@ -257,6 +270,7 @@ ENGINE = [
       # walking across the geometry rather than along it.
       "--run", "9", "1", "30", "--expect-walkers", "18",
       "--expect-walled", "8994", "--expect-buried", "0", "--expect-keys", "3",
+      "--expect-lost", "1",
       "--expect-events", "45156", "--expect-survived", "45156"], None),
     # level 10's zizzy turrets shoot: nine bullets in thirty seconds, each one
     # carrying its damage, damage type, lifetime and speed out of the shot
