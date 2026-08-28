@@ -588,6 +588,25 @@ pub fn bearing(dx: f64, dy: f64) -> f64 {
     (-dx).atan2(dy)
 }
 
+/// How much slower the camera pitches than it turns: **0.4027**.
+///
+/// The demo records `MLOOKDOWN` and `MLOOKUP` beside its turn, and the GL
+/// trace gives the camera's pitch exactly as `atan2(look.z, |look.xy|)`.
+/// Regressing the pitch step on the axis over the 189 frames that carry one
+/// gives **0.1208 radians a unit** at a residual of 0.82 degrees, against
+/// the turn's 0.300 on the same recording -- so the vertical is 40% as
+/// sensitive as the horizontal, and a mouse that drives both at one rate
+/// pitches two and a half times too fast.
+///
+/// Two things about the pitch are **not** explained and are not modelled:
+/// it holds when nothing asks it to move -- 0.18 degrees of drift over 105
+/// quiet frames -- but it also steps on its own, once from 0.00 to -6.32
+/// over four frames with no look input at all, and then holds there. And
+/// the range it covers, -28.4 to +5.5 degrees, is where the player looked
+/// rather than a clamp: the extremes are touched once or twice and never
+/// held against the axis.
+pub const LOOK_OVER_TURN: f64 = 0.4027;
+
 /// A playable character's two speeds, smoothed toward what the table asks for.
 ///
 /// The original keeps them at `kurt + 0x0c` and `kurt + 0x10` and steps each

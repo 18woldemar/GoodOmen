@@ -1698,8 +1698,15 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                         }
                     }
                     Event::MouseMotion { xrel, yrel, .. } => {
-                        yaw -= xrel as f64 * 0.0025;
-                        pitch = (pitch - yrel as f64 * 0.0025).clamp(-1.5, 1.5);
+                        // The rate itself is ours; the **ratio** is not.
+                        // See body::LOOK_OVER_TURN -- the game's vertical is
+                        // 40% as sensitive as its horizontal, measured off
+                        // the demo's own look axis.
+                        const MOUSE: f64 = 0.0025;
+                        yaw -= xrel as f64 * MOUSE;
+                        pitch = (pitch
+                            - yrel as f64 * MOUSE * goodomen::game::body::LOOK_OVER_TURN)
+                            .clamp(-1.5, 1.5);
                     }
                     _ => {}
                 }
@@ -2156,8 +2163,15 @@ fn level(
                         return Ok(format!("{summary}, left at {:?}", body.position));
                     }
                     Event::MouseMotion { xrel, yrel, .. } => {
-                        yaw -= xrel as f64 * 0.0025;
-                        pitch = (pitch - yrel as f64 * 0.0025).clamp(-1.5, 1.5);
+                        // The rate itself is ours; the **ratio** is not.
+                        // See body::LOOK_OVER_TURN -- the game's vertical is
+                        // 40% as sensitive as its horizontal, measured off
+                        // the demo's own look axis.
+                        const MOUSE: f64 = 0.0025;
+                        yaw -= xrel as f64 * MOUSE;
+                        pitch = (pitch
+                            - yrel as f64 * MOUSE * goodomen::game::body::LOOK_OVER_TURN)
+                            .clamp(-1.5, 1.5);
                     }
                     _ => {}
                 }
