@@ -309,6 +309,11 @@ pub struct Boot {
     /// Objects frozen until the player arrives — a level holds its encounters
     /// this way, and a boot of all ten puts hundreds there.
     pub stasis: BTreeSet<String>,
+    /// Doors a script has locked shut. See [`prox_doors`].
+    pub locked: BTreeSet<String>,
+    /// How many times a prox door has opened or shut. A run's own count of
+    /// the doors it walked through.
+    pub doors: usize,
     /// What each walker has been told to face, in radians — the original's
     /// `walker + 0x14`, written by `mdkWalkerHeadToGob` and its point
     /// variant. It is a *want*: nothing turns toward it until there is a
@@ -1786,6 +1791,27 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         })?,
     )?;
     globals.set(
+        "mdkProxDoorLock",
+        // 0x441150 into 0x425130: locking a door that is open **shuts it
+        // first** -- it plays `ANIM_CLOSE` and clears the open state before
+        // it sets the flag -- and unlocking one only clears the flag, which
+        // leaves the next tick of `prox_doors` to notice the player.
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(name) = args.first().and_then(gob_name) else { return Ok(()) };
+            let lock = args.get(1).map(number).unwrap_or(0.0) != 0.0;
+            let mut boot = boot_mut(lua)?;
+            if lock {
+                if boot.playing.get(&name) == Some(&66.0) {
+                    boot.playing.insert(name.clone(), 67.0);
+                }
+                boot.locked.insert(name);
+            } else {
+                boot.locked.remove(&name);
+            }
+            Ok(())
+        })?,
+    )?;
+    globals.set(
         "mdkSubtractHitpoints",
         lua.create_function(|lua, args: Variadic<Value>| {
             let n = args.get(1).map(number).unwrap_or(0.0) as i64 as i16;
@@ -2575,6 +2601,72 @@ pub fn hitscan(lua: &Lua, shooter: &str, mode: i64) -> Option<String> {
     Some(victim)
 }
 
+/// **The proximity doors**, out of `mdkObject.c`: the constructor at 0x4250b0
+/// (line 191) and the update at 0x425010.
+///
+/// A door of type `OBJ_PROXDOOR1` keeps five words at `gob + 0x40` — whether
+/// it is open, two flags out of the scene graph, its radius, and whether a
+/// script has locked it. The update is the whole of the behaviour:
+///
+/// ```text
+/// 0x42501f  the player's gob
+/// 0x425031  if door->0x10 (locked): nothing
+/// 0x42503a  d = distance(door, player)          ; three axes, gob + 0x18
+/// 0x42503f  if d < door->0xc (the radius):
+/// 0x425060      if not already open: play ANIM_OPEN, and it is open
+///           else:
+/// 0x425093      if open: play ANIM_CLOSE, and it is shut
+/// ```
+///
+/// The two animation ids are `0x42` and `0x43`, which are `ANIM_OPEN` (66)
+/// and `ANIM_CLOSE` (67) in the constant table — the reading lands on the
+/// two names, which is what makes it a reading.
+///
+/// **The radius is `payload[0]`**, and the shipped scene graphs prove it: the
+/// 175 prox doors carry 5, 6, 8, 10, 14, 15, 16 and 20 there and nothing in
+/// the other three slots. The three that carry 0 get **20.0**, which the
+/// constructor substitutes at 0x425120 when the argument is exactly zero.
+///
+/// ponytail: no guard on the opposite animation still running (0x42504c and
+/// 0x425076 check it), because a gob here plays one animation at a time and
+/// the open/shut state already changes exactly once per crossing. Add the
+/// guard when animations have a length.
+pub fn prox_doors(lua: &Lua, player: [f64; 3]) -> Result<(), Error> {
+    const OBJ_PROXDOOR1: f64 = 700.0;
+    const ANIM_OPEN: f64 = 66.0;
+    const ANIM_CLOSE: f64 = 67.0;
+    /// The radius the constructor substitutes for a payload of zero.
+    const REACH: f64 = 20.0;
+    let doors: Vec<(String, f64)> = {
+        let w = world::world(lua).ok_or_else(|| Error::Pragma("no world".into()))?;
+        w.iter()
+            .filter(|(_, g)| g.kind == OBJ_PROXDOOR1 && !g.name.is_empty())
+            .map(|(_, g)| {
+                let d = (0..3)
+                    .map(|c| (g.position[c] - player[c]).powi(2))
+                    .sum::<f64>()
+                    .sqrt();
+                (g.name.clone(), d - if g.payload[0] == 0.0 { REACH } else { g.payload[0] })
+            })
+            .collect()
+    };
+    let mut boot = boot_mut(lua)?;
+    for (name, over) in doors {
+        if boot.locked.contains(&name) {
+            continue;
+        }
+        let open = boot.playing.get(&name) == Some(&ANIM_OPEN);
+        if over < 0.0 && !open {
+            boot.playing.insert(name, ANIM_OPEN);
+            boot.doors += 1;
+        } else if over >= 0.0 && open {
+            boot.playing.insert(name, ANIM_CLOSE);
+            boot.doors += 1;
+        }
+    }
+    Ok(())
+}
+
 /// `DAMAGE_FALLING`, out of the binary's own constant table -- 16, and the
 /// type Kurt's landing handler pushes at 0x4183b9.
 pub const DAMAGE_FALLING: i64 = 16;
@@ -3182,6 +3274,9 @@ pub fn tick_touching(
             state.call(&gob, "OnTimer");
         }
     }
+
+    // the doors, which open on the player being near and on nothing else
+    prox_doors(&scripts.lua, [at[0], at[1], at[2] - crate::game::body::EYE])?;
 
     // the spawners, which are the only thing that puts an enemy in a room.
     //
@@ -4487,6 +4582,50 @@ mod tests {
         assert_eq!(g.get::<f64>("dead").unwrap(), 1.0, "OnDie(gob, 1), not OnDie(gob)");
         // the third hit found it already dead, so OnDie fired once
         assert_eq!(scripts.lua.app_data_ref::<Boot>().unwrap().died, ["gen_spawn"]);
+    }
+
+    /// A prox door opens on the player being near and shuts on his leaving,
+    /// its radius is the scene graph's own `payload[0]`, and a lock both
+    /// shuts it and holds it shut.
+    #[test]
+    fn a_prox_door_opens_when_the_player_is_inside_its_radius() {
+        const ANIM_OPEN: f64 = 66.0;
+        const ANIM_CLOSE: f64 = 67.0;
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                // one door with a radius of 8 out of the payload, and one
+                // with 0, which the constructor turns into 20
+                "mdkRegisterObject('near', OBJ_PROXDOOR1, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, 'dr1', 8,0,0,0, nil, nil, 0)\n\
+                 mdkRegisterObject('far', OBJ_PROXDOOR1, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, 'dr1', 0,0,0,0, nil, nil, 0)",
+            )
+            .exec()
+            .unwrap();
+        let anim = |lua: &Lua, n: &str| boot_ref(lua).unwrap().playing.get(n).copied();
+        // fifteen units out: inside the default 20, outside the payload's 8
+        prox_doors(&scripts.lua, [15.0, 0.0, 0.0]).unwrap();
+        assert_eq!(anim(&scripts.lua, "near"), None, "8 away is not 15");
+        assert_eq!(anim(&scripts.lua, "far"), Some(ANIM_OPEN), "a payload of 0 reaches 20");
+        // walk in, and the near one opens too
+        prox_doors(&scripts.lua, [0.0, 5.0, 0.0]).unwrap();
+        assert_eq!(anim(&scripts.lua, "near"), Some(ANIM_OPEN));
+        // walk out, and both shut
+        prox_doors(&scripts.lua, [100.0, 0.0, 0.0]).unwrap();
+        assert_eq!(anim(&scripts.lua, "near"), Some(ANIM_CLOSE));
+        assert_eq!(anim(&scripts.lua, "far"), Some(ANIM_CLOSE));
+        // a locked door stays shut however near he stands
+        scripts.lua.load("mdkProxDoorLock(near, 1)").exec().unwrap();
+        prox_doors(&scripts.lua, [0.0, 0.0, 0.0]).unwrap();
+        assert_eq!(anim(&scripts.lua, "near"), Some(ANIM_CLOSE), "locked");
+        assert_eq!(anim(&scripts.lua, "far"), Some(ANIM_OPEN), "and the other is not");
+        // and unlocking lets the next tick notice him
+        scripts.lua.load("mdkProxDoorLock(near, 0)").exec().unwrap();
+        prox_doors(&scripts.lua, [0.0, 0.0, 0.0]).unwrap();
+        assert_eq!(anim(&scripts.lua, "near"), Some(ANIM_OPEN));
     }
 
     /// A landing reaches the player, and it reaches him **because his own

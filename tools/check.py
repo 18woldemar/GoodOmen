@@ -211,6 +211,18 @@ ENGINE = [
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--run", "2", "1", "120", "--roam", "--expect-rooms", "25",
       "--expect-events", "46806", "--expect-survived", "46806"], None),
+    # **The doors open.** `mdkObject.c` 0x425010: a prox door watches the
+    # player and opens inside its own radius, which the scene graph carries in
+    # `payload[0]` -- 5, 6, 8, 10, 14, 15, 16 or 20 across the game's 175 of
+    # them, and 20 by default for the three that leave it zero. Level 1
+    # checkpoint 4 spawns beside `dr1_03`, and a wall-following driver crosses
+    # its radius four times, so the count is eight: in, out, in, out. Nothing
+    # in this level opened before, because `mdkProxDoorLock` was the only half
+    # of the door that was implemented and it locks rather than opens.
+    ("a roaming driver walks through doors that open for it",
+     ["cargo", "run", "--quiet", "--release",
+      "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
+      "--run", "1", "4", "90", "--roam", "--expect-doors", "8"], None),
     # level 9 is where the walkers actually walk. Three of them cover 425
     # units in thirty seconds without the player doing anything -- their
     # scripts start at level load, which is why every checkpoint gives the
