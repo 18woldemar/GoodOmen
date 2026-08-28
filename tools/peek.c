@@ -55,6 +55,12 @@
  *                        address instead does not do: the heap only
  *                        repeats between runs that are identical.
  *   hz=200               samples a second (0 = scan once, then stop)
+ *   moves=0              seconds to wait for a candidate to move before
+ *                        throwing the whole find away and scanning again.
+ *                        A scan for a position matches level geometry as
+ *                        readily as it matches an object -- twelve static
+ *                        vertices of the room, in one run -- and the thing
+ *                        being hunted is always the thing that moves.
  *   every=0.5            seconds between scans while still hunting.  It
  *                        has to be well under a second: with a demo
  *                        playing, the player holds the spawn position for
@@ -87,7 +93,7 @@ static float eps = 0.05f;
 static unsigned pattern;
 static int use_ptr, loglen = 32, hz = 200, back;
 static uintptr_t lo = 0x10000, hi = 0x100000000ul;
-static double every = 0.5;
+static double every = 0.5, moves;
 
 struct region { uintptr_t lo, hi; };
 
@@ -178,6 +184,34 @@ static void *worker(void *unused)
             usleep((useconds_t)(every * 1e6));
         }
     }
+    /* A candidate that never moves is not what anyone is hunting.  Watch
+     * the set for `moves` seconds and throw all of it away if none of them
+     * has stirred: the alternative is a log of the room's own vertices. */
+    while (moves > 0) {
+        double until = now() + moves;
+        float first[3 * MAX_CAND], v[3];
+        int i, stirred = 0;
+        for (i = 0; i < ncand; i++)
+            if (grab(first + i * 3, cand[i], 12) != 12) first[i * 3] = 0.0f;
+        while (now() < until && !stirred) {
+            for (i = 0; i < ncand && !stirred; i++) {
+                if (grab(v, cand[i], 12) != 12) continue;
+                if (fabsf(v[0] - first[i * 3]) + fabsf(v[1] - first[i * 3 + 1])
+                    + fabsf(v[2] - first[i * 3 + 2]) > 1e-3f) stirred = 1;
+            }
+            usleep(20000);
+        }
+        if (stirred) break;
+        fprintf(out, "# %d candidates, none of them moved in %.1fs; scanning again\n",
+                ncand, moves);
+        fflush(out);
+        ncand = 0;
+        while (!ncand) {
+            n = regions(r, 8192, &game);
+            if (game) scan(r, n);
+            if (!ncand) usleep((useconds_t)(every * 1e6));
+        }
+    }
     fprintf(out, "# found %d after %.1fs\n", ncand, now() - t0);
     for (n = 0; n < ncand; n++) fprintf(out, "# cand %lx\n", (unsigned long)cand[n]);
     fflush(out);
@@ -223,6 +257,7 @@ __attribute__((constructor)) static void peek_start(void)
         else if (!strcmp(line, "watch") && ncand < MAX_CAND)
             cand[ncand++] = (uintptr_t)strtoul(v, NULL, 0);
         else if (!strcmp(line, "every")) every = strtod(v, NULL);
+        else if (!strcmp(line, "moves")) moves = strtod(v, NULL);
         else if (!strcmp(line, "lo")) lo = (uintptr_t)strtoull(v, NULL, 0);
         else if (!strcmp(line, "hi")) hi = (uintptr_t)strtoull(v, NULL, 0);
         else if (!strcmp(line, "find")) sscanf(v, "%f,%f", &want[0], &want[1]);

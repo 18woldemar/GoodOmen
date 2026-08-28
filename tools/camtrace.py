@@ -200,6 +200,8 @@ def spans(rows: list) -> list[tuple[int, int]]:
 # How far behind the player the camera sits. Not fitted: at the first frame
 # of demo1_5 `eye + FOLLOW * facing` is (271, -69), which is level 1
 # checkpoint 5 exactly.
+# Measured, not assumed: over the demo's turn on the spot the eye sits
+# 4.0000 back along its own look on every frame, to four places.
 FOLLOW = 4.0
 
 # The demo's two turn commands, right and left. omn.py lists them as axes.
@@ -211,6 +213,41 @@ def player(eye_xyz, face, follow: float = FOLLOW):
     n = math.hypot(face[0], face[1]) or 1.0
     return (eye_xyz[0] + follow * face[0] / n,
             eye_xyz[1] + follow * face[1] / n, eye_xyz[2])
+
+
+def orbit(rows: list, at, feet: float, first: int, last: int) -> dict:
+    """How far back the camera sits, off a **turn on the spot**.
+
+    The player holds one position while the camera swings round him, so every
+    quantity here is a difference against a point that is known exactly and
+    no alignment of any kind is needed.
+
+    This replaces a measurement that matched the trace to the game's memory
+    by nearest point -- and that was **circular**, because the matching used
+    `player()`, which assumes the follow distance, and then reported it back.
+    A camera built five units back came out as 4.15 through it. The self-test
+    below is that bug, kept.
+
+    `at` is where the player stands, `feet` the z of his feet, and `first`
+    and `last` bracket the frames of the turn. -> the distance back along the
+    camera's own look, the pivot above the feet, and the spread of each.
+    """
+    back, pivot, sideways = [], [], []
+    for k in range(first, last + 1):
+        _, eye, look = rows[k]
+        pitch = math.atan2(look[2], math.hypot(look[0], look[1]))
+        flat = math.hypot(eye[0] - at[0], eye[1] - at[1])
+        d = flat / (math.cos(pitch) or 1e-9)
+        back.append(d)
+        pivot.append((eye[2] - feet) - d * -math.sin(pitch))
+        # the eye must lie opposite the look, or it is not behind him at all
+        n = math.hypot(look[0], look[1]) or 1.0
+        sideways.append(((eye[0] - at[0]) * look[1] - (eye[1] - at[1]) * look[0]) / n)
+    mid = lambda xs: sorted(xs)[len(xs) // 2]
+    return {"frames": len(back), "back": mid(back), "pivot": mid(pivot),
+            "back_spread": max(back) - min(back),
+            "pivot_spread": max(pivot) - min(pivot),
+            "sideways": mid(sideways)}
 
 
 def turn_scale(rows: list, demo_frames: list) -> tuple[float, float, float]:
@@ -300,6 +337,39 @@ def selftest() -> None:
     # every swing. What the integral recovers is the *rate*, and that is the
     # claim under test. The real capture's residual is 8 degrees.
     assert math.degrees(rms) < 60, math.degrees(rms)
+
+    # A camera five back along a look pitched twelve degrees down, from a
+    # pivot 1.2 above the feet, swinging round a player who stands still.
+    # The measurement that matched by nearest point read this as 4.15,
+    # because it used player() -- which assumes four -- to build the pairing.
+    # Reading it off the orbit assumes nothing.
+    at, feet, D, h = (10.0, -3.0), 5.0, 5.0, 1.2
+    made = []
+    for k in range(40):
+        a = math.radians(k * 3.0)
+        pitch_ = math.radians(-12.0)
+        look = (math.cos(a) * math.cos(pitch_), math.sin(a) * math.cos(pitch_),
+                math.sin(pitch_))
+        # not `eye`: that is this module's own function, and shadowing it
+        # here is the same slip `frames` caused once already
+        e = (at[0] - look[0] * D, at[1] - look[1] * D, feet + h - look[2] * D)
+        made.append((k, e, look))
+    got = orbit(made, at, feet, 0, 39)
+    assert abs(got["back"] - D) < 1e-6, got
+    assert abs(got["pivot"] - h) < 1e-6, got
+    assert got["back_spread"] < 1e-6 and got["pivot_spread"] < 1e-6, got
+    assert abs(got["sideways"]) < 1e-9, got
+    # and a camera that is not looking straight back at him is caught: turn
+    # each look twenty degrees and the eye stops being opposite it. Pushing
+    # the eye by a fixed vector instead would not do -- over a whole orbit
+    # that is sideways one way as often as the other, and the median is zero.
+    turned = []
+    for k, e, l in made:
+        a = math.radians(20.0)
+        turned.append((k, e, (l[0] * math.cos(a) - l[1] * math.sin(a),
+                              l[0] * math.sin(a) + l[1] * math.cos(a), l[2])))
+    assert abs(orbit(turned, at, feet, 0, 39)["sideways"]) > 1.5
+
     print("camtrace: self-tests pass")
 
 
@@ -316,6 +386,10 @@ def main() -> int:
     # A recorded demo is not 60 Hz: omn.py reads 29.94 out of demo1_5, and
     # assuming otherwise doubles every speed this prints.
     ap.add_argument("--fps", type=float, default=29.94)
+    ap.add_argument("--orbit", metavar="X,Y,FEETZ,FIRST,LAST",
+                    help="measure the chase camera off a turn on the spot: "
+                         "where the player stands, the z of his feet, and the "
+                         "frames the turn spans")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
 
@@ -327,6 +401,17 @@ def main() -> int:
     if not rows:
         print("no world frames in this dump", file=sys.stderr)
         return 1
+
+    if args.orbit:
+        at = [float(v) for v in args.orbit.split(",")]
+        got = orbit(rows, (at[0], at[1]), at[2], int(at[3]), int(at[4]))
+        print(f"{got['frames']} frames of a turn on the spot:")
+        print(f"  {got['back']:.4f} back along the camera's own look "
+              f"(spread {got['back_spread']:.4f})")
+        print(f"  pivot {got['pivot']:.4f} above the feet "
+              f"(spread {got['pivot_spread']:.4f})")
+        print(f"  {got['sideways']:.4f} to one side of it")
+        return 0
 
     if args.demo:
         sys.path.insert(0, str(Path(__file__).resolve().parent))

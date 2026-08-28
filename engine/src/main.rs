@@ -1888,13 +1888,33 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                     a.fire(&name, place, &mut read);
                 }
             }
-            // Third person when walking: the player has a body now, so the
-            // camera stands behind it. `BEHIND` and `ABOVE` are chosen here
-            // and not taken from the game -- the original's camera is an
-            // object (`OBJ_DEFAULTCAMERA`) with its own script, and that is
-            // not read yet.
-            const BEHIND: f64 = 4.5;
-            const ABOVE: f64 = 1.6;
+            // Third person when walking, and **both numbers are measured**
+            // off a turn on the spot -- `tools/camtrace.py --orbit`. Demo
+            // frames 17 to 32 are pure turn: the player holds his spawn and
+            // only the camera moves, so every quantity is a difference
+            // against a point known exactly and nothing has to be aligned.
+            //
+            // Over those sixteen frames, while the pitch swings from 0 to
+            // -19.1 degrees, the eye sits **4.0000** back along its **own
+            // look** with a spread of 0.0000, from a pivot **1.5168** above
+            // the player's feet, and **0.0000** to one side of it. The shape
+            // is one distance along the look, not two independent offsets:
+            //
+            // ```text
+            // eye = (feet + PIVOT) - BACK * look
+            // ```
+            //
+            // An earlier reading of 4.116 came from matching the trace to the
+            // game's memory by nearest point, and that was **circular**: the
+            // matching used `camtrace.player()`, which assumes a follow of
+            // four, and then reported four back. Its own self-test caught it
+            // -- a camera built five back read as 4.15 -- and the test is
+            // kept as that bug.
+            //
+            // The pitch is the player's own: the demo records `MLOOKDOWN`
+            // and `MLOOKUP`, and this engine does not replay them yet.
+            const BACK: f64 = 4.0;
+            const PIVOT: f64 = 1.5168;
             let ahead2 = goodomen::game::body::facing(yaw).0;
             let look = [
                 (ahead2[0] * pitch.cos()) as f32,
@@ -1907,12 +1927,15 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 // backs into a corner, and the room it culls by is the wrong
                 // one. `Collision::sees` is the same exact segment test the
                 // shooting uses.
+                // `at` is the body's head; the pivot the camera hangs off
+                // is PIVOT above its feet, which is EYE below that.
+                let pivot = [at[0], at[1], at[2] - EYE + PIVOT];
                 let want = [
-                    at[0] - look[0] as f64 * BEHIND,
-                    at[1] - look[1] as f64 * BEHIND,
-                    at[2] - look[2] as f64 * BEHIND + ABOVE,
+                    pivot[0] - look[0] as f64 * BACK,
+                    pivot[1] - look[1] as f64 * BACK,
+                    pivot[2] - look[2] as f64 * BACK,
                 ];
-                let head = [at[0], at[1], at[2] + ABOVE];
+                let head = pivot;
                 let mut back = want;
                 if !collision.sees(head, want) {
                     // walk it in until the line is clear, in eighths
@@ -1964,13 +1987,16 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
     // which is what the authored visibility is worth. `--walk` puts the
     // camera behind the body here too, so the same picture can be looked at.
     let (eye, yaw) = if std::env::args().any(|a| a == "--walk") {
-        const BEHIND: f64 = 4.5;
-        const ABOVE: f64 = 1.6;
+        // the same two the played camera uses, measured together -- see the
+        // note there. `eye` here is already the body's head, and this path
+        // has no pitch, so the whole distance is horizontal.
+        const BACK: f64 = 4.0;
+        const PIVOT: f64 = 1.5168;
         (
             [
-                (eye[0] as f64 - goodomen::game::body::facing(yaw).0[0] * BEHIND) as f32,
-                (eye[1] as f64 - goodomen::game::body::facing(yaw).0[1] * BEHIND) as f32,
-                eye[2] + ABOVE as f32,
+                (eye[0] as f64 - goodomen::game::body::facing(yaw).0[0] * BACK) as f32,
+                (eye[1] as f64 - goodomen::game::body::facing(yaw).0[1] * BACK) as f32,
+                eye[2] - EYE as f32 + PIVOT as f32,
             ],
             yaw,
         )
