@@ -158,6 +158,21 @@ def turn_from_axis(raw: float, sensitivity: float = SENSITIVITY) -> float:
     return shaped * (sensitivity * sensitivity + TURN_FLOOR) * TURN_RATE / 60.0
 
 
+def facing(yaw: float):
+    """-> (the direction this yaw faces, the direction to its right).
+
+    **Forward is the model's local +Y, not its +X**, measured rather than
+    assumed: reading the original's own position and orientation quaternion
+    out of the running game (tools/peek.c), over demo1_5 there are 21 ticks
+    where the yaw held perfectly still and the player walked, and on every
+    one the direction he moved is his yaw plus 90.00 degrees to two decimal
+    places.  Where a strafe mixes in the movement swings from yaw+90 down
+    toward yaw, which is what makes the right axis (cos, sin).
+    """
+    s, c = math.sin(yaw), math.cos(yaw)
+    return (-s, c), (c, s)
+
+
 class World:
     def __init__(self, graph: Path, resources: Path) -> None:
         packed = mh.scene_collision(graph, resources)
@@ -198,6 +213,34 @@ class World:
         return self.solid(x, y, z - EYE + 0.05)
 
 
+# How a blocked move is retried. The move is projected onto a direction
+# turned by each of these in turn -- `d * cos(a)` along `d` rotated by `a`,
+# which is exactly the component of the move that survives a wall whose
+# tangent lies that way.
+#
+# The three candidates this replaces -- the whole move, then x alone, then y
+# alone -- are the same projection for a wall whose normal is an axis, and
+# nothing else. Against a wall at 45 degrees all three push into it and the
+# body stops dead. Measured on `demo1_5`: the axis slide refuses 178 frames
+# and a turned direction goes on 123 of them, needing 30 degrees or more
+# every time and 45 or more on 109. The original, read out of its own memory,
+# is never refused a step at all.
+#
+# ponytail: a fan, not the wall's own normal. `omMath3d.c:637` in the
+# Dreamcast build asserts on `radius`, `height`, `det`, `t1`, `t2` and
+# `normal` together, so the original solves a swept cylinder and has the
+# normal to project onto. This finds the tangent by trying.
+SLIDE = [0.0, 15.0, -15.0, 30.0, -30.0, 45.0, -45.0,
+         60.0, -60.0, 75.0, -75.0]
+
+
+def _slide(dx: float, dy: float):
+    """The move, and then the ways round a wall, nearest first."""
+    for a in SLIDE:
+        r = math.radians(a)
+        c, s = math.cos(r), math.sin(r)
+        yield (dx * c - dy * s) * c, (dx * s + dy * c) * c
+
 def _settle(w: World, x: float, y: float, z: float, ground: bool,
             vz: float) -> tuple[float, bool, float]:
     """Rise out of the surface landed on, or stay glued over a kerb.
@@ -216,7 +259,10 @@ def _settle(w: World, x: float, y: float, z: float, ground: bool,
                and not w.blocked(x, y, z + lift + 0.05)):
             lift += 0.05
         return z + lift, True, 0.0
-    if ground and vz < 0:
+    # A grounded body probes down for a step every frame, whatever its
+    # vertical velocity: gravity no longer runs while it is grounded, so the
+    # velocity is zero and the old `vz < 0` guard would never open.
+    if ground:
         drop = 0.0
         while drop < STEP and not w.footed(x, y, z - drop):
             drop += 0.05
@@ -247,7 +293,7 @@ def _land(w: World, was, x: float, y: float, z: float, ground: bool,
 def walk(w: World, start, yaw: float, frames: int, speed: float) -> dict:
     pos = list(start)
     vz, ground, hits, inside = 0.0, False, 0, 0
-    fwd = (math.cos(yaw), math.sin(yaw))
+    fwd = facing(yaw)[0]
     run = speed * DT
     for _ in range(frames):
         was = (pos[0], pos[1])
@@ -257,13 +303,22 @@ def walk(w: World, start, yaw: float, frames: int, speed: float) -> dict:
                 hits += 1
             pieces = max(1, math.ceil(run / 0.25))
             for _k in range(pieces):
-                for ax, ay in ((dx, dy), (dx, 0), (0, dy)):
+                for ax, ay in _slide(dx, dy):
                     nx = pos[0] + ax / pieces
                     ny = pos[1] + ay / pieces
                     if not w.blocked(nx, ny, pos[2]):
                         pos[0], pos[1] = nx, ny
                         break
-        vz -= GRAVITY * DT
+        # **Gravity only bites when there is nothing underfoot.** Integrating
+        # it while the body is resting makes the body bob for ever: `footed`
+        # answers at a resolution of 0.05 and one frame's fall is 0.022, so
+        # the drop re-buries the feet, the settle lifts by a whole 0.05, and
+        # the pair repeat. Measured against the original reading its own
+        # memory (tools/peek.py): over demo1_5 its z moves on 318 of 706 ticks
+        # and only 5 of those are vertical alone, where ours moved on 1138 of
+        # 1348 with 601 vertical alone.
+        if not ground:
+            vz -= GRAVITY * DT
         nz, left = pos[2], vz * DT
         while abs(left) > 1e-6 and not w.footed(pos[0], pos[1], nz):
             bit = max(-0.5, min(0.5, left))
@@ -392,16 +447,16 @@ def replay(w: World, start, yaw: float, frames: list, mouse: float = 1.0,
         # the engine's `Body::replay` for the measurement that says why
         yaw -= mouse * held.get(TURN_RIGHT, 0.0)
         yaw += mouse * held.get(TURN_LEFT, 0.0)
-        fx, fy = math.cos(yaw), math.sin(yaw)
+        f, r = facing(yaw)
         want_f, want_s, _ = player_speed(
             kind, (FORWARD in held) - (BACKWARD in held),
             (RIGHT in held) - (LEFT in held))
         forward = approach(forward, want_f, dt)
         strafe = approach(strafe, want_s, dt)
-        # right is (-sin, cos), the same hand the engine uses. The table's own
-        # entries carry the diagonal, so this must not normalise them again.
-        dx = forward * fx - strafe * fy
-        dy = forward * fy + strafe * fx
+        # both axes from facing(); the table's own entries carry the
+        # diagonal, so this must not normalise them again.
+        dx = forward * f[0] + strafe * r[0]
+        dy = forward * f[1] + strafe * r[1]
         speed = math.hypot(dx, dy)
         length = speed
         if length > 0:
@@ -411,14 +466,15 @@ def replay(w: World, start, yaw: float, frames: list, mouse: float = 1.0,
                 hits += 1
             pieces = max(1, math.ceil(run / 0.25))
             for _k in range(pieces):
-                for ax, ay in ((dx, dy), (dx, 0), (0, dy)):
+                for ax, ay in _slide(dx, dy):
                     nx, ny = pos[0] + ax / pieces, pos[1] + ay / pieces
                     if not w.blocked(nx, ny, pos[2]):
                         pos[0], pos[1] = nx, ny
                         break
         if ground and JUMP in held:
             vz, ground = JUMP_SPEED, False
-        vz -= GRAVITY * dt
+        if not ground:
+            vz -= GRAVITY * dt
         nz, left = pos[2], vz * dt
         while abs(left) > 1e-6 and not w.footed(pos[0], pos[1], nz):
             bit = max(-0.5, min(0.5, left))
@@ -487,7 +543,15 @@ def _engine(args) -> int:
     import rooms as rm
 
     level = int(re.search(r"l(\d+)", args.src.stem).group(1))
-    frames = omn.parse(args.demo.read_bytes())[1:]
+    # **Frame 0 is kept.** Its dt is 8.59 seconds -- it is the load -- but
+    # its *input* is real: `TURN_L=0.630, LOOK_D=0.380`, and the original
+    # applies it. Read straight out of the running game, the player's yaw at
+    # the first live sample is 3.331 where the checkpoint table says he
+    # starts at pi, and pi + 0.630 * 0.2963 is 3.329. Dropping the frame
+    # started every replay 10.7 degrees off and held that error for 45
+    # seconds. The dt is clamped inside replay(), so keeping the frame costs
+    # nothing.
+    frames = omn.parse(args.demo.read_bytes())
     table, cps, _ = rm.load(level, args.resources, rm._override(args.resources))
     cp = cps[str(args.checkpoint)]
     start = rm._list(cp["2"])[:3]
@@ -535,7 +599,15 @@ def _replay(args) -> int:
     import rooms as rm
 
     level = int(re.search(r"l(\d+)", args.src.stem).group(1))
-    frames = omn.parse(args.demo.read_bytes())[1:]     # frame 0 is the load
+    # **Frame 0 is kept.** Its dt is 8.59 seconds -- it is the load -- but
+    # its *input* is real: `TURN_L=0.630, LOOK_D=0.380`, and the original
+    # applies it. Read straight out of the running game, the player's yaw at
+    # the first live sample is 3.331 where the checkpoint table says he
+    # starts at pi, and pi + 0.630 * 0.2963 is 3.329. Dropping the frame
+    # started every replay 10.7 degrees off and held that error for 45
+    # seconds. The dt is clamped inside replay(), so keeping the frame costs
+    # nothing.
+    frames = omn.parse(args.demo.read_bytes())
     table, cps, _ = rm.load(level, args.resources, rm._override(args.resources))
     cp = cps[str(args.checkpoint)]
     start = rm._list(cp["2"])[:3]
@@ -591,8 +663,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--engine", metavar="GAMEDIR",
                     help="replay the demo in the engine too and require the "
                          "same body")
-    ap.add_argument("--mouse", type=float, default=1.0,
-                    help="radians per unit of the demo's axis value; flat, and not what the original does -- see turn_from_axis")
+    ap.add_argument("--mouse", type=float, default=0.30,
+                    help="radians per unit of the demo's axis value. The default 0.30 is measured off the original's own quaternion, and it is also `sens*sens + 0.05` at the shipped sensitivity of 0.5 -- see Body::replay")
     ap.add_argument("--track", type=Path, metavar="FILE",
                     help="write the replayed body's path, one 'x y z' a "
                          "frame, to hold against camtrace.py's capture of "

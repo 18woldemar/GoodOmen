@@ -161,9 +161,16 @@ ENGINE = [
     ("the engine runs a level on the recorded demo, trigger and all",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
+      # With the character's frame turned the quarter the capture measured,
+      # the demo walks Kurt into the fight it was recorded in -- l1_r5 is an
+      # arena and `demo1_5` is a fight in it. Four walkers engage, twenty of
+      # their twenty-one shots land, and he is dead at 40s of the 45. That
+      # is our AI being harsher than the original's, not the replay going
+      # wrong: he kills one of them on the way, and the run is now a fight
+      # rather than a walk past an empty room.
       "--run", "1", "5", "45", "--expect-rooms", "1",
-      "--expect-events", "20474", "--expect-survived", "19135",
-      "--expect-shot-at", "21", "--expect-killed", "1",
+      "--expect-events", "18364", "--expect-survived", "17166",
+      "--expect-shot-at", "13", "--expect-killed", "1",
       "--expect-touched", "1"], None),
     ("a run reaches a spawner and the enemies arrive with hitpoints",
      ["cargo", "run", "--quiet", "--release",
@@ -184,9 +191,9 @@ ENGINE = [
       # `l7r2_spn1_spawn`, which spawns **inside** `c9` -- so what this pins
       # is the escape rule, not the refusal. Nothing in ten levels walks into
       # a wall in the first thirty seconds.
-      "--expect-walled", "9034", "--expect-buried", "1729",
+      "--expect-walled", "9187", "--expect-buried", "1093",
       "--expect-keys", "10", "--expect-fighting", "17",
-      "--expect-moves", "16676",
+      "--expect-moves", "10403",
       "--expect-events", "22504", "--expect-survived", "22504"], None),
     # and the driver that reaches more than the first room. Held forwards
     # jams on the first corner -- level 6 spends 1162 of 1200 frames against a
@@ -207,8 +214,11 @@ ENGINE = [
     ("walkers walk a level without leaving the world",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
+      # buried was 184 and is now 0: no walker in level 9 ends a frame inside
+      # the world any more, which is the quarter turn again -- they were
+      # walking across the geometry rather than along it.
       "--run", "9", "1", "30", "--expect-walkers", "18",
-      "--expect-walled", "9551", "--expect-buried", "184", "--expect-keys", "3",
+      "--expect-walled", "9176", "--expect-buried", "0", "--expect-keys", "3",
       "--expect-events", "46883", "--expect-survived", "45983"], None),
     # level 10's zizzy turrets shoot: nine bullets in thirty seconds, each one
     # carrying its damage, damage type, lifetime and speed out of the shot
@@ -238,9 +248,12 @@ ENGINE = [
     ("an enemy shoots the player, and leads him",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
-      "--run", "4", "1", "120", "--roam", "--expect-shots", "51",
-      "--expect-hits", "8", "--expect-health", "60",
-      "--expect-events", "72002", "--expect-survived", "72002"], None),
+      # and here too the driver now walks where the checkpoint points it,
+      # meets the enemies sooner, and is killed at 96s of the 120 -- so the
+      # run is shorter and every count with it.
+      "--run", "4", "1", "120", "--roam", "--expect-shots", "75",
+      "--expect-hits", "20", "--expect-health", "0",
+      "--expect-events", "57501", "--expect-survived", "57501"], None),
     # and the loop closes: the player walks at an enemy, shoots it with the
     # hitscan the original uses, and it dies. Two minutes of hunting on level
     # 8 is 77 shots and two kills.
@@ -255,8 +268,13 @@ ENGINE = [
     ("walking drives the player's own animation, and reaches the scripts",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
+      # Held forwards now walks the way the checkpoint faces, and level 6's
+      # first checkpoint faces the tunnel wall: 5 units in 40 seconds, 1183
+      # frames against it. That is the driver's synthetic input being wrong
+      # about the level, not the body -- the demo, which is the game's own
+      # input, walks 338 units through the same controller.
       "--run", "6", "1", "40", "--expect-playing", "14",
-      "--expect-moves", "11833", "--expect-touched", "1"], None),
+      "--expect-moves", "1465", "--expect-touched", "1"], None),
     ("the room graph culls what the engine draws",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
@@ -301,8 +319,16 @@ SLOW = [
     ("the item table is the original's",
      ["health.py", "$MDK2_GOG/mdk2Main.exe", "--items", "--engine"], None),
     ("the controller walks every level",
+     # The clips went from 6 to 13 when the character's frame turned its
+     # quarter, and that is the survey walking new ground rather than the
+     # mover getting worse: setting the slide fan to the single straight-ahead
+     # candidate -- no slide at all -- gives 13 as well. These starts are
+     # marched down each tree's box and walked in one fixed direction, so
+     # turning the frame sends every one of them somewhere else. The game's
+     # own input says the opposite way: `demo1_5` was inside geometry on 30
+     # frames and is now inside on none.
      ["walksim.py", "extracted/base", "--resources", "extracted", "--all",
-      "--expect-standing", "2556", "--expect-inside", "6"], "base"),
+      "--expect-standing", "2557", "--expect-inside", "13"], "base"),
 ]
 
 

@@ -11,10 +11,27 @@
 //! smallest headroom over the 129 checkpoints is 2.9. Hence an eye at 1.7, a
 //! step of 0.6, gravity 20 and a walk of 4 units a second.
 //!
+//! **Forward is the model's local +Y**, which is [`facing`], and getting that
+//! wrong cost this controller a quarter turn against the game from the day it
+//! was written. It was found by reading the original's own position and
+//! orientation out of the running game (`tools/peek.c`): over `demo1_5` there
+//! are 21 ticks where the yaw holds perfectly still and the player walks, and
+//! on every one he moves at his yaw plus 90.00 degrees. Replaying the same
+//! demo went from 219 units travelled to 338 against the original's 320, from
+//! 323 frames against a wall to 34, and from 30 frames inside geometry to
+//! none.
+//!
 //! It is still a **vertical segment** rather than a capsule, and that is the
-//! known ceiling: `tools/walksim.py` measures six transient clips in 2557
-//! runs, all of them a frame or ten of brushing through a tight spot. A swept
-//! capsule is the real fix.
+//! known ceiling: `tools/walksim.py` measures thirteen transient clips in
+//! 2557 runs, all of them a frame or ten of brushing through a tight spot.
+//! (It was six before the frame turned; setting the slide fan to its single
+//! straight-ahead candidate gives thirteen too, so that is the survey's
+//! fixed-direction starts walking new ground, not the mover.) The player is
+//! also still **`EYE` tall and no width at all**, where `mdkKurt.c` writes
+//! **2.0 and 0.8** at 0x416863. Both wait on the same thing: `omMath3d.c:637`
+//! in the Dreamcast build asserts on `radius`, `height`, `det`, `t1`, `t2`
+//! and `normal` together, so the original solves a **swept cylinder**, and
+//! that solver is what gives a width somewhere to be checked against.
 //!
 //! Two things here are about checking the *whole* frame rather than a piece
 //! of it, and both were wedging bodies under overhangs:
@@ -229,6 +246,32 @@ impl Collision {
     }
 }
 
+/// How a blocked move is retried: the move projected onto a direction turned
+/// by each of these, `d * cos(a)` along `d` rotated by `a` — exactly the part
+/// of the move that survives a wall whose tangent lies that way.
+///
+/// The three candidates this replaces — the whole move, then x alone, then y
+/// alone — are that same projection for a wall whose normal is an axis, and
+/// for nothing else. Against a wall at 45 degrees all three push into it and
+/// the body stops dead. Measured on `demo1_5`: the axis slide refused 178
+/// frames and a turned direction goes on 123 of them, needing 30 degrees or
+/// more every time. The original, read out of its own memory, is never
+/// refused a step at all.
+///
+/// ponytail: a fan, not the wall's own normal. `omMath3d.c:637` in the
+/// Dreamcast build asserts on `radius`, `height`, `det`, `t1`, `t2` and
+/// `normal` together, so the original solves a swept cylinder and has a
+/// normal to project onto. This finds the tangent by trying.
+const SLIDE: [f64; 11] = [0.0, 15.0, -15.0, 30.0, -30.0, 45.0, -45.0,
+                          60.0, -60.0, 75.0, -75.0];
+
+fn slide(dx: f64, dy: f64) -> impl Iterator<Item = (f64, f64)> {
+    SLIDE.into_iter().map(move |a| {
+        let (s, c) = a.to_radians().sin_cos();
+        ((dx * c - dy * s) * c, (dx * s + dy * c) * c)
+    })
+}
+
 pub struct Body {
     pub position: [f64; 3],
     pub yaw: f64,
@@ -297,7 +340,11 @@ impl Body {
             self.velocity_z = 0.0;
             return z + lift;
         }
-        if self.on_ground && self.velocity_z < 0.0 {
+        // A grounded body probes down for a step every frame, whatever its
+        // vertical velocity: gravity no longer runs while it is grounded, so
+        // the velocity is zero and the old `velocity_z < 0.0` guard would
+        // never open.
+        if self.on_ground {
             let mut drop = 0.0;
             while drop < STEP && !world.footed(p(self, z - drop), self.height) {
                 drop += 0.05;
@@ -343,7 +390,7 @@ impl Body {
             // in pieces, so a fast frame cannot step over a thin wall
             let pieces = (run / 0.25).ceil().max(1.0) as usize;
             for _ in 0..pieces {
-                for (ax, ay) in [(dx, dy), (dx, 0.0), (0.0, dy)] {
+                for (ax, ay) in slide(dx, dy) {
                     let candidate = [
                         self.position[0] + ax / pieces as f64,
                         self.position[1] + ay / pieces as f64,
@@ -362,7 +409,18 @@ impl Body {
             self.velocity_z = JUMP_SPEED;
             self.on_ground = false;
         }
-        self.velocity_z -= GRAVITY * dt;
+        // **Gravity only bites when there is nothing underfoot.** Integrating
+        // it while the body is resting makes the body bob for ever, because
+        // `footed` answers at a resolution of 0.05 and one frame's fall is
+        // 0.022: the drop re-buries the feet, `settle` lifts by a whole 0.05,
+        // and the pair repeat. Measured on the original: over `demo1_5` its
+        // own z moves on 318 of 706 ticks and only **5** of those are
+        // vertical alone, where ours moved on 1138 of 1348 with **601**
+        // vertical alone -- 53.6 units of climbing that never happened
+        // against the original's 18.3.
+        if !self.on_ground {
+            self.velocity_z -= GRAVITY * dt;
+        }
 
         // the fall is walked in pieces too, or a frame passes through a floor
         let mut z = self.position[2];
@@ -412,15 +470,18 @@ impl Body {
         let mut drive = Drive::default();
         for frame in frames {
             let dt = (frame.dt as f64).clamp(1e-4, 0.2);
-            // ponytail: still the flat factor, **not** [`turn_from_axis`],
-            // and the reason is measured. The real chain turns about a
-            // quarter as fast at the shipped sensitivity, and replaying the
-            // demo that slowly puts the body inside geometry on 30 frames
-            // where it was never once inside before. That is this body
-            // failing, not the reading: it is a vertical segment 1.7 tall
-            // with no width, where Kurt's is 2.0 by 0.8 (0x416863). A fast
-            // turn was hiding it by swinging away from every wall. Wire the
-            // real turn when the body is swept and the right size.
+            // **The turn is measured, and it is flat.** `tools/peek.c` reads
+            // the player's own orientation quaternion out of the running
+            // game, and two windows of `demo1_5` fix the factor to four
+            // places without a fit: frame 0 holds `TURN_L = 0.63` and takes
+            // the yaw from pi to 3.3307, which is 0.3002 a unit; frames 15
+            // to 22 hold `TURN_R` summing to 3.05 and take it to 2.4155,
+            // which is 0.3001 a unit. **0.300 is `sens * sens + 0.05` at the
+            // shipped sensitivity of 0.5** — the gain out of
+            // `mdkSetTurnSensitivity`, so this is a reading and not a
+            // coincidence. The recorded value therefore already carries the
+            // axis's compressive curve and the 45/60, which is why
+            // [`turn_from_axis`] must not be applied to a recording.
             self.yaw -= mouse * frame.held(omn::TURN_RIGHT).unwrap_or(0.0) as f64;
             self.yaw += mouse * frame.held(omn::TURN_LEFT).unwrap_or(0.0) as f64;
             let ahead = frame.held(omn::FORWARD).is_some() as i32
@@ -460,6 +521,31 @@ pub fn turn_from_axis(raw: f64, sensitivity: f64) -> f64 {
     const TURN_RATE: f64 = 45.0; // the block at gob + 0x64, written at 0x416ad5
     let shaped = raw.abs().powf(EXPONENT) * raw.signum();
     shaped * (sensitivity * sensitivity + FLOOR) * TURN_RATE / 60.0
+}
+
+/// The world directions a character faces and strafes toward at this yaw.
+///
+/// **Forward is the model's local +Y, not its +X.** That is measured, not
+/// assumed: `tools/peek.c` reads the original's own position and orientation
+/// quaternion out of the running game, and over `demo1_5` there are 21 ticks
+/// where the yaw held perfectly still and the player walked. On every one of
+/// them the direction he moved is his yaw **plus 90.00 degrees**, to two
+/// decimal places. The quaternion is `(w, x, y, z)` with only `w` and `z`
+/// ever moving -- the same order the `.mod` animation channels use -- so the
+/// yaw itself is `2 * atan2(z, w)` and unambiguous.
+///
+/// Which way is right comes off the same capture: where a strafe mixes in,
+/// the movement swings from yaw+90 **down** toward yaw, so the strafe axis is
+/// `(cos, sin)` and not `(-cos, -sin)`.
+///
+/// This is only about a *character's* frame. Every `atan2(dy, dx)` bearing
+/// elsewhere in the engine is compared against another of its own kind and
+/// stays self-consistent; what they are not yet checked against is an
+/// authored quaternion, and that check is the next thing this measurement
+/// buys.
+pub fn facing(yaw: f64) -> ([f64; 2], [f64; 2]) {
+    let (s, c) = (yaw.sin(), yaw.cos());
+    ([-s, c], [c, s])
 }
 
 /// A playable character's two speeds, smoothed toward what the table asks for.
@@ -503,13 +589,13 @@ impl Drive {
         self.strafe = crate::game::world::approach(self.strafe, s, dt);
     }
 
-    /// `-> (a unit direction in the plane, how fast to go along it)`. Right is
-    /// `(-sin yaw, cos yaw)`, the same hand the rest of the engine uses.
+    /// `-> (a unit direction in the plane, how fast to go along it)`, both
+    /// axes from [`facing`], which is where the measurement lives.
     pub fn heading(&self, yaw: f64) -> ([f64; 2], f64) {
-        let (fx, fy) = (yaw.cos(), yaw.sin());
+        let (f, r) = facing(yaw);
         let v = [
-            self.forward * fx - self.strafe * fy,
-            self.forward * fy + self.strafe * fx,
+            self.forward * f[0] + self.strafe * r[0],
+            self.forward * f[1] + self.strafe * r[1],
         ];
         let n = (v[0] * v[0] + v[1] * v[1]).sqrt();
         if n < 1e-9 { ([0.0, 0.0], 0.0) } else { ([v[0] / n, v[1] / n], n) }
@@ -563,6 +649,64 @@ mod tests {
     /// the full width and omCollision halves it, so half of it is how far the
     /// probe reaches sideways: a grunt is 3.8 wide and stops 1.9 short of a
     /// wall its centre would have walked into.
+    /// The measurement this whole frame rests on: walking is yaw + 90
+    /// degrees, and a strafe swings the move back toward the yaw itself.
+    #[test]
+    fn forward_is_the_model_s_y_axis() {
+        for deg in [0.0, 37.0, 145.28, 206.82, -90.0] {
+            let yaw = (deg as f64).to_radians();
+            let (f, r) = facing(yaw);
+            let moved = f[1].atan2(f[0]).to_degrees();
+            let want = (deg + 90.0 + 540.0) % 360.0 - 180.0;
+            assert!(((moved - want + 540.0) % 360.0 - 180.0).abs() < 1e-9,
+                    "yaw {deg} faces {moved}, wanted {want}");
+            // right is a quarter turn back from forward, so a pure strafe
+            // moves along the yaw and not against it
+            assert!((r[0] - yaw.cos()).abs() < 1e-12 && (r[1] - yaw.sin()).abs() < 1e-12);
+            assert!((f[0] * r[0] + f[1] * r[1]).abs() < 1e-12, "and they are square");
+        }
+    }
+
+    /// The fan is a projection, not a swing: turning further gives up more of
+    /// the move, and the whole move is always tried first.
+    #[test]
+    fn the_slide_projects_rather_than_swings() {
+        let fan: Vec<_> = slide(1.0, 0.0).collect();
+        assert_eq!(fan[0], (1.0, 0.0), "the move itself comes first");
+        let mut last = f64::INFINITY;
+        for (i, (x, y)) in fan.iter().enumerate() {
+            let along = x * 1.0 + y * 0.0; // the part still going the old way
+            if i % 2 == 1 {
+                assert!(along < last, "each turn gives up more of the move");
+                last = along;
+            }
+            assert!(along >= -1e-12, "and never goes backwards");
+        }
+        // a wall whose tangent is 45 degrees off keeps 1/sqrt(2) of a unit
+        let at45 = fan.iter().find(|(x, y)| (x - y).abs() < 1e-9 && *x > 0.0).unwrap();
+        assert!((at45.0.hypot(at45.1) - 0.5f64.sqrt()).abs() < 1e-9);
+    }
+
+    /// A body left alone on flat ground must not move at all. Gravity used to
+    /// run while it was grounded, and `footed` answers at 0.05 where one
+    /// frame's fall is 0.022, so it bobbed for ever: over `demo1_5` the z
+    /// moved on 1138 of 1348 frames where the original's moved on 318 of 706.
+    #[test]
+    fn a_resting_body_rests() {
+        let world = floor();
+        let mut body = Body::new([0.0, 0.0, 3.0], 0.0);
+        for _ in 0..200 {
+            body.step(&world, [0.0, 0.0], false, 0.0, 1.0 / 30.0);
+        }
+        let settled = body.position[2];
+        for _ in 0..200 {
+            body.step(&world, [0.0, 0.0], false, 0.0, 1.0 / 30.0);
+            assert!((body.position[2] - settled).abs() < 1e-9,
+                    "it moved to {} from {settled}", body.position[2]);
+        }
+        assert!(body.on_ground);
+    }
+
     #[test]
     fn width_keeps_a_body_off_a_wall_its_centre_would_clear() {
         let world = wall();

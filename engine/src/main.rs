@@ -98,7 +98,10 @@ fn main() {
             std::process::exit(1);
         }
         let yaw = value("--yaw").and_then(|v| v.parse().ok()).unwrap_or(0.0);
-        let mouse = value("--mouse").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        // 0.30 rad a unit, measured off the original's own orientation
+        // quaternion and equal to `sens * sens + 0.05` at the shipped
+        // sensitivity of 0.5 -- the derivation is on `Body::replay`.
+        let mouse = value("--mouse").and_then(|v| v.parse().ok()).unwrap_or(0.30);
         let root = args
             .iter()
             .zip(std::iter::once(&String::new()).chain(args.iter()))
@@ -884,9 +887,16 @@ fn replay(
         Collision::load(&mut install, &w)
     };
     let bytes = install.read(demo).map_err(|e| e.to_string())?;
-    // frame 0 is the load and carries no input
+    // **Frame 0 is kept**, and the note that used to stand here -- "frame 0
+    // is the load and carries no input" -- was wrong on the second half. Its
+    // dt is 8.59 seconds because it *is* the load, but it carries
+    // `TURN_L=0.630, LOOK_D=0.380` and the original applies it: read out of
+    // the running game, the player's yaw at the first live sample is 3.331
+    // where the checkpoint table starts him at pi, and pi + 0.630 * 0.2963
+    // is 3.329. Dropping it started every replay 10.7 degrees off course.
+    // `Body::replay` clamps dt, so the long frame costs nothing.
     let frames = omn::parse(&bytes).map_err(|e| e.to_string())?;
-    let frames = &frames[1.min(frames.len())..];
+    let frames = &frames[..];
 
     let mut body = Body::new([start[0], start[1], start[2] + EYE], yaw);
     // the demo is Kurt's, so the speeds are Kurt's own table

@@ -48,6 +48,12 @@
  *                        at 0x7f4f..., in the 64-bit host's own heap: it
  *                        never moved and was never the player.
  *   len=32               bytes to log per candidate per sample
+ *   back=0               start the log this many bytes *before* the
+ *                        match, so a scan that finds a position can
+ *                        also show the struct around it -- which is
+ *                        where the orientation is. Watching a bare
+ *                        address instead does not do: the heap only
+ *                        repeats between runs that are identical.
  *   hz=200               samples a second (0 = scan once, then stop)
  *   every=0.5            seconds between scans while still hunting.  It
  *                        has to be well under a second: with a demo
@@ -79,7 +85,7 @@ static int ncand;
 static float want[2];
 static float eps = 0.05f;
 static unsigned pattern;
-static int use_ptr, loglen = 32, hz = 200;
+static int use_ptr, loglen = 32, hz = 200, back;
 static uintptr_t lo = 0x10000, hi = 0x100000000ul;
 static double every = 0.5;
 
@@ -155,7 +161,7 @@ static double now(void)
 static void *worker(void *unused)
 {
     static struct region r[8192];
-    static float v[128];
+    static float v[512];
     double t0 = now();
     int n, game = 0, pass = 0;
     (void)unused;
@@ -178,10 +184,11 @@ static void *worker(void *unused)
 
     while (hz > 0) {
         int i, j, w = loglen / 4;
-        if (w > 128) w = 128;
+        if (w > 512) w = 512;
         for (i = 0; i < ncand; i++) {
-            if (grab(v, cand[i], w * 4) != w * 4) continue;
-            fprintf(out, "%.4f %lx", now() - t0, (unsigned long)cand[i]);
+            uintptr_t from = cand[i] - back;
+            if (grab(v, from, w * 4) != w * 4) continue;
+            fprintf(out, "%.4f %lx", now() - t0, (unsigned long)from);
             for (j = 0; j < w; j++) fprintf(out, " %.4f", v[j]);
             fputc('\n', out);
         }
@@ -211,6 +218,7 @@ __attribute__((constructor)) static void peek_start(void)
         else if (!strcmp(line, "eps")) eps = strtof(v, NULL);
         else if (!strcmp(line, "len")) loglen = atoi(v);
         else if (!strcmp(line, "hz")) hz = atoi(v);
+        else if (!strcmp(line, "back")) back = atoi(v);
         else if (!strcmp(line, "ptr")) { pattern = (unsigned)strtoul(v, NULL, 0); use_ptr = 1; }
         else if (!strcmp(line, "watch") && ncand < MAX_CAND)
             cand[ncand++] = (uintptr_t)strtoul(v, NULL, 0);
