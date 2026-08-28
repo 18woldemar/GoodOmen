@@ -2575,6 +2575,20 @@ pub fn hitscan(lua: &Lua, shooter: &str, mode: i64) -> Option<String> {
     Some(victim)
 }
 
+/// `DAMAGE_FALLING`, out of the binary's own constant table -- 16, and the
+/// type Kurt's landing handler pushes at 0x4183b9.
+pub const DAMAGE_FALLING: i64 = 16;
+
+/// Hurt a gob by name, the way the world hurts it: through the same
+/// [`deal_damage`] a script's `mdkDealDamage` reaches, so the victim's
+/// `OnDamage` runs and its filter is honoured. The source is the victim
+/// itself, which is what 0x4183be passes for a fall -- nothing threw it.
+pub fn hurt(lua: &Lua, victim: &str, amount: i64, kind: i64) -> bool {
+    let Ok(gob) = lua.globals().get::<mlua::Table>(victim) else { return false };
+    deal_damage(lua, Some(Value::Table(gob.clone())), Value::Table(gob), amount, kind, -1, true)
+        .is_ok()
+}
+
 /// The same wrap as [`facing`], to an angle the caller chooses.
 fn facing_within(yaw: f64, heading: f64, slack: f64) -> bool {
     let mut d = yaw - heading;
@@ -4473,6 +4487,33 @@ mod tests {
         assert_eq!(g.get::<f64>("dead").unwrap(), 1.0, "OnDie(gob, 1), not OnDie(gob)");
         // the third hit found it already dead, so OnDie fired once
         assert_eq!(scripts.lua.app_data_ref::<Boot>().unwrap().died, ["gen_spawn"]);
+    }
+
+    /// A landing reaches the player, and it reaches him **because his own
+    /// filter lets it**: Kurt's 0x9d6 out of 0x4168b8 has `DAMAGE_FALLING`
+    /// in it, which is also why `boss.lua:628` has to subtract the bit to
+    /// stop him taking fall damage in a boss fight.
+    #[test]
+    fn a_fall_takes_the_player_s_hitpoints() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('kurt', OBJ_KURT, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)",
+            )
+            .exec()
+            .unwrap();
+        let left = |lua: &Lua| {
+            world::world(lua).unwrap().get(world::world(lua).unwrap().find("kurt").unwrap())
+                .unwrap().hitpoints
+        };
+        assert_eq!(left(&scripts.lua), 100);
+        // a fall of 95 units a second, which is exactly the whole of him
+        let cost = crate::game::body::fall_damage(95.0);
+        assert!(hurt(&scripts.lua, "kurt", cost, DAMAGE_FALLING));
+        assert_eq!(left(&scripts.lua), 0, "{cost} hitpoints of fall");
     }
 
     /// The filter gates the built-in path and only that: a kind the object

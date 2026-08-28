@@ -1079,6 +1079,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     const SHAKE: usize = 45;
     let mut jammed = 0usize;
     let mut shot_at = 0usize;
+    let mut fell = 0usize;
     let mut died_at: Option<f64> = None;
     let mut ran = 0usize;
 
@@ -1242,6 +1243,22 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
                 }
             }
         }
+        // **and a hard landing hurts**, which is Kurt's own landing handler:
+        // see `body::fall_damage`. Counted so a run can say how much of its
+        // health went into the floor rather than into a fight.
+        if body.landed > 0.0 {
+            let hurt = goodomen::game::body::fall_damage(body.landed);
+            if hurt > 0 {
+                if let Some(name) = scripts
+                    .lua
+                    .app_data_ref::<api::Boot>()
+                    .and_then(|b| b.player.clone())
+                {
+                    api::hurt(&scripts.lua, &name, hurt, api::DAMAGE_FALLING);
+                    fell += hurt as usize;
+                }
+            }
+        }
         // the same locomotion the window drives, so it can be checked
         // without one
         if let Some(name) = scripts
@@ -1343,6 +1360,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         ("objects given a script", started, expect_flag("--expect-scripts")),
         ("hitpoints the player has left", health.0 as usize, expect_flag("--expect-health")),
         ("shots fired", shots, expect_flag("--expect-shots")),
+        ("hitpoints lost to landings", fell, expect_flag("--expect-fell")),
         ("shots that hit", landed, expect_flag("--expect-hits")),
         ("animation keys", struck, expect_flag("--expect-keys")),
         ("enemies fighting", fighting, expect_flag("--expect-fighting")),
@@ -1366,7 +1384,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
          and met a wall on {walled} frames ({buried} inside), \
          {shots} shots fired ({landed} hit, nearest {}, {drop:.1} of it height), \
          {anim_keys} keys in {struck} struck, {fighting} enemies fighting, {shot_at} shot by the player and {died} killed, \
-         the player on {} of {} hitpoints{}, \
+         the player on {} of {} hitpoints{} ({fell} of it to landings), \
          {} objects touched and {} of them \
          scripted{}{} [{}]{}",
         ran as f64 * dt,
@@ -1738,6 +1756,22 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 body.step(&collision, step, held(Scancode::Space), speed, dt);
                 let _ = d;
                 at = body.position;
+                // and a hard landing hurts here too -- see `body::fall_damage`
+                let hurt = goodomen::game::body::fall_damage(body.landed);
+                if hurt > 0 {
+                    if let Some(name) = level_scripts
+                        .lua
+                        .app_data_ref::<goodomen::game::api::Boot>()
+                        .and_then(|b| b.player.clone())
+                    {
+                        goodomen::game::api::hurt(
+                            &level_scripts.lua,
+                            &name,
+                            hurt,
+                            goodomen::game::api::DAMAGE_FALLING,
+                        );
+                    }
+                }
                 // the engine drives the player's locomotion, which is what
                 // the original calls `mdkWalkerAnimUpdate`
                 if let Some(player) = level_scripts

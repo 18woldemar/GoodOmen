@@ -97,6 +97,47 @@ pub const WALK: f64 = 4.0;
 pub const SPRINT: f64 = 9.0;
 /// Measured with [`GRAVITY`], off the same two jumps.
 pub const JUMP_SPEED: f64 = 16.0;
+
+/// The fastest a landing costs nothing: `0x48f7e0`, the float Kurt's landing
+/// handler compares his fall against. See [`fall_damage`].
+pub const LAND_SAFE: f64 = 45.0;
+
+/// What a landing costs, out of **`mdkKurt.c` at 0x418280** -- the handler
+/// that plays `KurtFootsteps`, stops `KurtChute`, and then decides between
+/// the events `GeneralLand` and `GeneralLandWithDamage`.
+///
+/// It reads the fall out of the motion block (`gob + 0x68`, field `0x54`),
+/// negates it, and compares it with [`LAND_SAFE`]. `fcom` + `test ah, 0x41`
+/// takes the quiet branch when the fall is **less than or equal**, so 45.0
+/// itself is free. Over it:
+///
+/// ```text
+/// 0x41838a  fsub  [0x48f7e0]   ; v - 45.0
+/// 0x418393  fmul  [0x48f5b0]   ; * 0.2
+/// 0x41839c  call  0x4814f7     ; floor
+/// 0x4183a1  fmul  [0x48f5a8]   ; * 10.0
+/// 0x4183a7  call  0x4814d0     ; to int
+/// 0x4183b9  push  0x10         ; DAMAGE_FALLING
+/// 0x4183be  call  0x40e660     ; the damage mdkDealDamage also calls
+/// ```
+///
+/// `0x4814f7` is **floor and not rint**: it rounds with `frndint` after
+/// setting the whole x87 control word to `0x173f` (`0x4b9590`), whose
+/// rounding field is 01 -- toward minus infinity. Elsewhere in the binary the
+/// same routine quantises a volume as `x * 20.004`, round, `* 0.05`, which is
+/// only a quantiser if it rounds.
+///
+/// So the law is a staircase: **every 5 units a second of fall over 45 costs
+/// 10 hitpoints**, and 95 is the whole 100 Kurt has. With [`GRAVITY`] that is
+/// a free drop of 34 units, and death at 151.
+pub fn fall_damage(speed: f64) -> i64 {
+    if speed <= LAND_SAFE {
+        return 0;
+    }
+    // 0.2 and 10.0 are the binary's own two constants, kept as the pair it
+    // uses rather than folded into "5 units a step" -- see the listing above
+    (((speed - LAND_SAFE) * 0.2).floor() as i64) * 10
+}
 /// The box round each tree is padded, so a query just outside still descends.
 const PAD: f64 = 1.0;
 
@@ -314,6 +355,9 @@ pub struct Body {
     /// against `walksim.py` and against his own recorded demo, and widening
     /// him would move both.
     pub width: f64,
+    /// How fast the body was falling when it landed **this frame**, and zero
+    /// on every frame that did not land. [`fall_damage`] is what reads it.
+    pub landed: f64,
 }
 
 impl Body {
@@ -339,6 +383,7 @@ impl Body {
             inside: 0,
             travelled: 0.0,
             touching: Default::default(),
+            landed: 0.0,
         }
     }
 
@@ -352,6 +397,9 @@ impl Body {
                 && !world.blocked(p(self, z + lift + 0.05), self.height, self.width)
             {
                 lift += 0.05;
+            }
+            if !self.on_ground {
+                self.landed = -self.velocity_z;
             }
             self.on_ground = true;
             self.velocity_z = 0.0;
@@ -380,6 +428,7 @@ impl Body {
     pub fn step(&mut self, world: &Collision, direction: [f64; 2], jump: bool, speed: f64, dt: f64) {
         let was = [self.position[0], self.position[1]];
         let start = self.position;
+        self.landed = 0.0;
         // what the body is against this frame, for `OnCollision`. Two honest
         // sources and no others: the thing it walked into, and the thing it
         // is standing on. A body never ends up *inside* geometry -- the
@@ -776,6 +825,39 @@ mod tests {
                     "frame {i}: rose {got:.3}, the original rose {want}");
         }
         assert!(!body.on_ground);
+    }
+
+    /// The landing staircase, and the height it puts on each step. A drop of
+    /// 34 units is free; one of 151 kills a full-health Kurt outright.
+    #[test]
+    fn a_landing_costs_ten_hitpoints_every_five_units_a_second() {
+        assert_eq!(fall_damage(0.0), 0);
+        assert_eq!(fall_damage(LAND_SAFE), 0, "45 itself takes the quiet branch");
+        assert_eq!(fall_damage(49.9), 0);
+        assert_eq!(fall_damage(50.0), 10);
+        assert_eq!(fall_damage(55.0), 20);
+        assert_eq!(fall_damage(95.0), 100, "and that is the whole of him");
+        // the fall out of level 1 room 7, 687 units onto the floor below
+        assert_eq!(fall_damage((2.0f64 * GRAVITY * 687.0).sqrt()), 310);
+    }
+
+    /// And the body reports the landing that the rule is about: the fall is
+    /// read at touchdown, on that frame only.
+    #[test]
+    fn a_body_reports_the_fall_it_landed_on() {
+        let world = floor();
+        let mut body = Body::new([0.0, 0.0, 60.0], 0.0);
+        let mut hardest = 0.0f64;
+        for _ in 0..200 {
+            body.step(&world, [0.0, 0.0], false, 0.0, 1.0 / 30.0);
+            hardest = hardest.max(body.landed);
+        }
+        // it fell about 58 units to the floor, so within a frame of sqrt(2gh)
+        let want = (2.0 * GRAVITY * 58.0).sqrt();
+        assert!((hardest - want).abs() < GRAVITY / 30.0 + 0.5,
+                "landed at {hardest:.2}, a free fall of that height ends at {want:.2}");
+        assert_eq!(body.landed, 0.0, "and a frame that stands still is not a landing");
+        assert!(fall_damage(hardest) > 0, "a fall like that is not free");
     }
 
     /// The fan is a projection, not a swing: turning further gives up more of
