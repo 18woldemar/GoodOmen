@@ -2911,6 +2911,26 @@ pub fn create(scripts: &Scripts) -> Result<(), Error> {
         let w = world::world(&scripts.lua).ok_or_else(|| Error::Pragma("no world".into()))?;
         w.iter().filter(|(_, g)| !g.created).map(|(_, g)| g.name.clone()).collect()
     };
+    // **A scene graph's trailing flag of 1 starts the object frozen**, and
+    // this is where it is applied -- before any `OnCreate`, because an
+    // `OnCreate` may be the thing that thaws it. It is a reading of the data
+    // and it is checked by what it removes: level 1 registers `kurtgame`
+    // with a 1 and hangs fifteen children off it at 0, and without this
+    // `ktgame_kurt.OnUpdate` ran from the moment the level loaded and read
+    // `kurtgame.left`, which `Level.StartMinigame` had not written --
+    // `level1.lua:1811`, 2700 failures in a ninety-second run at every one
+    // of the level's checkpoints.
+    let frozen_by_flag: Vec<String> = {
+        let w = world::world(&scripts.lua).ok_or_else(|| Error::Pragma("no world".into()))?;
+        w.iter()
+            .filter(|(_, g)| g.flag == 1.0 && !g.name.is_empty() && !g.created)
+            .map(|(_, g)| g.name.clone())
+            .collect()
+    };
+    if !frozen_by_flag.is_empty() {
+        let mut boot = boot_mut(&scripts.lua)?;
+        boot.stasis.extend(frozen_by_flag);
+    }
     for name in fresh {
         {
             let mut w =
@@ -3000,6 +3020,37 @@ impl Ticking {
         self.fired.values().fold((0, 0), |(f, s), (a, b)| (f + a, s + b))
     }
 }
+/// Is this gob frozen — itself, or by something it hangs off?
+///
+/// **Stasis is inherited.** A scene graph's trailing flag is 1 for an object
+/// that starts frozen, and level 1 registers `kurtgame` that way with
+/// **fifteen children at flag 0** hanging off it. Freezing only the parent
+/// left `ktgame_kurt.OnUpdate` running from the moment the level loaded, and
+/// it reads `kurtgame.left`, which `Level.StartMinigame` has not written
+/// yet: `level1.lua:1811, attempt to compare number with nil`, **2700 times
+/// in a ninety-second run, at every one of level 1's checkpoints**. That is
+/// six per cent of every handler call the level makes.
+///
+/// The rule is the tree's, not a special case. `mdkDestroyRoom` already
+/// destroys a room *and everything parented to it*, because a room's
+/// contents are its children; the update sweep walks the same tree, and
+/// 0x46d505 skips a frozen object's **whole** update.
+fn frozen(w: &crate::game::world::World,
+          stasis: &std::collections::BTreeSet<String>, id: crate::game::world::Id) -> bool {
+    let mut at = Some(id);
+    // a graph that pointed at itself would otherwise hang the tick, and the
+    // scene graphs are data
+    for _ in 0..64 {
+        let Some(i) = at else { return false };
+        let Some(g) = w.get(i) else { return false };
+        if !g.name.is_empty() && stasis.contains(&g.name) {
+            return true;
+        }
+        at = g.parent;
+    }
+    false
+}
+
 
 /// One tick of the driver, with the player at `at`.
 ///
@@ -3157,8 +3208,8 @@ pub fn tick_touching(
             .ok_or_else(|| Error::Pragma("no world".into()))?;
         let mut names: Vec<String> = w
             .iter()
+            .filter(|(id, _)| !frozen(&w, &boot.stasis, *id))
             .map(|(_, g)| g.name.clone())
-            .filter(|n| !boot.stasis.contains(n))
             .collect();
         names.sort();
         names.dedup();
@@ -3229,7 +3280,8 @@ pub fn tick_touching(
         };
         boot.gait
             .iter()
-            .filter(|(name, _)| !boot.stasis.contains(*name) && !boot.jumps.contains_key(*name))
+            .filter(|(name, _)| !boot.jumps.contains_key(*name))
+            .filter(|(name, _)| w.find(name).is_none_or(|id| !frozen(&w, &boot.stasis, id)))
             .filter_map(|(name, &gait)| {
                 let id = w.find(name)?;
                 let g = w.get(id)?;
@@ -3334,7 +3386,8 @@ pub fn tick_touching(
         };
         boot.gait
             .iter()
-            .filter(|(name, _)| !boot.stasis.contains(*name) && !boot.jumps.contains_key(*name))
+            .filter(|(name, _)| !boot.jumps.contains_key(*name))
+            .filter(|(name, _)| w.find(name).is_none_or(|id| !frozen(&w, &boot.stasis, id)))
             .filter_map(|(name, &gait)| {
                 let g = w.get(w.find(name)?)?;
                 let want = crate::game::world::gait_animation(g.kind, gait, g.hitpoints)?;
@@ -3539,7 +3592,15 @@ pub fn tick_touching(
     // Without this, level 9 walked off the end of a task list 897 times.
     let running: Vec<String> = {
         let boot = boot_ref(&scripts.lua)?;
-        boot.scripted.iter().filter(|n| !boot.stasis.contains(*n)).cloned().collect()
+        let w = crate::game::world::world(&scripts.lua);
+        boot.scripted
+            .iter()
+            .filter(|n| match &w {
+                Some(w) => w.find(n).is_none_or(|id| !frozen(w, &boot.stasis, id)),
+                None => !boot.stasis.contains(*n),
+            })
+            .cloned()
+            .collect()
     };
     if !running.is_empty() {
         if let Ok(update) = globals.get::<mlua::Function>("ScriptUpdate") {
@@ -3843,6 +3904,47 @@ mod tests {
         let w = world::world(&scripts.lua).unwrap();
         let id = w.find("h_key421").expect("the key made a bullet");
         assert_eq!(w.get(id).unwrap().kind, 421.0);
+    }
+
+    /// The scene graph's trailing flag freezes an object, and **its children
+    /// with it**. Level 1 is the case: `kurtgame` carries a 1 and fifteen
+    /// objects hang off it at 0, and one of them reads state that only the
+    /// minigame's own start writes.
+    #[test]
+    fn a_frozen_parent_freezes_what_hangs_off_it() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('held', OBJ_SCENERY, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 1)\n\
+                 mdkRegisterObject('kid', OBJ_SCENERY, scene, held, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkRegisterObject('free', OBJ_SCENERY, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 ticks = {held = 0, kid = 0, free = 0}\n\
+                 held.OnUpdate = function(g) ticks.held = ticks.held + 1 end\n\
+                 kid.OnUpdate  = function(g) ticks.kid  = ticks.kid  + 1 end\n\
+                 free.OnUpdate = function(g) ticks.free = ticks.free + 1 end",
+            )
+            .exec()
+            .unwrap();
+        create(&scripts).unwrap();
+        let rooms = Visibility::default();
+        let mut state = Ticking::default();
+        for _ in 0..5 {
+            tick(&scripts, &rooms, [0.0; 3], 0.0, 1.0 / 30.0, &mut state).unwrap();
+        }
+        let ticks: mlua::Table = scripts.lua.globals().get("ticks").unwrap();
+        assert_eq!(ticks.get::<i64>("free").unwrap(), 5, "nothing holds it");
+        assert_eq!(ticks.get::<i64>("held").unwrap(), 0, "the flag froze it");
+        assert_eq!(ticks.get::<i64>("kid").unwrap(), 0, "and its child with it");
+        // and thawing the parent thaws the subtree
+        scripts.lua.load("omGobExitStasis(held)").exec().unwrap();
+        tick(&scripts, &rooms, [0.0; 3], 0.0, 1.0 / 30.0, &mut state).unwrap();
+        let ticks: mlua::Table = scripts.lua.globals().get("ticks").unwrap();
+        assert_eq!(ticks.get::<i64>("kid").unwrap(), 1, "the child came back too");
     }
 
     /// The enemy AI, in the three states that are built: a doganboy with

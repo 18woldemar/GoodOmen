@@ -166,8 +166,16 @@ ENGINE = [
       # the old frame and he in the new one -- they were walking sideways
       # into him. With both in the game's frame, two of the four engage and
       # neither reaches him.
+    # **The trailing flag starts an object frozen, and stasis is inherited.**
+    # Both landed together and both cut what a run ticks: 42 objects in stasis
+    # over the ten levels became 373, and the handler counts fall with them.
+    # That is the game's own arrangement -- a level holds its encounters
+    # frozen and a trigger thaws them -- and this driver reaches few of those
+    # triggers, so a run exercises less than it did and every call it makes
+    # runs to the end. All ten levels are 100% for the first time; four of
+    # them used to fail 900 times a run on a minigame's own state.
       "--run", "1", "5", "45", "--expect-rooms", "1",
-      "--expect-events", "21600", "--expect-survived", "20250",
+      "--expect-events", "20250", "--expect-survived", "20250",
       "--expect-shot-at", "0", "--expect-killed", "0",
       "--expect-touched", "1"], None),
     ("a run reaches a spawner and the enemies arrive with hitpoints",
@@ -189,10 +197,10 @@ ENGINE = [
       # `l7r2_spn1_spawn`, which spawns **inside** `c9` -- so what this pins
       # is the escape rule, not the refusal. Nothing in ten levels walks into
       # a wall in the first thirty seconds.
-      "--expect-walled", "8989", "--expect-buried", "1106",
-      "--expect-keys", "8", "--expect-fighting", "17",
-      "--expect-moves", "9622",
-      "--expect-events", "22504", "--expect-survived", "22504"], None),
+      "--expect-walled", "6410", "--expect-buried", "1383",
+      "--expect-keys", "13", "--expect-fighting", "12",
+      "--expect-moves", "7993",
+      "--expect-events", "18124", "--expect-survived", "18124"], None),
     # and the driver that reaches more than the first room. Held forwards
     # jams on the first corner -- level 6 spends 1162 of 1200 frames against a
     # wall -- so `--roam` follows walls and treats a hole like a wall. Level 2
@@ -202,7 +210,7 @@ ENGINE = [
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--run", "2", "1", "120", "--roam", "--expect-rooms", "25",
-      "--expect-events", "54006", "--expect-survived", "50406"], None),
+      "--expect-events", "46806", "--expect-survived", "46806"], None),
     # level 9 is where the walkers actually walk. Three of them cover 425
     # units in thirty seconds without the player doing anything -- their
     # scripts start at level load, which is why every checkpoint gives the
@@ -217,7 +225,7 @@ ENGINE = [
       # walking across the geometry rather than along it.
       "--run", "9", "1", "30", "--expect-walkers", "18",
       "--expect-walled", "8987", "--expect-buried", "0", "--expect-keys", "3",
-      "--expect-events", "46956", "--expect-survived", "46056"], None),
+      "--expect-events", "45156", "--expect-survived", "45156"], None),
     # level 10's zizzy turrets shoot: nine bullets in thirty seconds, each one
     # carrying its damage, damage type, lifetime and speed out of the shot
     # table at 0x497388 rather than out of the call.
@@ -225,7 +233,7 @@ ENGINE = [
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--run", "10", "1", "30", "--expect-shots", "9",
-      "--expect-events", "22553", "--expect-survived", "22553"], None),
+      "--expect-events", "2751", "--expect-survived", "2751"], None),
     # and a shot reaches the player. `--hunt` steers the driver at the
     # nearest thing with hitpoints instead of holding forwards, which is what
     # it takes to get inside a turret's range at all: level 10's zizzy
@@ -272,8 +280,8 @@ ENGINE = [
       # frames against it. That is the driver's synthetic input being wrong
       # about the level, not the body -- the demo, which is the game's own
       # input, walks 338 units through the same controller.
-      "--run", "6", "1", "40", "--expect-playing", "14",
-      "--expect-moves", "1488", "--expect-touched", "1"], None),
+      "--run", "6", "1", "40", "--expect-playing", "6",
+      "--expect-moves", "845", "--expect-touched", "1"], None),
     ("the room graph culls what the engine draws",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
