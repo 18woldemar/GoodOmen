@@ -236,8 +236,8 @@ fn main() {
     // non-zero base off zero gets checked: the table has no record small
     // enough to reach it.
     if args.iter().any(|a| a == "--items") {
-        for (kind, model, string) in goodomen::game::world::ITEM {
-            println!("{} {model} {string}", kind as i64);
+        for (kind, model, string, interval, give) in goodomen::game::world::ITEM {
+            println!("{} {model} {string} {interval} {give}", kind as i64);
         }
         return;
     }
@@ -1237,19 +1237,21 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
                     body.yaw += TURN;
                     jammed = SHAKE;
                 }
-                // and it shoots. The hitscan is the original's — 100 units,
-                // 2 damage, `DAMAGE_GOODGUY`, through the collision world —
-                // but **once a second is the harness's**, because the weapon's
-                // own rate is a column of the item table that is not read.
-                if step % 30 == 0 {
-                    if let Some(name) = scripts
-                        .lua
-                        .app_data_ref::<api::Boot>()
-                        .and_then(|b| b.player.clone())
+                // and it shoots, **at the weapon's own rate**: the item
+                // table's +0x2c, which `mdkKurt.c` holds against the clock at
+                // 0x419eee. The magnum's 0.2 replaces the once a second the
+                // harness used to guess at. Holding the trigger is the
+                // harness's; the interval is not.
+                if let Some(name) = scripts
+                    .lua
+                    .app_data_ref::<api::Boot>()
+                    .and_then(|b| b.player.clone())
+                {
+                    let now = step as f64 * dt;
+                    if api::may_fire(&scripts.lua, &name, world::STARTING_GUN, now)
+                        && api::hitscan(&scripts.lua, &name, 0).is_some()
                     {
-                        if api::hitscan(&scripts.lua, &name, 0).is_some() {
-                            shot_at += 1;
-                        }
+                        shot_at += 1;
                     }
                 }
             }
@@ -1721,10 +1723,19 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                             .app_data_ref::<goodomen::game::api::Boot>()
                             .and_then(|b| b.player.clone())
                         {
-                            if let Some(hit) =
-                                goodomen::game::api::hitscan(&level_scripts.lua, &name, 0)
-                            {
-                                shot_at.insert(hit);
+                            // and it waits the weapon's own interval, which
+                            // for the magnum is 0.2 seconds
+                            if goodomen::game::api::may_fire(
+                                &level_scripts.lua,
+                                &name,
+                                goodomen::game::world::STARTING_GUN,
+                                ticking.clock,
+                            ) {
+                                if let Some(hit) =
+                                    goodomen::game::api::hitscan(&level_scripts.lua, &name, 0)
+                                {
+                                    shot_at.insert(hit);
+                                }
                             }
                         }
                     }

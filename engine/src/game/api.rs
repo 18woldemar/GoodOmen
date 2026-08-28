@@ -309,6 +309,9 @@ pub struct Boot {
     /// Objects frozen until the player arrives — a level holds its encounters
     /// this way, and a boot of all ten puts hundreds there.
     pub stasis: BTreeSet<String>,
+    /// When each shooter last fired, in seconds of the run's own clock.
+    /// See [`may_fire`].
+    pub last_shot: BTreeMap<String, f64>,
     /// Doors a script has locked shut. See [`prox_doors`].
     pub locked: BTreeSet<String>,
     /// Blowers a script has switched off. A blower arrives **on** — the
@@ -2704,6 +2707,29 @@ pub fn prox_doors(lua: &Lua, player: [f64; 3]) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+/// **May this shooter fire yet**, and if so, remember that it did.
+///
+/// `mdkKurt.c` at 0x419eee holds the clock against the item table's own
+/// interval — see [`crate::game::world::fire_interval`] for the listing —
+/// and refuses the shot when not enough of it has passed. An interval of
+/// zero, which is what the uzi and the gatling gun carry, lets every frame
+/// through.
+///
+/// The original keeps the timestamp in `kurt + 0x90` and the interval is
+/// per **weapon**, so switching guns does not reset it. Here it is per
+/// shooter, which is the same thing while nothing carries two guns.
+pub fn may_fire(lua: &Lua, shooter: &str, item: f64, now: f64) -> bool {
+    let Some(interval) = crate::game::world::fire_interval(item) else { return true };
+    let Ok(mut boot) = boot_mut(lua) else { return true };
+    if let Some(&last) = boot.last_shot.get(shooter) {
+        if now - last <= interval {
+            return false;
+        }
+    }
+    boot.last_shot.insert(shooter.to_string(), now);
+    true
 }
 
 /// **What the blowers do to the player**, as an acceleration to add this

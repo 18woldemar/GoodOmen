@@ -287,16 +287,20 @@ ENGINE = [
       "--expect-hits", "20", "--expect-health", "0", "--expect-rooms", "6",
       "--expect-events", "29206", "--expect-survived", "29206"], None),
     # and the loop closes: the player walks at an enemy, shoots it with the
-    # hitscan the original uses, and it dies. Two minutes of hunting on level
-    # 8 is 77 shots and two kills.
+    # hitscan the original uses, and it dies.
     # and what it kills falls over: the walker's own OnDamage (0x430a60) plays
     # ANIM_DIE at 0x430be2, stops the walker and switches its collision body
-    # off. Both of level 8's dead coneheads finish on animation 17.
+    # off. Level 8's dead coneheads finish on animation 17.
+    # 88 shots and 2 kills became **361 and 12** when the magnum started
+    # firing at its own rate: the item table's +0x2c is 0.2 seconds and the
+    # driver had been guessing at one second. Five times the shots is five
+    # times the damage into the same encounter, so six times the kills is the
+    # encounter finally being winnable rather than the driver being luckier.
     ("the player kills something",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
-      "--run", "8", "1", "120", "--hunt", "--expect-shot-at", "88",
-      "--expect-killed", "2"], None),
+      "--run", "8", "1", "120", "--hunt", "--expect-shot-at", "361",
+      "--expect-killed", "12"], None),
     ("walking drives the player's own animation, and reaches the scripts",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",

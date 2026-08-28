@@ -392,61 +392,99 @@ pub fn bullet(kind: f64) -> Option<(&'static str, i16, i16, f64, f64, f64, i32)>
 /// and 7 "+50 Health" for the ham. A column that lands on seven sensible
 /// names in a row is the column.
 ///
-/// The rest of the record is not kept here because it is not read yet: +0x1c
-/// and +0x20 look like a category and an owner, +0x2c is a float that reads
-/// like a fire interval (0.2 magnum, 0.6 shotgun, 1.5 guided rockets) and
-/// +0x30 an int that reads like a magazine (50, 200, 15). Guesses, so out.
-pub const ITEM: [(f64, &str, i32); 49] = [
-    (300.0, "magnum", 18),
-    (301.0, "uzi", 21),
-    (304.0, "magnum", -1),
-    (305.0, "gatgun", 16),
-    (306.0, "shotgun", 20),
-    (307.0, "lasergatgun", 567),
-    (309.0, "guidedrocket", 17),
-    (311.0, "doublea", 23),
-    (312.0, "carbattery", 22),
-    (318.0, "jetpack", 24),
-    (352.0, "jetpackatm", 212),
-    (313.0, "apple", 2),
-    (314.0, "ham", 7),
-    (316.0, "blackhole", 3),
-    (317.0, "grenade", 6),
-    (319.0, "decoygrenade", 5),
-    (320.0, "cloak", 4),
-    (347.0, "snipershield", 14),
-    (321.0, "sniperbullet", 189),
-    (322.0, "snipergrenade", 12),
-    (323.0, "sniperhoming", 11),
-    (325.0, "snipermortar", 10),
-    (326.0, "sniperbounce", 13),
-    (327.0, "lighter", 33),
-    (328.0, "loaf", 34),
-    (329.0, "toaster", 41),
-    (330.0, "booze", 25),
-    (332.0, "ducttape", 27),
-    (333.0, "fishbowl", 30),
-    (336.0, "plutonium", 37),
-    (340.0, "magnet", 35),
-    (341.0, "pop", 38),
-    (343.0, "leafer", 42),
-    (344.0, "atomictoaster", 43),
-    (345.0, "moltov", 44),
-    (346.0, "towels", 45),
-    (349.0, "ladder", 174),
-    (351.0, "pipes", 178),
-    (350.0, "cord", 177),
-    (353.0, "dimdes", 213),
-    (354.0, "kurtcoord", 214),
-    (355.0, "posdoo", 215),
-    (356.0, "schaingun", 225),
-    (357.0, "fballgun", 226),
-    (358.0, "toast", 227),
-    (359.0, "handdryer", 239),
-    (360.0, "loafbaguette", 324),
-    (361.0, "loafpumper", 374),
-    (362.0, "fishbowle", 29),
+/// **+0x2c is the fire interval and +0x30 is what a pickup gives you**, and
+/// both are readings now rather than the guesses that stood here. The
+/// interval is compared against the clock in `mdkKurt.c` at 0x419eee:
+///
+/// ```text
+/// 0x419ef3  fld   [kurt + 0x90]     ; when he last fired
+/// 0x419ef9  fsubr [0x4bcdf0]        ; the clock, minus it
+/// 0x419f04  fcom  0.0
+/// 0x419f11  fadd  [0x48f7dc]        ; 86400 -- a day, so the clock is a
+///                                   ; time of day and this is the wrap
+/// 0x419f17  fcomp [record + 0x2c]
+/// 0x419f1f  jne                     ; not yet: no shot this frame
+/// ```
+///
+/// A duration compared against `now - last`, with a day's worth of seconds
+/// for the wrap, is a fire interval and cannot be much else. `mdkMax.c`
+/// caches the same field into `max + 0x10c` at 0x4242b3. The column reads
+/// 0.2 for the magnum, 0.6 for the shotgun, 1.5 for guided rockets, 0.5 to
+/// 1.0 for the five sniper ammunitions — and **0 for the uzi and the gatling
+/// gun**, which are the two guns that fire as fast as you can hold the
+/// button, and 0 for every one of the 34 records that is not a weapon.
+///
+/// +0x30 is read at 0x40b3b5, where a **negative** value becomes -1 and the
+/// result is handed to the inventory as a count. So it is how many the pickup
+/// gives: 200 for the three fast guns, 50 for the magnum and shotgun, 15
+/// rockets, 5 grenades, 1 for the single-use junk, and -1 — unlimited — for
+/// `sniperbullet` and `loaf`.
+///
+/// +0x1c and +0x20 are still out: 1/2/3/10 and 0/1/2/3, which look like a
+/// category and an owner and are read by nothing this has found.
+pub const ITEM: [(f64, &str, i32, f64, i32); 49] = [
+    (300.0, "magnum", 18, 0.2, 50),
+    (301.0, "uzi", 21, 0.0, 200),
+    (304.0, "magnum", -1, 0.2, 0),
+    (305.0, "gatgun", 16, 0.0, 200),
+    (306.0, "shotgun", 20, 0.6, 50),
+    (307.0, "lasergatgun", 567, 0.2, 200),
+    (309.0, "guidedrocket", 17, 1.5, 15),
+    (311.0, "doublea", 23, 0.0, 1),
+    (312.0, "carbattery", 22, 0.0, 1),
+    (318.0, "jetpack", 24, 0.0, 1),
+    (352.0, "jetpackatm", 212, 0.0, 1),
+    (313.0, "apple", 2, 0.0, 1),
+    (314.0, "ham", 7, 0.0, 1),
+    (316.0, "blackhole", 3, 0.0, 1),
+    (317.0, "grenade", 6, 0.0, 5),
+    (319.0, "decoygrenade", 5, 0.0, 1),
+    (320.0, "cloak", 4, 0.0, 1),
+    (347.0, "snipershield", 14, 0.5, 1),
+    (321.0, "sniperbullet", 189, 0.5, -1),
+    (322.0, "snipergrenade", 12, 1.0, 5),
+    (323.0, "sniperhoming", 11, 0.5, 5),
+    (325.0, "snipermortar", 10, 1.0, 5),
+    (326.0, "sniperbounce", 13, 0.5, 5),
+    (327.0, "lighter", 33, 0.0, 1),
+    (328.0, "loaf", 34, 0.0, -1),
+    (329.0, "toaster", 41, 0.0, 1),
+    (330.0, "booze", 25, 0.0, 1),
+    (332.0, "ducttape", 27, 0.0, 1),
+    (333.0, "fishbowl", 30, 0.0, 1),
+    (336.0, "plutonium", 37, 0.0, 1),
+    (340.0, "magnet", 35, 0.0, 1),
+    (341.0, "pop", 38, 0.0, 1),
+    (343.0, "leafer", 42, 0.0, 1),
+    (344.0, "atomictoaster", 43, 0.0, 1),
+    (345.0, "moltov", 44, 0.0, 1),
+    (346.0, "towels", 45, 0.0, 1),
+    (349.0, "ladder", 174, 0.0, 1),
+    (351.0, "pipes", 178, 0.0, 1),
+    (350.0, "cord", 177, 0.0, 1),
+    (353.0, "dimdes", 213, 0.0, 1),
+    (354.0, "kurtcoord", 214, 0.0, 1),
+    (355.0, "posdoo", 215, 0.0, 1),
+    (356.0, "schaingun", 225, 0.0, 1),
+    (357.0, "fballgun", 226, 0.0, 1),
+    (358.0, "toast", 227, 0.0, 1),
+    (359.0, "handdryer", 239, 0.0, 1),
+    (360.0, "loafbaguette", 324, 0.0, 5),
+    (361.0, "loafpumper", 374, 0.0, 3),
+    (362.0, "fishbowle", 29, 0.0, 1),
 ];
+
+/// The item Kurt starts holding, and the one the harness fires. **Ours, not
+/// the original's**: there is no inventory here yet, so a driver that shoots
+/// has to name a weapon, and the magnum is what he begins the game with.
+pub const STARTING_GUN: f64 = 300.0;
+
+/// **How long a weapon waits between shots**, out of the item table's +0x2c —
+/// and zero for the uzi, the gatling gun and everything that is not a
+/// weapon, which is the table saying "as fast as you can ask".
+pub fn fire_interval(kind: f64) -> Option<f64> {
+    ITEM.iter().find(|(k, ..)| *k == kind).map(|(_, _, _, t, _)| *t)
+}
 
 /// The model a type wears, if one of the three tables names it — and they
 /// name 137 types between them, where guessing from the `OBJ_*` name covers
@@ -454,7 +492,7 @@ pub const ITEM: [(f64, &str, i32); 49] = [
 pub fn table_model(kind: f64) -> Option<&'static str> {
     ITEM.iter()
         .find(|(k, ..)| *k == kind)
-        .map(|(_, m, _)| *m)
+        .map(|(_, m, ..)| *m)
         .or_else(|| BULLET.iter().find(|(k, ..)| *k == kind).map(|(_, m, ..)| *m))
         .or_else(|| BASE_HITPOINTS.iter().find(|(k, ..)| *k == kind).map(|(_, m, _)| *m))
 }

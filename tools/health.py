@@ -192,6 +192,16 @@ ITEMS = 0x0049F2C0
 ITEM_STRIDE = 0x34
 
 
+def _f32(v: float) -> str:
+    """A float the way Rust prints it, so the two tables compare as text.
+
+    Rust drops the fraction on a whole number -- `1.0` prints as `1` -- and
+    the table is a float32 widened, so it is rounded to where the two agree.
+    """
+    text = repr(round(v, 4))
+    return text[:-2] if text.endswith(".0") else text
+
+
 def items(args) -> int:
     """Compare the engine's item table against the binary's."""
     secs = _sections(args.exe)
@@ -202,12 +212,17 @@ def items(args) -> int:
         key = struct.unpack_from("<I", r, 0)[0]
         if not 100 <= key <= 999:
             break
+        # +0x2c the fire interval, +0x30 what a pickup gives -- both read by
+        # the original (0x419eee compares the first against the clock,
+        # 0x40b3b5 hands the second to the inventory), so both are compared
         want.append([str(key), r[4:0x14].split(b"\0")[0].decode("latin1"),
-                     str(struct.unpack_from("<i", r, 0x14)[0])])
+                     str(struct.unpack_from("<i", r, 0x14)[0]),
+                     _f32(struct.unpack_from("<f", r, 0x2c)[0]),
+                     str(struct.unpack_from("<i", r, 0x30)[0])])
         i += 1
 
     if not args.engine:
-        print("type model string")
+        print("type model string interval give")
         for row in want:
             print(" ".join(row))
         return 0
