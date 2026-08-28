@@ -206,8 +206,10 @@ impl Jump {
     pub fn at(&self, t: f64) -> [f64; 3] {
         let t = t.min(self.arc.time);
         [
-            self.from[0] + self.arc.heading.cos() * self.arc.speed * t,
-            self.from[1] + self.arc.heading.sin() * self.arc.speed * t,
+            self.from[0] + crate::game::body::facing(self.arc.heading).0[0]
+                * self.arc.speed * t,
+            self.from[1] + crate::game::body::facing(self.arc.heading).0[1]
+                * self.arc.speed * t,
             self.from[2] + self.arc.rise * t - 0.5 * crate::game::body::GRAVITY * t * t,
         ]
     }
@@ -243,7 +245,7 @@ pub fn launch(from: [f64; 3], to: [f64; 3], apex: f64) -> Launch {
     Launch {
         rise: (2.0 * g * apex).sqrt(),
         speed: if time > 0.0 { dist / time } else { 0.0 },
-        heading: d[1].atan2(d[0]),
+        heading: crate::game::body::bearing(d[0], d[1]),
         time,
     }
 }
@@ -917,7 +919,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                     p
                 };
                 let Some((at, yaw)) = stance(lua, &who) else { return Ok(0.0) };
-                let heading = (to[1] - at[1]).atan2(to[0] - at[0]);
+                let heading = crate::game::body::bearing(to[0] - at[0], to[1] - at[1]);
                 boot_mut(lua)?.heading.insert(who, heading);
                 Ok(if facing(yaw, heading) { 1.0 } else { 0.0 })
             })?,
@@ -990,7 +992,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 if dist < radius {
                     return Ok(1.0);
                 }
-                let heading = d[1].atan2(d[0]);
+                let heading = crate::game::body::bearing(d[0], d[1]);
                 let moving = !must_face || facing(yaw, heading);
                 let mut boot = boot_mut(lua)?;
                 boot.heading.insert(who.clone(), heading);
@@ -1079,7 +1081,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 Some(v) if lead => [0, 1, 2].map(|c| d[c] + v[c] * dist * LEAD),
                 _ => d,
             };
-            boot.heading.insert(who.clone(), d[1].atan2(d[0]));
+            boot.heading.insert(who.clone(), crate::game::body::bearing(d[0], d[1]));
             let cool = boot.cooldown.get(&who).copied().unwrap_or(0.0);
             // too close and off cooldown: give ground, still facing
             // **the burst**, states 4 and 0. State 4 loads `record[+0x00]`
@@ -1423,7 +1425,8 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                     return Ok(0.0);
                 }
                 // the cone, against the watcher's own facing
-                let mut off = to_target[1].atan2(to_target[0]) - facing;
+                let mut off =
+                    crate::game::body::bearing(to_target[0], to_target[1]) - facing;
                 while off > std::f64::consts::PI {
                     off -= std::f64::consts::TAU;
                 }
@@ -2547,7 +2550,10 @@ pub fn hitscan(lua: &Lua, shooter: &str, mode: i64) -> Option<String> {
             }
             let d = [g.position[0] - at[0], g.position[1] - at[1], g.position[2] - at[2]];
             let flat = (d[0] * d[0] + d[1] * d[1]).sqrt();
-            if flat > REACH || flat <= 0.0 || !facing_within(yaw, d[1].atan2(d[0]), CONE) {
+            if flat > REACH
+                || flat <= 0.0
+                || !facing_within(yaw, crate::game::body::bearing(d[0], d[1]), CONE)
+            {
                 continue;
             }
             let head = [g.position[0], g.position[1], g.position[2] + crate::game::body::EYE];
@@ -2598,7 +2604,8 @@ fn fire_key_object(lua: &Lua, who: &str, kind: f64) -> Result<(), Error> {
     let Some((_, filter, damage, life, speed, lead, flags)) = crate::game::world::bullet(kind) else {
         return Ok(()); // an effect or a prop, and the engine has nowhere to put it
     };
-    let mut direction = [yaw.cos(), yaw.sin(), 0.0];
+    let ahead = crate::game::body::facing(yaw).0;
+    let mut direction = [ahead[0], ahead[1], 0.0];
     if flags & crate::game::world::AT_PLAYER != 0 {
         let hero = lua
             .named_registry_value::<mlua::Table>("player")
@@ -3284,14 +3291,14 @@ pub fn tick_touching(
                 // the arena keeps a gob's feet and a body its head
                 body.position = [from[0], from[1], from[2] + tall];
                 body.yaw = yaw;
-                body.step(world, [yaw.cos(), yaw.sin()], false, speed, dt);
+                body.step(world, crate::game::body::facing(yaw).0, false, speed, dt);
                 let p = body.position;
                 [p[0], p[1], p[2] - tall]
             }
             // no level loaded: a test, and there is nothing to walk into
             None => [
-                from[0] + yaw.cos() * speed * dt,
-                from[1] + yaw.sin() * speed * dt,
+                from[0] + crate::game::body::facing(yaw).0[0] * speed * dt,
+                from[1] + crate::game::body::facing(yaw).0[1] * speed * dt,
                 from[2],
             ],
         };
@@ -3630,12 +3637,14 @@ mod tests {
             .load(
                 // the walker faces +x; one target is ahead of it, one is at
                 // right angles, one is eight degrees off -- inside the 9.7
-                "points.side = {x = 0, y = 10, z = 0, f = 0}\n\
+                // a yaw of 0 faces +y, so ahead is due +y and askew is
+                // eight degrees off it in x
+                "points.side = {x = 10, y = 0, z = 0, f = 0}\n\
                  mdkRegisterObject('w',     OBJ_NONE, scene, nil, -1, 0,0,0, \
                  1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
-                 mdkRegisterObject('ahead', OBJ_NONE, scene, nil, -1, 10,0,0, \
+                 mdkRegisterObject('ahead', OBJ_NONE, scene, nil, -1, 0,10,0, \
                  1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
-                 mdkRegisterObject('askew', OBJ_NONE, scene, nil, -1, 10,1.4,0, \
+                 mdkRegisterObject('askew', OBJ_NONE, scene, nil, -1, -1.4,10,0, \
                  1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
                  facing    = mdkWalkerHeadToGob(w, ahead)\n\
                  nearly    = mdkWalkerHeadToGob(w, askew)\n\
@@ -3649,7 +3658,7 @@ mod tests {
         assert_eq!(g.get::<f64>("sideways").unwrap(), 0.0, "a right angle is not");
         // and the last call left the want behind, pointing at the waypoint
         let want = scripts.lua.app_data_ref::<Boot>().unwrap().heading["w"];
-        assert!((want - std::f64::consts::FRAC_PI_2).abs() < 1e-9, "due +y");
+        assert!((want + std::f64::consts::FRAC_PI_2).abs() < 1e-9, "due +x");
     }
 
     /// The two walking orders differ in three readable ways, and this checks
@@ -3663,9 +3672,9 @@ mod tests {
         scripts
             .lua
             .load(
-                // the walker faces +x and stands at the origin; the waypoint
-                // is due +y, ten out and three up
-                "points.wp = {x = 0, y = 10, z = 3, f = 0}\n\
+                // the walker faces +y and stands at the origin; the waypoint
+                // is due +x, ten out and three up
+                "points.wp = {x = 10, y = 0, z = 3, f = 0}\n\
                  mdkRegisterObject('w', OBJ_NONE, scene, nil, -1, 0,0,0, \
                  1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
                  far    = mdkWalkerGotoPoint(w, 'wp', 1, 0, 0, 0)\n\
@@ -3678,10 +3687,10 @@ mod tests {
         assert_eq!(g.get::<f64>("direct").unwrap(), 0.0);
         {
             let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
-            // the direct call ran last and the walker still faces +x, a right
+            // the direct call ran last and the walker still faces +y, a right
             // angle off the waypoint, so it turns before it moves
             assert_eq!(boot.gait["w"], 0, "not facing yet");
-            assert!((boot.heading["w"] - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+            assert!((boot.heading["w"] + std::f64::consts::FRAC_PI_2).abs() < 1e-9);
         }
         // now put it square on the waypoint's x/y and ask again. The plain
         // goto is horizontal, so three units of height is arrival; the direct
@@ -3689,7 +3698,7 @@ mod tests {
         scripts
             .lua
             .load(
-                "mdkGobSetPositionXYZ(w, 0, 10, 0)\n\
+                "mdkGobSetPositionXYZ(w, 10, 0, 0)\n\
                  flat = mdkWalkerGotoPoint(w, 'wp', 1, 0, 0, 0)\n\
                  solid = mdkWalkerGotoPointDirectly(w, 'wp', 1, 2)",
             )
@@ -3710,8 +3719,8 @@ mod tests {
         scripts
             .lua
             .load(
-                // OBJ_GRUNT is 202, and it faces +x with the waypoint due -x
-                "points.wp = {x = -400, y = 0, z = 0, f = 0}\n\
+                // OBJ_GRUNT is 202, and it faces +y with the waypoint due -y
+                "points.wp = {x = 0, y = -400, z = 0, f = 0}\n\
                  mdkRegisterObject('g', 202, scene, nil, -1, 0,0,0, \
                  1,0,0,0, nil,0,0,0,0, nil, nil, 0)",
             )
@@ -3735,7 +3744,7 @@ mod tests {
             // the first tick is a half turn away from the waypoint, so it
             // must not already be closing on it
             if i == 0 {
-                turned_before_moving = Some(after[0] - before[0] > 0.0);
+                turned_before_moving = Some(after[1] - before[1] > 0.0);
             }
         }
         assert_eq!(
@@ -3747,7 +3756,7 @@ mod tests {
         // radians a second that starts it — a grunt's own two numbers
         assert!((45.0..60.0).contains(&travelled), "travelled {travelled}");
         let at = at_of(&scripts, "g");
-        assert!(at[0] < -40.0, "and it ends up toward the waypoint, at {at:?}");
+        assert!(at[1] < -40.0, "and it ends up toward the waypoint, at {at:?}");
     }
 
     /// A shot carries none of its own numbers: the call gives it a direction
@@ -3865,7 +3874,8 @@ mod tests {
             // forty out is past its near of ten, so the chooser is free to
             // send it in — what matters here is that it is **not** backing off
             assert_ne!(boot.gait["d"], 3, "forty out is not crowded");
-            assert!((boot.heading["d"] - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+            // a yaw of 0 is what faces due +y
+            assert!(boot.heading["d"].abs() < 1e-9);
         }
         // now stand on top of it. It is mid-burst, so it holds its ground
         // until the round's second is up — which is itself the original's
@@ -3905,8 +3915,8 @@ mod tests {
         scripts
             .lua
             .load(
-                // due +x, a hundred out, and the walker already faces it
-                "points.wp = {x = 100, y = 0, z = 0, f = 0}\n\
+                // due +y, a hundred out, and the walker already faces it
+                "points.wp = {x = 0, y = 100, z = 0, f = 0}\n\
                  mdkRegisterObject('d', 207, scene, nil, -1, 0,0,0, \
                  1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
                  mdkWalkerGotoPoint(d, 'wp', 0, 0, 0, 0)\n\
@@ -3921,7 +3931,7 @@ mod tests {
                 tick(scripts, &rooms, [0.0; 3], 0.0, 1.0 / 30.0, ticking).unwrap();
             }
             let w = world::world(&scripts.lua).unwrap();
-            w.get(w.find("d").unwrap()).unwrap().position[0]
+            w.get(w.find("d").unwrap()).unwrap().position[1]
         };
         let hale = walk(&scripts, &mut ticking);
         assert!((hale - 6.0).abs() < 1e-6, "a doganboy walks at six: {hale}");
@@ -3958,12 +3968,12 @@ mod tests {
         scripts
             .lua
             .load(
-                // the player faces +x; one conehead ahead, one behind, one
+                // the player faces +y; one conehead ahead, one behind, one
                 // beyond the hundred
                 "mdkRegisterObject('kurt', 100, scene, nil, -1, 0,0,0,                  1,0,0,0, nil,0,0,0,0, nil, nil, 0)
-                 mdkRegisterObject('ahead', 203, scene, nil, -1, 30,0,0,                  1,0,0,0, nil,0,0,0,0, nil, nil, 0)
-                 mdkRegisterObject('behind', 203, scene, nil, -1, -30,0,0,                  1,0,0,0, nil,0,0,0,0, nil, nil, 0)
-                 mdkRegisterObject('far', 203, scene, nil, -1, 300,0,0,                  1,0,0,0, nil,0,0,0,0, nil, nil, 0)
+                 mdkRegisterObject('ahead', 203, scene, nil, -1, 0,30,0,                  1,0,0,0, nil,0,0,0,0, nil, nil, 0)
+                 mdkRegisterObject('behind', 203, scene, nil, -1, 0,-30,0,                  1,0,0,0, nil,0,0,0,0, nil, nil, 0)
+                 mdkRegisterObject('far', 203, scene, nil, -1, 0,300,0,                  1,0,0,0, nil,0,0,0,0, nil, nil, 0)
                  mdkSetPlayModeGobs(0, kurt)",
             )
             .exec()
@@ -4135,8 +4145,8 @@ mod tests {
             .unwrap();
         let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
         assert_eq!(boot.gait["w"], 0);
-        // the goto had asked for +y; the stop replaced that with the gob's
-        // own facing, which is still +x
+        // the goto had asked elsewhere; the stop replaced that with the
+        // gob's own facing, which is a yaw of 0 -- due +y
         assert!(boot.heading["w"].abs() < 1e-9, "{}", boot.heading["w"]);
     }
 
@@ -4149,7 +4159,8 @@ mod tests {
         scripts
             .lua
             .load(
-                "points.ledge = {x = 0, y = 10, z = 4, f = 0}\n\
+                // due +x, so the walker really has to turn a quarter
+                "points.ledge = {x = 10, y = 0, z = 4, f = 0}\n\
                  mdkRegisterObject('w', OBJ_NONE, scene, nil, -1, 0,0,0, \
                  1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
                  went = mdkWalkerJumpToPoint(w, 'ledge', 10)",
@@ -4160,17 +4171,17 @@ mod tests {
         let jump = {
             let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
             assert!(
-                (boot.heading["w"] - std::f64::consts::FRAC_PI_2).abs() < 1e-9,
-                "the waypoint is due +y"
+                (boot.heading["w"] + std::f64::consts::FRAC_PI_2).abs() < 1e-9,
+                "the waypoint is due +x"
             );
             boot.jumps["w"]
         };
         let end = jump.at(jump.arc.time);
-        assert!((end[1] - 10.0).abs() < 1e-9 && (end[2] - 4.0).abs() < 1e-9, "{end:?}");
+        assert!((end[0] - 10.0).abs() < 1e-9 && (end[2] - 4.0).abs() < 1e-9, "{end:?}");
         // a quarter turn about Z, which is half of it in the quaternion
         let w = world::world(&scripts.lua).unwrap();
         let q = w.get(w.find("w").unwrap()).unwrap().rotation;
-        let half = std::f64::consts::FRAC_PI_4;
+        let half = -std::f64::consts::FRAC_PI_4;
         assert!(
             (q[0] - half.cos()).abs() < 1e-9 && (q[3] - half.sin()).abs() < 1e-9,
             "{q:?} is not a quarter turn"
@@ -4188,13 +4199,13 @@ mod tests {
         scripts
             .lua
             .load(
-                // the watcher faces +x (identity quaternion); one target is
+                // the watcher faces +y (identity quaternion); one target is
                 // straight ahead, one straight behind
                 "mdkRegisterObject('eye',    OBJ_NONE, scene, nil, -1, 0,0,0, \
                  1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
-                 mdkRegisterObject('ahead',  OBJ_NONE, scene, nil, -1, 10,0,0, \
+                 mdkRegisterObject('ahead',  OBJ_NONE, scene, nil, -1, 0,10,0, \
                  1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
-                 mdkRegisterObject('behind', OBJ_NONE, scene, nil, -1, -10,0,0, \
+                 mdkRegisterObject('behind', OBJ_NONE, scene, nil, -1, 0,-10,0, \
                  1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
                  -- PI is a global the game's own mdk2.lua defines, not an
                  -- engine constant, so the literals are spelled out -- and

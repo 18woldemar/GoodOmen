@@ -548,6 +548,22 @@ pub fn facing(yaw: f64) -> ([f64; 2], [f64; 2]) {
     ([-s, c], [c, s])
 }
 
+
+
+/// The yaw that faces along this direction — the inverse of [`facing`].
+///
+/// Every place that turns a delta into an angle and then compares it against
+/// a gob's own yaw, or writes it back as one, needs this and not
+/// `atan2(dy, dx)`. Mixing the two is a quarter turn, and it is the same
+/// quarter turn [`facing`] documents: a *bearing* is an angle in world x-y, a
+/// *yaw* is a rotation of a model whose forward is +Y, and they differ by
+/// ninety degrees. `mdkWalkerHeadToPoint` writes a yaw into `walker + 0x14`
+/// and the anim update compares the gob's own against it, so the engine's
+/// `heading` is a yaw too.
+pub fn bearing(dx: f64, dy: f64) -> f64 {
+    (-dx).atan2(dy)
+}
+
 /// A playable character's two speeds, smoothed toward what the table asks for.
 ///
 /// The original keeps them at `kurt + 0x0c` and `kurt + 0x10` and steps each
@@ -665,6 +681,26 @@ mod tests {
             assert!((r[0] - yaw.cos()).abs() < 1e-12 && (r[1] - yaw.sin()).abs() < 1e-12);
             assert!((f[0] * r[0] + f[1] * r[1]).abs() < 1e-12, "and they are square");
         }
+    }
+
+    /// `bearing` is `facing` run backwards, and that is the whole contract:
+    /// an angle taken off a delta and an angle taken off a quaternion have to
+    /// mean the same thing, or every comparison between them is a quarter
+    /// turn wrong.
+    #[test]
+    fn bearing_is_facing_run_backwards() {
+        for (dx, dy) in [(0.0, 1.0), (1.0, 0.0), (-1.0, 0.0), (0.0, -1.0),
+                         (3.0, 4.0), (-2.5, 0.75)] {
+            let yaw = bearing(dx, dy);
+            let (f, _) = facing(yaw);
+            let n = (dx * dx + dy * dy).sqrt();
+            assert!((f[0] - dx / n).abs() < 1e-12 && (f[1] - dy / n).abs() < 1e-12,
+                    "bearing({dx}, {dy}) = {yaw} faces {f:?}");
+        }
+        // due +y is a yaw of zero, which is the identity quaternion every
+        // scene graph writes when it does not care which way a thing looks
+        assert!(bearing(0.0, 1.0).abs() < 1e-12);
+        assert!((bearing(1.0, 0.0) + std::f64::consts::FRAC_PI_2).abs() < 1e-12);
     }
 
     /// The fan is a projection, not a swing: turning further gives up more of

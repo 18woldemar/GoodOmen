@@ -161,16 +161,14 @@ ENGINE = [
     ("the engine runs a level on the recorded demo, trigger and all",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
-      # With the character's frame turned the quarter the capture measured,
-      # the demo walks Kurt into the fight it was recorded in -- l1_r5 is an
-      # arena and `demo1_5` is a fight in it. Four walkers engage, twenty of
-      # their twenty-one shots land, and he is dead at 40s of the 45. That
-      # is our AI being harsher than the original's, not the replay going
-      # wrong: he kills one of them on the way, and the run is now a fight
-      # rather than a walk past an empty room.
+      # The demo now runs its full 45 seconds with Kurt on all 100
+      # hitpoints. He was dying at 40s while the walkers still steered in
+      # the old frame and he in the new one -- they were walking sideways
+      # into him. With both in the game's frame, two of the four engage and
+      # neither reaches him.
       "--run", "1", "5", "45", "--expect-rooms", "1",
-      "--expect-events", "18364", "--expect-survived", "17166",
-      "--expect-shot-at", "13", "--expect-killed", "1",
+      "--expect-events", "21600", "--expect-survived", "20250",
+      "--expect-shot-at", "0", "--expect-killed", "0",
       "--expect-touched", "1"], None),
     ("a run reaches a spawner and the enemies arrive with hitpoints",
      ["cargo", "run", "--quiet", "--release",
@@ -191,9 +189,9 @@ ENGINE = [
       # `l7r2_spn1_spawn`, which spawns **inside** `c9` -- so what this pins
       # is the escape rule, not the refusal. Nothing in ten levels walks into
       # a wall in the first thirty seconds.
-      "--expect-walled", "9187", "--expect-buried", "1093",
-      "--expect-keys", "10", "--expect-fighting", "17",
-      "--expect-moves", "10403",
+      "--expect-walled", "9082", "--expect-buried", "1139",
+      "--expect-keys", "8", "--expect-fighting", "17",
+      "--expect-moves", "9993",
       "--expect-events", "22504", "--expect-survived", "22504"], None),
     # and the driver that reaches more than the first room. Held forwards
     # jams on the first corner -- level 6 spends 1162 of 1200 frames against a
@@ -203,7 +201,7 @@ ENGINE = [
     ("a roaming driver walks a level instead of one room",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
-      "--run", "2", "1", "120", "--roam", "--expect-rooms", "23",
+      "--run", "2", "1", "120", "--roam", "--expect-rooms", "25",
       "--expect-events", "54006", "--expect-survived", "50406"], None),
     # level 9 is where the walkers actually walk. Three of them cover 425
     # units in thirty seconds without the player doing anything -- their
@@ -218,8 +216,8 @@ ENGINE = [
       # the world any more, which is the quarter turn again -- they were
       # walking across the geometry rather than along it.
       "--run", "9", "1", "30", "--expect-walkers", "18",
-      "--expect-walled", "9176", "--expect-buried", "0", "--expect-keys", "3",
-      "--expect-events", "46883", "--expect-survived", "45983"], None),
+      "--expect-walled", "8986", "--expect-buried", "0", "--expect-keys", "3",
+      "--expect-events", "46956", "--expect-survived", "46056"], None),
     # level 10's zizzy turrets shoot: nine bullets in thirty seconds, each one
     # carrying its damage, damage type, lifetime and speed out of the shot
     # table at 0x497388 rather than out of the call.
@@ -248,12 +246,13 @@ ENGINE = [
     ("an enemy shoots the player, and leads him",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
-      # and here too the driver now walks where the checkpoint points it,
-      # meets the enemies sooner, and is killed at 96s of the 120 -- so the
-      # run is shorter and every count with it.
-      "--run", "4", "1", "120", "--roam", "--expect-shots", "75",
+      # and here too the driver walks where the checkpoint points it, meets
+      # the enemies sooner, and is killed at 49s of the 120 -- so the run is
+      # shorter and every count with it. It reaches four rooms on the way,
+      # against the one it used to.
+      "--run", "4", "1", "120", "--roam", "--expect-shots", "40",
       "--expect-hits", "20", "--expect-health", "0",
-      "--expect-events", "57501", "--expect-survived", "57501"], None),
+      "--expect-events", "29204", "--expect-survived", "29204"], None),
     # and the loop closes: the player walks at an enemy, shoots it with the
     # hitscan the original uses, and it dies. Two minutes of hunting on level
     # 8 is 77 shots and two kills.
@@ -274,7 +273,7 @@ ENGINE = [
       # about the level, not the body -- the demo, which is the game's own
       # input, walks 338 units through the same controller.
       "--run", "6", "1", "40", "--expect-playing", "14",
-      "--expect-moves", "1465", "--expect-touched", "1"], None),
+      "--expect-moves", "1514", "--expect-touched", "1"], None),
     ("the room graph culls what the engine draws",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",

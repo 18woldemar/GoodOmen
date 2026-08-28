@@ -1155,7 +1155,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
             // checkpoints, exactly one enemy in the game ever reached its
             // attack task and it was always out of range.
             _ => {
-                let mut d = [body.yaw.cos(), body.yaw.sin()];
+                let mut d = goodomen::game::body::facing(body.yaw).0;
                 if hunt && jammed == 0 {
                     if let Some(w) = world::world(&scripts.lua) {
                         let me = body.position;
@@ -1185,7 +1185,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
                             if d2 > 4.0 {
                                 let len = d2.sqrt();
                                 d = [v[0] / len, v[1] / len];
-                                body.yaw = v[1].atan2(v[0]);
+                                body.yaw = goodomen::game::body::bearing(v[0], v[1]);
                             }
                         }
                     }
@@ -1214,7 +1214,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
                     if !ground {
                         body.yaw += TURN;
                         jammed = SHAKE;
-                        d = [body.yaw.cos(), body.yaw.sin()];
+                        d = goodomen::game::body::facing(body.yaw).0;
                     }
                 }
                 let met = body.hits;
@@ -1249,7 +1249,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
             .app_data_ref::<api::Boot>()
             .and_then(|b| b.player.clone())
         {
-            let (fx, fy) = (body.yaw.cos(), body.yaw.sin());
+            let ([fx, fy], [rx, ry]) = goodomen::game::body::facing(body.yaw);
             let moved = [
                 body.position[0] - was[0],
                 body.position[1] - was[1],
@@ -1257,7 +1257,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
             let _ = api::play_named(
                 &scripts,
                 &name,
-                api::walk_animation(moved[0] * fx + moved[1] * fy, moved[0] * -fy + moved[1] * fx),
+                api::walk_animation(moved[0] * fx + moved[1] * fy, moved[0] * rx + moved[1] * ry),
             );
         }
         // what the body is against this frame, by name, so `OnCollision`
@@ -1710,12 +1710,12 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 video.events.keyboard_state().pressed_scancodes().collect();
             let held = |s: Scancode| keys.contains(&s);
             let fast = held(Scancode::LShift);
-            let (fx, fy) = (yaw.cos(), yaw.sin());
+            let ([fx, fy], [rx, ry]) = goodomen::game::body::facing(yaw);
             let mut d = [0.0f64, 0.0];
             if held(Scancode::W) { d = [d[0] + fx, d[1] + fy]; }
             if held(Scancode::S) { d = [d[0] - fx, d[1] - fy]; }
-            if held(Scancode::D) { d = [d[0] - fy, d[1] + fx]; }
-            if held(Scancode::A) { d = [d[0] + fy, d[1] - fx]; }
+            if held(Scancode::D) { d = [d[0] + rx, d[1] + ry]; }
+            if held(Scancode::A) { d = [d[0] - rx, d[1] - ry]; }
             if walk {
                 // On foot the speed is the table's, so there is no run key:
                 // one row is all a playable character has. Shift still makes
@@ -1738,9 +1738,9 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                     .app_data_ref::<goodomen::game::api::Boot>()
                     .and_then(|b| b.player.clone())
                 {
-                    let (fx, fy) = (yaw.cos(), yaw.sin());
+                    let ([fx, fy], [rx, ry]) = goodomen::game::body::facing(yaw);
                     let forward = d[0] * fx + d[1] * fy;
-                    let right = d[0] * -fy + d[1] * fx;
+                    let right = d[0] * rx + d[1] * ry;
                     let _ = goodomen::game::api::play_named(
                         &level_scripts,
                         &player,
@@ -1895,9 +1895,10 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
             // not read yet.
             const BEHIND: f64 = 4.5;
             const ABOVE: f64 = 1.6;
+            let ahead2 = goodomen::game::body::facing(yaw).0;
             let look = [
-                (yaw.cos() * pitch.cos()) as f32,
-                (yaw.sin() * pitch.cos()) as f32,
+                (ahead2[0] * pitch.cos()) as f32,
+                (ahead2[1] * pitch.cos()) as f32,
                 pitch.sin() as f32,
             ];
             let from = if walk {
@@ -1967,8 +1968,8 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         const ABOVE: f64 = 1.6;
         (
             [
-                (eye[0] as f64 - yaw.cos() * BEHIND) as f32,
-                (eye[1] as f64 - yaw.sin() * BEHIND) as f32,
+                (eye[0] as f64 - goodomen::game::body::facing(yaw).0[0] * BEHIND) as f32,
+                (eye[1] as f64 - goodomen::game::body::facing(yaw).0[1] * BEHIND) as f32,
                 eye[2] + ABOVE as f32,
             ],
             yaw,
@@ -1980,8 +1981,8 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
     unsafe {
         let target = Offscreen::new(&video.gl, width, height)?;
         let ahead = [
-            eye[0] + yaw.cos() as f32,
-            eye[1] + yaw.sin() as f32,
+            eye[0] + goodomen::game::body::facing(yaw).0[0] as f32,
+            eye[1] + goodomen::game::body::facing(yaw).0[1] as f32,
             eye[2] + pitch.sin() as f32,
         ];
         let view = Mat4::look_at(eye, ahead, [0.0, 0.0, 1.0]);
@@ -2141,7 +2142,7 @@ fn level(
             let keys: std::collections::HashSet<Scancode> =
                 video.events.keyboard_state().pressed_scancodes().collect();
             let held = |s: Scancode| keys.contains(&s);
-            let (fx, fy) = (yaw.cos(), yaw.sin());
+            let ([fx, fy], [rx, ry]) = goodomen::game::body::facing(yaw);
             let mut d = [0.0f64, 0.0];
             if held(Scancode::W) || held(Scancode::Up) {
                 d = [d[0] + fx, d[1] + fy];
@@ -2150,10 +2151,10 @@ fn level(
                 d = [d[0] - fx, d[1] - fy];
             }
             if held(Scancode::D) {
-                d = [d[0] - fy, d[1] + fx];
+                d = [d[0] + rx, d[1] + ry];
             }
             if held(Scancode::A) {
-                d = [d[0] + fy, d[1] - fx];
+                d = [d[0] - rx, d[1] - ry];
             }
             let fast = held(Scancode::LShift) || held(Scancode::RShift);
 
@@ -2188,8 +2189,8 @@ fn level(
                 body.position[2] as f32,
             ];
             let ahead = [
-                from[0] + (yaw.cos() * pitch.cos()) as f32,
-                from[1] + (yaw.sin() * pitch.cos()) as f32,
+                from[0] + (goodomen::game::body::facing(yaw).0[0] * pitch.cos()) as f32,
+                from[1] + (goodomen::game::body::facing(yaw).0[1] * pitch.cos()) as f32,
                 from[2] + pitch.sin() as f32,
             ];
             let view = Mat4::look_at(from, ahead, [0.0, 0.0, 1.0]);
