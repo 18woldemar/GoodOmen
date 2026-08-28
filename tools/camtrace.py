@@ -250,6 +250,30 @@ def orbit(rows: list, at, feet: float, first: int, last: int) -> dict:
             "sideways": mid(sideways)}
 
 
+def replayed(rows: list, path: list, back: float = 4.0, pivot: float = 1.5168,
+             eye_height: float = 1.7) -> list[tuple[int, float]]:
+    """`[(frame, how far our replay is from the original)]`, frame by frame.
+
+    The chase camera has no spring: the eye sits `(feet + pivot) - back *
+    look` to a ten-thousandth of a unit, so **`eye + back * look` is the
+    original's own player position** on every frame the trace caught. The
+    trace is one world frame per demo tick -- its numbering has a single gap
+    and that gap falls after world frame 1348, which is the demo's length.
+
+    So this needs no alignment: `path[k]` against `rows[k]`, where `path` is
+    what `walksim.py --track` wrote. Being able to say *which frame* the
+    replay leaves the original, rather than how far apart they end up, is
+    what the rigid camera buys.
+    """
+    out = []
+    for k in range(min(len(rows), len(path))):
+        _, e, look = rows[k]
+        p = path[k]
+        theirs = (e[0] + look[0] * back, e[1] + look[1] * back)
+        out.append((k, math.dist(theirs, (p[0], p[1]))))
+    return out
+
+
 def turn_scale(rows: list, demo_frames: list) -> tuple[float, float, float]:
     """Radians of yaw per unit of recorded axis, and how well it fits.
 
@@ -370,6 +394,20 @@ def selftest() -> None:
                               l[0] * math.sin(a) + l[1] * math.cos(a), l[2])))
     assert abs(orbit(turned, at, feet, 0, 39)["sideways"]) > 1.5
 
+
+    # `replayed` on a camera built from a known walk: a body going due +y at
+    # half a unit a frame, the eye four back along a level look. A replay
+    # that matches it reads zero, and one that is a frame behind reads the
+    # frame's own step.
+    look = (0.0, 1.0, 0.0)
+    walk = [(0.0, i * 0.5, 0.0) for i in range(40)]
+    made = [(i, (p[0] - look[0] * 4.0, p[1] - look[1] * 4.0, p[2] - 1.7 + 1.5168), look)
+            for i, p in enumerate(walk)]
+    assert max(d for _, d in replayed(made, walk)) < 1e-9
+    late = [walk[0]] + walk[:-1]
+    apart = [d for _, d in replayed(made, late)][1:]
+    assert all(abs(d - 0.5) < 1e-9 for d in apart), apart[:4]
+
     print("camtrace: self-tests pass")
 
 
@@ -390,6 +428,9 @@ def main() -> int:
                     help="measure the chase camera off a turn on the spot: "
                          "where the player stands, the z of his feet, and the "
                          "frames the turn spans")
+    ap.add_argument("--against", type=Path, metavar="TRACK",
+                    help="a walksim.py --track file of the same demo: say "
+                         "which frame the replay leaves the original")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
 
@@ -401,6 +442,22 @@ def main() -> int:
     if not rows:
         print("no world frames in this dump", file=sys.stderr)
         return 1
+
+    if args.against:
+        path = [tuple(float(v) for v in line.split())
+                for line in args.against.read_text().splitlines() if line.strip()]
+        apart = replayed(rows, path)
+        left = next((k for k, d in apart if d > 0.01 and k > 5), None)
+        print(f"{args.against.name}: {len(path)} replayed frames against "
+              f"{len(rows)} captured")
+        print(f"  exact to a hundredth of a unit through frame "
+              f"{'all of them' if left is None else left - 1}")
+        for a, b in ((5, 200), (200, 400), (400, 600), (600, 900), (900, len(apart))):
+            seg = sorted(d for k, d in apart if a <= k < b)
+            if seg:
+                print(f"  frames {a:4d}..{b:4d}: median {seg[len(seg)//2]:8.4f}  "
+                      f"p90 {seg[int(len(seg)*0.9)]:8.4f}  max {seg[-1]:8.4f}")
+        return 0
 
     if args.orbit:
         at = [float(v) for v in args.orbit.split(",")]
