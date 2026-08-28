@@ -223,6 +223,19 @@ ENGINE = [
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--run", "1", "4", "90", "--roam", "--expect-doors", "8"], None),
+    # **The blowers blow.** `mdkBlower.c` 0x40312c is a cylinder -- an axial
+    # slab and a radial tube -- and 0x403250 puts a fixed acceleration of 40
+    # on the player along its axis while his speed along it is under the
+    # blower's own strength. Radius, length and strength are the scene
+    # graph's `payload[0..2]`, a slot nothing had read. Level 4 checkpoint 5
+    # is the one a roaming driver spends inside one: 1288 of its 1800 frames.
+    # The demo pin is the guard here -- `demo1_5` still travels its 71 units,
+    # so nothing in room 5 of level 1 pushes the replay off the original.
+    ("a roaming driver is lifted by the blowers it walks into",
+     ["cargo", "run", "--quiet", "--release",
+      "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
+      "--run", "4", "5", "60", "--roam", "--expect-blown", "1288",
+      "--expect-doors", "14"], None),
     # level 9 is where the walkers actually walk. Three of them cover 425
     # units in thirty seconds without the player doing anything -- their
     # scripts start at level load, which is why every checkpoint gives the

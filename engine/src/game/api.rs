@@ -311,6 +311,12 @@ pub struct Boot {
     pub stasis: BTreeSet<String>,
     /// Doors a script has locked shut. See [`prox_doors`].
     pub locked: BTreeSet<String>,
+    /// Blowers a script has switched off. A blower arrives **on** — the
+    /// constructor at 0x402c60 writes 1 — so this holds the exceptions.
+    pub blower_off: BTreeSet<String>,
+    /// Blowers whose length a script has changed from the scene graph's,
+    /// which is what `mdkBlowerSetLength` is for.
+    pub blower_length: BTreeMap<String, f64>,
     /// How many times a prox door has opened or shut. A run's own count of
     /// the doors it walked through.
     pub doors: usize,
@@ -1791,6 +1797,39 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         })?,
     )?;
     globals.set(
+        "mdkBlowerEnable",
+        // 0x402cc0: `block[0] = 1`, and the gob plays `ANIM_ENABLED`
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(name) = args.first().and_then(gob_name) else { return Ok(()) };
+            let mut boot = boot_mut(lua)?;
+            boot.blower_off.remove(&name);
+            boot.playing.insert(name, 61.0);
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "mdkBlowerDisable",
+        // 0x402d20: `block[0] = 0`, and the gob plays `ANIM_DISABLED`
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(name) = args.first().and_then(gob_name) else { return Ok(()) };
+            let mut boot = boot_mut(lua)?;
+            boot.blower_off.insert(name.clone());
+            boot.playing.insert(name, 62.0);
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "mdkBlowerSetLength",
+        // 0x440d80 into the block's `[0xc]`, which is the length the scene
+        // graph put there
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(name) = args.first().and_then(gob_name) else { return Ok(()) };
+            let length = args.get(1).map(number).unwrap_or(0.0);
+            boot_mut(lua)?.blower_length.insert(name, length);
+            Ok(())
+        })?,
+    )?;
+    globals.set(
         "mdkProxDoorLock",
         // 0x441150 into 0x425130: locking a door that is open **shuts it
         // first** -- it plays `ANIM_CLOSE` and clears the open state before
@@ -2665,6 +2704,99 @@ pub fn prox_doors(lua: &Lua, player: [f64; 3]) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+/// **What the blowers do to the player**, as an acceleration to add this
+/// tick. `mdkBlower.c`, and the whole of it is three addresses:
+///
+/// * **0x402c60** builds a 24-byte block at `gob + 0x40` and switches the
+///   blower **on**. `mdkBlowerEnable` (0x402cc0) and `mdkBlowerDisable`
+///   (0x402d20) write `block[0]` and play `ANIM_ENABLED` / `ANIM_DISABLED`.
+/// * **0x402d80** fills the block for `OBJ_BLOWERCYLINDER`, which is the only
+///   blower the game ships — 63 of them and not one of the other two shapes.
+///   It writes the scene graph's `payload` straight in: `[8]` the **radius**,
+///   `[0xc]` the **length**, `[0x10]` the **strength**, `[0x14]` flags. The
+///   63 payloads read `(2.2..30, 10..110, 6..45, 0)` and nothing else fits
+///   three columns of those magnitudes — `l4_r4vortexblow` is 30 across and
+///   110 long at strength 10, `l4_r8blow00` is 10 by 77 at 6.
+/// * **0x40312c** is the cylinder's own test, and **0x403250** the push.
+///
+/// The volume, in the order the original asks it:
+///
+/// ```text
+/// axis = the blower's local +Z            ; 0x46fa10 off gob + 0x24
+/// a = axis . blower;  b = axis . target
+/// if b <= a or a + length < b:  outside the slab
+/// radial = (target - blower) - axis * (b - a)
+/// if radial . radial > radius * radius:   outside the tube
+/// ```
+///
+/// **The axis is +Z and not the +Y a model faces**: 0x46fa10 computes
+/// `(2(xz + yw), 2(yz - xw), 1 - 2(x² + y²))`, which is the third column of
+/// the rotation — the same column `render::camera::Mat4::rotation` builds,
+/// and the two must agree. Fifty-five of the 63 carry a quaternion with no x
+/// or y, so they blow **straight up**; the other eight lean.
+///
+/// And the push, 0x4032ab. The player takes his own branch — 0x4032b5
+/// compares the target with the player gob — and it is the plainest law in
+/// the game:
+///
+/// > while his speed **along the axis** has not reached the strength, add
+/// > `axis * 40` to his acceleration, signed by the strength.
+///
+/// 40.0 is the literal at 0x48f33c and it is not the strength: the strength
+/// is the **speed it stops at**. Against `body::GRAVITY` of 29.8 a blower
+/// pointing up wins by 10.2, which is what an updraft in this game feels
+/// like. Everything that is not the player takes 0x403379 instead, where the
+/// velocity is set toward the strength rather than accelerated at.
+///
+/// ponytail: only the vertical part of the acceleration is returned to a
+/// caller that can use it — [`crate::game::body::Body`] keeps a `velocity_z`
+/// and no horizontal velocity, because its walk is pinned frame for frame
+/// against the original's own demo and giving it momentum would move that.
+/// The full vector is computed and the horizontal part is the eight leaning
+/// blowers' worth of it. Give the body a horizontal velocity, then use it.
+pub fn blowers(lua: &Lua, at: [f64; 3], velocity: [f64; 3]) -> [f64; 3] {
+    const OBJ_BLOWERCYLINDER: f64 = 500.0;
+    /// The acceleration a blower puts on the player, out of 0x48f33c.
+    const PUSH: f64 = 40.0;
+    let Some(w) = world::world(lua) else { return [0.0; 3] };
+    let Ok(boot) = boot_ref(lua) else { return [0.0; 3] };
+    let mut out = [0.0; 3];
+    for (_, g) in w.iter().filter(|(_, g)| g.kind == OBJ_BLOWERCYLINDER) {
+        if boot.blower_off.contains(&g.name) {
+            continue;
+        }
+        let (radius, strength) = (g.payload[0], g.payload[2]);
+        let length = boot.blower_length.get(&g.name).copied().unwrap_or(g.payload[1]);
+        // the local +Z of the quaternion, in (w, x, y, z) order
+        let [qw, qx, qy, qz] = g.rotation;
+        let axis = [
+            2.0 * (qx * qz + qy * qw),
+            2.0 * (qy * qz - qx * qw),
+            1.0 - 2.0 * (qx * qx + qy * qy),
+        ];
+        let dot = |u: [f64; 3], v: [f64; 3]| u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+        let (a, b) = (dot(axis, g.position), dot(axis, at));
+        if b <= a || a + length < b {
+            continue;
+        }
+        let radial: f64 = (0..3)
+            .map(|c| (at[c] - g.position[c] - axis[c] * (b - a)).powi(2))
+            .sum();
+        if radial > radius * radius {
+            continue;
+        }
+        // and it stops pushing once he is going that fast along it
+        let along = dot(axis, velocity);
+        if (strength > 0.0 && along < strength) || (strength < 0.0 && along > strength) {
+            let sign = if strength < 0.0 { -1.0 } else { 1.0 };
+            for c in 0..3 {
+                out[c] += axis[c] * sign * PUSH;
+            }
+        }
+    }
+    out
 }
 
 /// `DAMAGE_FALLING`, out of the binary's own constant table -- 16, and the
@@ -4582,6 +4714,40 @@ mod tests {
         assert_eq!(g.get::<f64>("dead").unwrap(), 1.0, "OnDie(gob, 1), not OnDie(gob)");
         // the third hit found it already dead, so OnDie fired once
         assert_eq!(scripts.lua.app_data_ref::<Boot>().unwrap().died, ["gen_spawn"]);
+    }
+
+    /// The blower's volume and its one stopping rule. The blower stands at
+    /// the origin pointing up, five across and thirty-five long, and stops
+    /// pushing at ten units a second.
+    #[test]
+    fn a_blower_pushes_up_its_own_tube_until_the_speed_it_names() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('fan', OBJ_BLOWERCYLINDER, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil, 5,35,10,0, nil, nil, 0)",
+            )
+            .exec()
+            .unwrap();
+        let up = |at: [f64; 3], v: [f64; 3]| blowers(&scripts.lua, at, v)[2];
+        let still = [0.0; 3];
+        assert_eq!(up([0.0, 0.0, 10.0], still), 40.0, "up the middle");
+        assert_eq!(up([4.9, 0.0, 10.0], still), 40.0, "just inside the radius");
+        assert_eq!(up([5.1, 0.0, 10.0], still), 0.0, "just outside it");
+        assert_eq!(up([0.0, 0.0, 34.9], still), 40.0, "just inside the length");
+        assert_eq!(up([0.0, 0.0, 35.1], still), 0.0, "past the end");
+        assert_eq!(up([0.0, 0.0, -0.1], still), 0.0, "behind the mouth");
+        // and it lets go once he is going that fast **along the axis**
+        assert_eq!(up([0.0, 0.0, 10.0], [0.0, 0.0, 9.9]), 40.0);
+        assert_eq!(up([0.0, 0.0, 10.0], [0.0, 0.0, 10.0]), 0.0, "at the strength");
+        assert_eq!(up([0.0, 0.0, 10.0], [99.0, 0.0, 0.0]), 40.0, "sideways is not along");
+        // a script can switch it off and lengthen it
+        scripts.lua.load("mdkBlowerDisable(fan)").exec().unwrap();
+        assert_eq!(up([0.0, 0.0, 10.0], still), 0.0, "off");
+        scripts.lua.load("mdkBlowerEnable(fan)\nmdkBlowerSetLength(fan, 50)").exec().unwrap();
+        assert_eq!(up([0.0, 0.0, 40.0], still), 40.0, "longer than the scene graph said");
     }
 
     /// A prox door opens on the player being near and shuts on his leaving,

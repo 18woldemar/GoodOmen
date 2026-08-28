@@ -424,6 +424,23 @@ impl Body {
         z
     }
 
+    /// An outside push along z, in units a second squared, for `dt`. A
+    /// blower is the only thing in the game that does this — see
+    /// [`crate::game::api::blowers`], where the 40.0 comes from.
+    ///
+    /// It leaves the ground the way a jump does, and for the same reason:
+    /// `on_ground` is our own latch, and [`Body::settle`] would spend the
+    /// push and put the body straight back down without it.
+    pub fn blow(&mut self, up: f64, dt: f64) {
+        if up == 0.0 {
+            return;
+        }
+        self.velocity_z += up * dt;
+        if self.velocity_z > 0.0 {
+            self.on_ground = false;
+        }
+    }
+
     /// One frame: a direction in the horizontal plane, a jump, and `dt`.
     pub fn step(&mut self, world: &Collision, direction: [f64; 2], jump: bool, speed: f64, dt: f64) {
         let was = [self.position[0], self.position[1]];
@@ -825,6 +842,37 @@ mod tests {
                     "frame {i}: rose {got:.3}, the original rose {want}");
         }
         assert!(!body.on_ground);
+    }
+
+    /// A blower lifts a body off the floor and settles it at the speed the
+    /// blower names. 40 against a gravity of 29.8 wins by 10.2, and the push
+    /// stops at the strength, so the body hovers there rather than climbing
+    /// away.
+    #[test]
+    fn a_blower_lifts_a_body_and_holds_it_at_the_strength() {
+        /// what `api::blowers` returns, and the strength of the fan
+        const PUSH: f64 = 40.0;
+        const STRENGTH: f64 = 10.0;
+        let world = floor();
+        let mut body = Body::new([0.0, 0.0, 3.0], 0.0);
+        for _ in 0..100 {
+            body.step(&world, [0.0, 0.0], false, 0.0, 1.0 / 30.0);
+        }
+        let ground = body.position[2];
+        assert!(body.on_ground, "it starts on the floor");
+        let mut top = 0.0f64;
+        for _ in 0..300 {
+            let up = if body.velocity_z < STRENGTH { PUSH } else { 0.0 };
+            body.blow(up, 1.0 / 30.0);
+            body.step(&world, [0.0, 0.0], false, 0.0, 1.0 / 30.0);
+            top = top.max(body.velocity_z);
+        }
+        assert!(!body.on_ground, "the blower took it off the floor");
+        assert!(body.position[2] - ground > 20.0,
+                "it rose {:.1}", body.position[2] - ground);
+        // the climb settles at the strength, give or take one frame of each
+        assert!(top > STRENGTH && top < STRENGTH + PUSH / 30.0 + 0.01,
+                "fastest it went was {top:.2}, the fan stops at {STRENGTH}");
     }
 
     /// The landing staircase, and the height it puts on each step. A drop of

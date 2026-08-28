@@ -1080,6 +1080,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     let mut jammed = 0usize;
     let mut shot_at = 0usize;
     let mut fell = 0usize;
+    let mut blown = 0usize;
     let mut died_at: Option<f64> = None;
     let mut ran = 0usize;
 
@@ -1128,6 +1129,16 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     for step in 0..steps {
         ran = step + 1;
         let was = body.position;
+        // **the blowers push before the body moves**, whoever is steering it
+        let up = api::blowers(
+            &scripts.lua,
+            [body.position[0], body.position[1], body.position[2] - EYE],
+            [0.0, 0.0, body.velocity_z],
+        )[2];
+        if up != 0.0 {
+            blown += 1;
+        }
+        body.blow(up, dt);
         match &frames {
             Some(f) if step < f.len() => {
                 body.replay(&collision, &f[step..step + 1], turn, who);
@@ -1349,6 +1360,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         ("handlers ran to the end", survived, expect_flag("--expect-survived")),
         ("animations chosen", playing, expect_flag("--expect-playing")),
         ("door movements", doors, expect_flag("--expect-doors")),
+        ("frames inside a blower", blown, expect_flag("--expect-blown")),
         ("object moves", moved as usize, expect_flag("--expect-moves")),
         ("sounds fired", fired_sounds, expect_flag("--expect-sounds")),
         ("collisions", state.collisions, expect_flag("--expect-collisions")),
@@ -1384,7 +1396,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
          {walkers} walkers walked {walked:.0} units \
          and met a wall on {walled} frames ({buried} inside), \
          {shots} shots fired ({landed} hit, nearest {}, {drop:.1} of it height), \
-         {doors} door movements, {anim_keys} keys in {struck} struck, {fighting} enemies fighting, {shot_at} shot by the player and {died} killed, \
+         {doors} door movements, {blown} frames in a blower, {anim_keys} keys in {struck} struck, {fighting} enemies fighting, {shot_at} shot by the player and {died} killed, \
          the player on {} of {} hitpoints{} ({fell} of it to landings), \
          {} objects touched and {} of them \
          scripted{}{} [{}]{}",
@@ -1754,6 +1766,16 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                     dt,
                 );
                 let (step, speed) = drive.heading(yaw);
+                // and the blowers push here too -- see `api::blowers`
+                body.blow(
+                    goodomen::game::api::blowers(
+                        &level_scripts.lua,
+                        [body.position[0], body.position[1],
+                         body.position[2] - goodomen::game::body::EYE],
+                        [0.0, 0.0, body.velocity_z],
+                    )[2],
+                    dt,
+                );
                 body.step(&collision, step, held(Scancode::Space), speed, dt);
                 let _ = d;
                 at = body.position;
