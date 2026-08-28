@@ -197,9 +197,16 @@ ENGINE = [
       # `l7r2_spn1_spawn`, which spawns **inside** `c9` -- so what this pins
       # is the escape rule, not the refusal. Nothing in ten levels walks into
       # a wall in the first thirty seconds.
-      "--expect-walled", "6410", "--expect-buried", "1383",
+      # 6410 -> 5952 walled and 1383 -> 1477 buried when the body became a
+      # cylinder tested exactly instead of five points at three heights. The
+      # two move opposite ways because they are about the same walker: the
+      # exact test stops refusing moves it should not have refused, and it
+      # stops missing the frames `l7r2_spn1_spawn` really is inside `c9` on.
+      # Where it shows plainly is level 2, whose walkers went from **422
+      # frames inside geometry to 45**.
+      "--expect-walled", "5952", "--expect-buried", "1477",
       "--expect-keys", "13", "--expect-fighting", "12",
-      "--expect-moves", "7993",
+      "--expect-moves", "8366",
       "--expect-events", "18124", "--expect-survived", "18124"], None),
     # and the driver that reaches more than the first room. Held forwards
     # jams on the first corner -- level 6 spends 1162 of 1200 frames against a
@@ -249,7 +256,7 @@ ENGINE = [
       # the world any more, which is the quarter turn again -- they were
       # walking across the geometry rather than along it.
       "--run", "9", "1", "30", "--expect-walkers", "18",
-      "--expect-walled", "8987", "--expect-buried", "0", "--expect-keys", "3",
+      "--expect-walled", "8994", "--expect-buried", "0", "--expect-keys", "3",
       "--expect-events", "45156", "--expect-survived", "45156"], None),
     # level 10's zizzy turrets shoot: nine bullets in thirty seconds, each one
     # carrying its damage, damage type, lifetime and speed out of the shot
@@ -283,9 +290,13 @@ ENGINE = [
       # the enemies sooner, and is killed at 49s of the 120 -- so the run is
       # shorter and every count with it. It reaches four rooms on the way,
       # against the one it used to.
-      "--run", "4", "1", "120", "--roam", "--expect-shots", "40",
+      "--run", "4", "1", "120", "--roam", "--expect-shots", "39",
       "--expect-hits", "20", "--expect-health", "0", "--expect-rooms", "6",
-      "--expect-events", "29206", "--expect-survived", "29206"], None),
+      # 40 shots -> 39 and 29206 handler calls -> 28246: the player dies at
+      # 47 seconds instead of 49 now that the exact collision test moves the
+      # walkers slightly, so a shorter run has one shot and a thousand calls
+      # fewer in it. He still dies of enemy fire, which is what this pins.
+      "--expect-events", "28246", "--expect-survived", "28246"], None),
     # and the loop closes: the player walks at an enemy, shoots it with the
     # hitscan the original uses, and it dies.
     # and what it kills falls over: the walker's own OnDamage (0x430a60) plays
@@ -310,7 +321,7 @@ ENGINE = [
       # about the level, not the body -- the demo, which is the game's own
       # input, walks 338 units through the same controller.
       "--run", "6", "1", "40", "--expect-playing", "6",
-      "--expect-moves", "845", "--expect-touched", "1"], None),
+      "--expect-moves", "838", "--expect-touched", "1"], None),
     ("the room graph culls what the engine draws",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
@@ -364,11 +375,17 @@ SLOW = [
      # own input says the opposite way: `demo1_5` was inside geometry on 30
      # frames and is now inside on none.
      ["walksim.py", "extracted/base", "--resources", "extracted", "--all",
-      "--expect-standing", "2557", "--expect-inside", "15"], "base"),
+      "--expect-standing", "2557", "--expect-inside", "16"], "base"),
     # 13 -> 15 when the gravity became the game's own 29.8 instead of
     # our 20: a body falls half again as fast, so two more of the 2557
     # brush through a tight spot on the way down. The demo, which is
     # the game's own input, is inside on none and meets a wall on none.
+    # 15 -> 16 when the body became a **cylinder tested exactly** instead of
+    # five points at three heights: the sixteenth was always inside and the
+    # old probe could not see it, because a slab thinner than the spacing
+    # between two sample heights falls between them. Same 2557 standing, and
+    # the demo replay is unmoved -- `camtrace --against` still reads
+    # 0.0001 / 0.0001 / 0.0003 over its three exact bands.
 ]
 
 

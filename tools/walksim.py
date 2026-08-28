@@ -206,13 +206,51 @@ class World:
                 i = t["first"] + child
         return False
 
-    def blocked(self, x, y, z) -> bool:
-        """Only the body above step height stops it; below is a kerb."""
-        h = STEP
-        while h <= EYE + 1e-9:
-            if self.solid(x, y, z - EYE + h):
+    def overlaps(self, first, cx, cy, cz, radius, half) -> bool:
+        """Does an upright cylinder centred here reach solid geometry?
+
+        The engine's `Bsp::overlaps`, in Python, and the two must agree. The
+        descent is `solid`'s, carrying the shape's **support** along each
+        plane's normal -- `radius * hypot(nx, ny) + half * |nz|`, how far the
+        cylinder reaches past its centre that way. Where the centre is
+        further than that from the plane the whole shape is on one side and
+        only that child is descended; nearer, it straddles and both are.
+        """
+        qx, qy, qz = -cx, -cy, -cz
+        stack = [first]
+        while stack:
+            i = stack.pop()
+            nx, ny, nz, dist, front, back = self.nodes[i]
+            side = nx * qx + ny * qy + nz * qz - dist
+            support = radius * math.hypot(nx, ny) + half * abs(nz)
+            if side < -support:
+                if back != 0xFFFFFFFF:
+                    stack.append(first + back)
+                continue
+            if front == 0xFFFFFFFF:
                 return True
-            h += (EYE - STEP) / 2
+            stack.append(first + front)
+            if side < support and back != 0xFFFFFFFF:
+                stack.append(first + back)
+        return False
+
+    def blocked(self, x, y, z, wide: float = 0.0) -> bool:
+        """Only the body above step height stops it; below is a kerb.
+
+        The body is a cylinder from the step height to the crown, tested
+        exactly rather than sampled -- see `overlaps`.
+        """
+        half = max(EYE - STEP, 1e-9) / 2
+        cz = z - half
+        radius = max(wide / 2.0, 0.0)
+        for t in self.trees:
+            b = t["box"]
+            if not (x + radius >= b[0] and x - radius <= b[3]
+                    and y + radius >= b[1] and y - radius <= b[4]
+                    and cz + half >= b[2] and cz - half <= b[5]):
+                continue
+            if self.overlaps(t["first"], x, y, cz, radius, half):
+                return True
         return False
 
     def footed(self, x, y, z) -> bool:

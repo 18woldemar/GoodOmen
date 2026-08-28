@@ -154,6 +154,56 @@ impl Bsp {
         }
     }
 
+    /// Does an upright **cylinder** overlap solid geometry? `centre` is the
+    /// middle of it, `radius` its half-width and `half` its half-height, and
+    /// the point is negated on the way in like every other query here.
+    ///
+    /// This is the shape `omMath3d.c:637` guards — `(radius > 0.0f) &&
+    /// (height > 0.0f)` beside `v1`, `v2` and `base` — and it is exact for
+    /// the tree rather than a sampling of it, which is the whole point: five
+    /// points on a cross sample the axes and not the corners, and a body
+    /// slid along a wall puts a corner through it. Adding more sample points
+    /// moves the failure rather than removing it.
+    ///
+    /// The descent is `contains`'s, carrying the shape's **support** along
+    /// each plane's normal: `radius * hypot(nx, ny) + half * |nz|` is how far
+    /// the cylinder reaches past its centre in that direction. Where the
+    /// centre is further than that from the plane the whole shape is on one
+    /// side and only that child is descended; where it is nearer the shape
+    /// straddles and both are, and it is solid if either half is. At a
+    /// radius and half-height of zero this is `contains` exactly, which is
+    /// what its test asserts.
+    pub fn overlaps(&self, centre: [f64; 3], radius: f64, half: f64) -> bool {
+        let p = [-centre[0], -centre[1], -centre[2]];
+        let mut stack = vec![0usize];
+        while let Some(i) = stack.pop() {
+            let node = self.nodes[i];
+            let n = node.normal;
+            let side = n[0] as f64 * p[0] + n[1] as f64 * p[1] + n[2] as f64 * p[2]
+                - node.dist as f64;
+            // how far the cylinder reaches past its centre along this normal
+            let support = radius * ((n[0] as f64).powi(2) + (n[1] as f64).powi(2)).sqrt()
+                + half * (n[2] as f64).abs();
+            if side < -support {
+                // wholly behind: only the back child can hold it, and a back
+                // leaf is empty
+                if node.back != LEAF {
+                    stack.push(node.back as usize);
+                }
+                continue;
+            }
+            // it reaches the front side, and a front leaf is solid
+            if node.front == LEAF {
+                return true;
+            }
+            stack.push(node.front as usize);
+            if side < support && node.back != LEAF {
+                stack.push(node.back as usize);
+            }
+        }
+        false
+    }
+
     /// Does the segment `a`→`b` pass through solid geometry?
     ///
     /// The same descent as [`Bsp::contains`], split at the plane crossings
@@ -273,6 +323,35 @@ mod tests {
         // convention is `side >= 0` and `contains` says the same of a point
         assert!(bsp.crosses([0.0, 0.0, 1.0], [0.0, 0.0, 0.0]));
         assert_eq!(bsp.contains([0.0, 0.0, 0.0]), true, "the boundary is solid for both");
+    }
+
+    /// A cylinder overlaps what a point would miss, and at zero size it is
+    /// the point again — which is the property that makes it safe to swap in
+    /// for `contains`.
+    #[test]
+    fn a_cylinder_reaches_where_its_centre_does_not() {
+        let bsp = Bsp::parse(&one_plane()).unwrap();
+        // -z is the solid side. A centre one unit clear of the plane:
+        assert!(!bsp.overlaps([0.0, 0.0, 1.0], 0.0, 0.0), "the bare centre is clear");
+        // ...still clear when it is short enough
+        assert!(!bsp.overlaps([0.0, 0.0, 1.0], 5.0, 0.9), "0.9 does not reach 1.0");
+        // ...and touching once it is tall enough, however narrow
+        assert!(bsp.overlaps([0.0, 0.0, 1.0], 0.0, 1.0), "1.0 reaches the plane");
+        // width alone does not help against a floor, because the support
+        // along a +z normal is the half-height and nothing else
+        assert!(!bsp.overlaps([0.0, 0.0, 1.0], 500.0, 0.0), "wide is not tall");
+
+        // and at zero size it agrees with `contains` everywhere, which is the
+        // one property a swap-in has to have
+        let mut seed = 12345u64;
+        let mut rand = move || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (seed >> 33) as f64 / (1u64 << 31) as f64 * 4.0 - 2.0
+        };
+        for _ in 0..2000 {
+            let p = [rand(), rand(), rand()];
+            assert_eq!(bsp.overlaps(p, 0.0, 0.0), bsp.contains(p), "at {p:?}");
+        }
     }
 
     #[test]

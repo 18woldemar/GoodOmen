@@ -226,32 +226,29 @@ impl Collision {
         self.trees.get(tree).map(|t| t.gob.as_str())
     }
 
-    /// Which tree stops the body here, sampling exactly where
-    /// [`Collision::blocked`] does — otherwise the two could disagree about
-    /// whether there was a collision at all.
+    /// **Which** tree stops the body here, as an index — and
+    /// [`Collision::blocked`] is this asked as a yes or no, so the two cannot
+    /// disagree about whether there was a collision at all.
+    ///
+    /// The body is an upright cylinder and the test is [`Bsp::overlaps`],
+    /// which is exact for the tree rather than a sampling of it. It replaced
+    /// a cross of five points at three heights; the reason is in that
+    /// method's own note.
     pub fn blocking(&self, p: [f64; 3], tall: f64, wide: f64) -> Option<usize> {
-        let mut h = STEP;
-        while h <= tall + 1e-9 {
-            for (dx, dy) in Collision::ring(wide) {
-                if let Some(t) = self.at([p[0] + dx, p[1] + dy, p[2] - tall + h]) {
-                    return Some(t);
-                }
-            }
-            h += (tall - STEP).max(1e-9) / 2.0;
-        }
-        None
+        let (centre, half, radius) = Collision::column(p, tall, wide);
+        let reach = [radius, radius, half];
+        self.trees.iter().position(|t| {
+            (0..3).all(|c| centre[c] + reach[c] >= t.lo[c] && centre[c] - reach[c] <= t.hi[c])
+                && t.bsp.overlaps(centre, radius, half)
+        })
     }
 
-    /// Where a probe of this width samples in the horizontal plane: the
-    /// centre, and the four points half a width out on the axes.
-    ///
-    /// ponytail: four points, not a swept hull. `def + 0x7c` is a full width
-    /// and omCollision halves it, so half of it is the radius; a cross of
-    /// five samples is the cheapest thing that notices a wall a body's
-    /// shoulder would touch and its centre would not.
-    fn ring(wide: f64) -> [(f64, f64); 5] {
-        let r = (wide / 2.0).max(0.0);
-        [(0.0, 0.0), (r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r)]
+    /// The cylinder a body of this height stands in: its centre, its
+    /// half-height and its radius. It spans from the step height — below
+    /// which is a kerb to walk over — to the crown.
+    fn column(p: [f64; 3], tall: f64, wide: f64) -> ([f64; 3], f64, f64) {
+        let half = (tall - STEP).max(1e-9) / 2.0;
+        ([p[0], p[1], p[2] - half], half, (wide / 2.0).max(0.0))
     }
 
     /// The tree **under** the feet, which is what the body is standing on.
@@ -286,17 +283,7 @@ impl Collision {
 
     /// Only the body above step height stops it; below is a kerb to walk over.
     pub fn blocked(&self, p: [f64; 3], tall: f64, wide: f64) -> bool {
-        let mut h = STEP;
-        while h <= tall + 1e-9 {
-            for (dx, dy) in Collision::ring(wide) {
-                if self.solid([p[0] + dx, p[1] + dy, p[2] - tall + h]) {
-                    return true;
-                }
-            }
-            // a walker shorter than the kerb still gets its three samples
-            h += (tall - STEP).max(1e-9) / 2.0;
-        }
-        false
+        self.blocking(p, tall, wide).is_some()
     }
 
     pub fn footed(&self, p: [f64; 3], tall: f64) -> bool {
