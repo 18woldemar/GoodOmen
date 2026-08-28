@@ -8,8 +8,9 @@
 //!
 //! The body is sized from the game, not guessed. `kurt.mod` is 1.86 units
 //! from sole to scalp and `max.mod` 1.72, so a unit is about a metre; the
-//! smallest headroom over the 129 checkpoints is 2.9. Hence an eye at 1.7, a
-//! step of 0.6, gravity 20 and a walk of 4 units a second.
+//! smallest headroom over the 129 checkpoints is 2.9. Hence an eye at 1.7
+//! and a step of 0.6; the gravity and the jump are measured, see
+//! [`GRAVITY`], and the walk comes out of the game's own speed table.
 //!
 //! **Forward is the model's local +Y**, which is [`facing`], and getting that
 //! wrong cost this controller a quarter turn against the game from the day it
@@ -75,11 +76,27 @@ use crate::game::world::World;
 /// nothing has checked it against the other three characters.
 pub const EYE: f64 = 1.7;
 pub const STEP: f64 = 0.6;
-pub const GRAVITY: f64 = 20.0;
+/// **Measured**, both of them, off the two jumps `demo1_5` records.
+///
+/// The chase camera is rigidly four units back along its own look, so
+/// `eye + 4 * look` out of a GL trace is the player's own position to a
+/// ten-thousandth of a unit -- which makes the z of a jump readable frame by
+/// frame. Fitting one gravity and one launch a jump over the fourteen rising
+/// frames gives **29.80** and **15.983 / 16.844**, at an rms residual of
+/// **0.0013 units**. The old 20.0 and 7.0 were ours, and they are 2.5 units
+/// low by the ninth frame of a jump.
+///
+/// The two launches differ by 5% and that is not explained. A partial first
+/// frame -- the press landing part way into a tick -- would do it, and so
+/// would something in `mdkKurt.c` this has not read; 16.0 is taken as the
+/// launch because it is the better-conditioned of the two fits and it is the
+/// round one.
+pub const GRAVITY: f64 = 29.8;
 /// Test speeds, not the game's. Anything driving a *player* takes the table.
 pub const WALK: f64 = 4.0;
 pub const SPRINT: f64 = 9.0;
-pub const JUMP_SPEED: f64 = 7.0;
+/// Measured with [`GRAVITY`], off the same two jumps.
+pub const JUMP_SPEED: f64 = 16.0;
 /// The box round each tree is padded, so a query just outside still descends.
 const PAD: f64 = 1.0;
 
@@ -488,9 +505,16 @@ impl Body {
                 - frame.held(omn::BACKWARD).is_some() as i32;
             let side = frame.held(omn::RIGHT).is_some() as i32
                 - frame.held(omn::LEFT).is_some() as i32;
-            drive.push(kind, ahead, side, dt);
+            // **The frame the jump is pressed already counts as airborne.**
+            // The original's speed goes 6.01, 8.02 on the two grounded
+            // frames and then 8.51 on the frame the rise begins, which is
+            // the air gain and not the ground one; taking `on_ground` alone
+            // would spend one more frame at 60 and leave 0.05 a frame of
+            // speed that never comes back.
+            let jump = frame.held(omn::JUMP).is_some();
+            drive.push_at(kind, ahead, side, dt, self.on_ground && !jump);
             let (d, speed) = drive.heading(self.yaw);
-            self.step(world, d, frame.held(omn::JUMP).is_some(), speed, dt);
+            self.step(world, d, jump, speed, dt);
         }
     }
 }
@@ -600,9 +624,18 @@ pub struct Drive {
 impl Drive {
     /// `ahead` and `side` are -1, 0 or +1 — the intent, not a speed.
     pub fn push(&mut self, kind: f64, ahead: i32, side: i32, dt: f64) {
-        let (f, s, _) = crate::game::world::player_speed(kind, ahead, side).unwrap_or_default();
-        self.forward = crate::game::world::approach(self.forward, f, dt);
-        self.strafe = crate::game::world::approach(self.strafe, s, dt);
+        self.push_at(kind, ahead, side, dt, true)
+    }
+
+    /// The same, told whether the body is standing on anything: off the
+    /// ground the gain is [`crate::game::world::AIR`], measured across the
+    /// launch of `demo1_5`'s first jump.
+    pub fn push_at(&mut self, kind: f64, ahead: i32, side: i32, dt: f64, ground: bool) {
+        use crate::game::world::{approach_at, player_speed, ACCELERATE, AIR};
+        let (f, s, _) = player_speed(kind, ahead, side).unwrap_or_default();
+        let gain = if ground { ACCELERATE } else { AIR };
+        self.forward = approach_at(self.forward, f, dt, gain);
+        self.strafe = approach_at(self.strafe, s, dt, gain);
     }
 
     /// `-> (a unit direction in the plane, how fast to go along it)`, both
@@ -701,6 +734,29 @@ mod tests {
         // scene graph writes when it does not care which way a thing looks
         assert!(bearing(0.0, 1.0).abs() < 1e-12);
         assert!((bearing(1.0, 0.0) + std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+    }
+
+    /// The jump against the original's own arc, read off `demo1_5` frame by
+    /// frame. These five heights are the game's, not ours: the chase camera
+    /// is rigidly four back along its look, so `eye + 4 * look` out of a GL
+    /// trace is the player's position to a ten-thousandth of a unit.
+    #[test]
+    fn a_jump_rises_the_way_the_original_s_does() {
+        const WANT: [f64; 5] = [0.500, 0.964, 1.400, 1.798, 2.165];
+        let world = floor();
+        let mut body = Body::new([0.0, 0.0, 3.0], 0.0);
+        for _ in 0..200 {
+            body.step(&world, [0.0, 0.0], false, 0.0, 1.0 / 30.0);
+        }
+        let ground = body.position[2];
+        for (i, want) in WANT.iter().enumerate() {
+            // the demo's own frame time, which is not quite 1/30
+            body.step(&world, [0.0, 0.0], true, 0.0, 0.0333);
+            let got = body.position[2] - ground;
+            assert!((got - want).abs() < 0.01,
+                    "frame {i}: rose {got:.3}, the original rose {want}");
+        }
+        assert!(!body.on_ground);
     }
 
     /// The fan is a projection, not a swing: turning further gives up more of

@@ -189,9 +189,9 @@ ENGINE = [
       # `l7r2_spn1_spawn`, which spawns **inside** `c9` -- so what this pins
       # is the escape rule, not the refusal. Nothing in ten levels walks into
       # a wall in the first thirty seconds.
-      "--expect-walled", "9082", "--expect-buried", "1139",
+      "--expect-walled", "8989", "--expect-buried", "1106",
       "--expect-keys", "8", "--expect-fighting", "17",
-      "--expect-moves", "9993",
+      "--expect-moves", "9622",
       "--expect-events", "22504", "--expect-survived", "22504"], None),
     # and the driver that reaches more than the first room. Held forwards
     # jams on the first corner -- level 6 spends 1162 of 1200 frames against a
@@ -216,7 +216,7 @@ ENGINE = [
       # the world any more, which is the quarter turn again -- they were
       # walking across the geometry rather than along it.
       "--run", "9", "1", "30", "--expect-walkers", "18",
-      "--expect-walled", "8986", "--expect-buried", "0", "--expect-keys", "3",
+      "--expect-walled", "8987", "--expect-buried", "0", "--expect-keys", "3",
       "--expect-events", "46956", "--expect-survived", "46056"], None),
     # level 10's zizzy turrets shoot: nine bullets in thirty seconds, each one
     # carrying its damage, damage type, lifetime and speed out of the shot
@@ -251,8 +251,8 @@ ENGINE = [
       # shorter and every count with it. It reaches four rooms on the way,
       # against the one it used to.
       "--run", "4", "1", "120", "--roam", "--expect-shots", "40",
-      "--expect-hits", "20", "--expect-health", "0",
-      "--expect-events", "29204", "--expect-survived", "29204"], None),
+      "--expect-hits", "20", "--expect-health", "0", "--expect-rooms", "6",
+      "--expect-events", "29206", "--expect-survived", "29206"], None),
     # and the loop closes: the player walks at an enemy, shoots it with the
     # hitscan the original uses, and it dies. Two minutes of hunting on level
     # 8 is 77 shots and two kills.
@@ -273,7 +273,7 @@ ENGINE = [
       # about the level, not the body -- the demo, which is the game's own
       # input, walks 338 units through the same controller.
       "--run", "6", "1", "40", "--expect-playing", "14",
-      "--expect-moves", "1514", "--expect-touched", "1"], None),
+      "--expect-moves", "1488", "--expect-touched", "1"], None),
     ("the room graph culls what the engine draws",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
@@ -327,7 +327,11 @@ SLOW = [
      # own input says the opposite way: `demo1_5` was inside geometry on 30
      # frames and is now inside on none.
      ["walksim.py", "extracted/base", "--resources", "extracted", "--all",
-      "--expect-standing", "2557", "--expect-inside", "13"], "base"),
+      "--expect-standing", "2557", "--expect-inside", "15"], "base"),
+    # 13 -> 15 when the gravity became the game's own 29.8 instead of
+    # our 20: a body falls half again as fast, so two more of the 2557
+    # brush through a tight spot on the way down. The demo, which is
+    # the game's own input, is inside on none and meets a wall on none.
 ]
 
 

@@ -212,6 +212,19 @@ pub const PLAYER_SPEED: [(f64, [f64; 9], [f64; 9], f64); 4] = [
 /// character that is already going the wrong way is pulled back twice as hard.
 pub const ACCELERATE: f64 = 60.0;
 pub const BRAKE: f64 = 120.0;
+/// **Off the ground the gain is a quarter of that**, and it is measured.
+/// `demo1_5`'s first jump leaves the ground while the player is still
+/// getting up to speed, so the same ramp can be read either side of the
+/// launch: 58.93, 60.15, 60.35 on the last three grounded frames, then
+/// 14.97, 10.23, 19.63, 9.55, 15.46 on the five airborne ones -- mean
+/// **13.97** against 59.81, which is 0.234 of it.
+///
+/// ponytail: one jump's worth. The demo's other jump is already at full
+/// speed and shows nothing at all, and the braking rate in the air is not
+/// measured by either, so [`BRAKE`] is left alone. The spread on those five
+/// frames is 9.6 to 19.6 -- the position they come from is exact to a
+/// ten-thousandth but a difference of a difference is not.
+pub const AIR: f64 = 14.0;
 
 /// `-> (forward, strafe, the fourth argument to the mover)`, or `None` for
 /// anything that is not one of the four playable characters. `ahead` and
@@ -233,12 +246,18 @@ pub fn player_speed(kind: f64, ahead: i32, side: i32) -> Option<(f64, f64, f64)>
 /// costs 120 and getting up to it costs 60, which is the opposite of what
 /// "accelerate slowly, brake gently" would suggest and is worth not inventing.
 pub fn approach(current: f64, target: f64, dt: f64) -> f64 {
+    approach_at(current, target, dt, ACCELERATE)
+}
+
+/// [`approach`] with the gaining rate named, so a body in the air can take
+/// [`AIR`] where one on the ground takes [`ACCELERATE`].
+pub fn approach_at(current: f64, target: f64, dt: f64, gain: f64) -> f64 {
     let gaining = if target > 0.0 {
         current < target && current >= 0.0
     } else {
         current > target && current <= 0.0
     };
-    let rate = if gaining { ACCELERATE } else { BRAKE };
+    let rate = if gaining { gain } else { BRAKE };
     let moved = current + rate * dt * if target > current { 1.0 } else { -1.0 };
     if (moved - target).abs() < 1e-12 || (target > current) == (moved > target) {
         target

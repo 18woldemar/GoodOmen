@@ -119,7 +119,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mod2html as mh  # noqa: E402
 
 # the same constants the page uses; keep them in step
-EYE, STEP, GRAVITY = 1.7, 0.6, 20.0
+# GRAVITY and JUMP_SPEED are **measured**, off the two jumps demo1_5 records.
+# The chase camera is rigidly four back along its own look, so `eye + 4*look`
+# out of a GL trace is the player's own position to a ten-thousandth of a
+# unit, and the z of a jump reads frame by frame. One gravity and one launch
+# a jump over the fourteen rising frames: 29.80, and 15.983 and 16.844, at an
+# rms residual of 0.0013 units. The old 20.0 and 7.0 were ours.
+EYE, STEP, GRAVITY = 1.7, 0.6, 29.8
 WALK, SPRINT = 4.0, 9.0        # test speeds; a player takes PLAYER_SPEED
 DT = 1 / 60
 
@@ -370,7 +376,7 @@ def keycheck(scripts: Path) -> tuple[int, int, list[str]]:
 FORWARD, BACKWARD, LEFT, RIGHT = 200, 208, 203, 205
 TURN_RIGHT, TURN_LEFT, LOOK_DOWN, LOOK_UP = 1004, 1005, 1006, 1007
 JUMP = 1001
-JUMP_SPEED = 7.0                       # the same as the page's
+JUMP_SPEED = 16.0                       # the same as the page's
 
 # A playable character's speed is a 3x3 table read at `table[fwd * 3 + side]`,
 # with the forward table and the strafe table 0x24 apart. mdkKurt.c reads
@@ -393,7 +399,7 @@ PLAYER_SPEED = {
         (8.5, 10.0, 8.5, 0.0, 0.0, 0.0, -5.0, -6.0, -5.0),
         (-6.0, 0.0, 6.0, -7.0, 0.0, 7.0, -6.0, 0.0, 6.0), 14.0),
 }
-ACCELERATE, BRAKE = 60.0, 120.0        # 0x40ef40's two rates, at all four sites
+ACCELERATE, BRAKE, AIR = 60.0, 120.0, 14.0        # 0x40ef40's two rates, at all four sites
 
 
 def player_speed(kind: float, ahead: int, side: int):
@@ -403,7 +409,8 @@ def player_speed(kind: float, ahead: int, side: int):
     return forward[i], strafe[i], arg
 
 
-def approach(current: float, target: float, dt: float) -> float:
+def approach(current: float, target: float, dt: float,
+             gain: float = ACCELERATE) -> float:
     """One step of 0x40ef40.
 
     The low rate is taken **only** while the value is short of the target and
@@ -415,7 +422,7 @@ def approach(current: float, target: float, dt: float) -> float:
         gaining = current < target and current >= 0
     else:
         gaining = current > target and current <= 0
-    rate = ACCELERATE if gaining else BRAKE
+    rate = gain if gaining else BRAKE
     moved = current + rate * dt * (1.0 if target > current else -1.0)
     if abs(moved - target) < 1e-12 or (target > current) == (moved > target):
         return target
@@ -451,8 +458,15 @@ def replay(w: World, start, yaw: float, frames: list, mouse: float = 1.0,
         want_f, want_s, _ = player_speed(
             kind, (FORWARD in held) - (BACKWARD in held),
             (RIGHT in held) - (LEFT in held))
-        forward = approach(forward, want_f, dt)
-        strafe = approach(strafe, want_s, dt)
+        # off the ground the gain is a quarter: measured across the launch
+        # of demo1_5's first jump, 59.81 on the last grounded frames and
+        # 13.97 on the five airborne ones. See world.rs AIR.
+        # the frame the jump is pressed already counts as airborne: the
+        # original's speed goes 6.01, 8.02 on the ground and then 8.51 on the
+        # frame the rise begins, which is the air gain and not the ground one
+        gain = ACCELERATE if (ground and JUMP not in held) else AIR
+        forward = approach(forward, want_f, dt, gain)
+        strafe = approach(strafe, want_s, dt, gain)
         # both axes from facing(); the table's own entries carry the
         # diagonal, so this must not normalise them again.
         dx = forward * f[0] + strafe * r[0]
