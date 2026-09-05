@@ -270,8 +270,12 @@ ENGINE = [
     ("a roaming driver walks a level instead of one room",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
+      # 46806 -> 61202 with `mdkSamsmiteAttack` built: level 2 places four
+      # of them and 4 * 3600 ticks is 14400, which is the difference to the
+      # digit -- each one's task list now runs to the end instead of falling
+      # off a recorder.
       "--run", "2", "1", "120", "--roam", "--expect-rooms", "25",
-      "--expect-events", "46806", "--expect-survived", "46806"], None),
+      "--expect-events", "61202", "--expect-survived", "61202"], None),
     # **The doors open.** `mdkObject.c` 0x425010: a prox door watches the
     # player and opens inside its own radius, which the scene graph carries in
     # `payload[0]` -- 5, 6, 8, 10, 14, 15, 16 or 20 across the game's 175 of

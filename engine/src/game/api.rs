@@ -472,13 +472,16 @@ pub struct Boot {
     /// the shoot-or-taunt leaf is left. That is what a turret is -- a walker
     /// that turns and fires from where it stands.
     pub turret: BTreeSet<String>,
-    /// **What a conehead civilian is doing.** `mdkConeheadCivUpdate`
-    /// (0x440440 into **0x4347e0**) is a four-state machine on the same
-    /// `walker + 0x7c` the doganboy uses, and unlike the fight it cannot be
-    /// re-decided from scratch every call: a civilian standing still and one
-    /// walking to a corner of its pen look identical from the outside.
-    /// 3 chooses, 0x10 looks at you, 0x11 wanders, 0x14 stands, 0x0b runs.
-    pub civ: BTreeMap<String, i64>,
+    /// **`walker + 0x7c`, the state**, for the machines that need to
+    /// remember one. The fight re-decides from scratch on every call and gets
+    /// by with the cooldown alone; the other two cannot, because a civilian
+    /// standing still and one walking to a corner of its pen look identical
+    /// from the outside, and a samsmite prowling looks like a samsmite
+    /// charging until it arrives.
+    ///
+    /// The conehead civilian: 3 chooses, 0x10 looks at you, 0x11 wanders,
+    /// 0x14 stands, 0x0b runs. The samsmite: 0x12 prowls, 0x13 charges.
+    pub state: BTreeMap<String, i64>,
     /// **The play mode the level last asked for.** 0x42b940 parks
     /// `mdkSwitchPlayMode`'s argument in a pending slot and raises a flag;
     /// 0x42b9d0, which is what `mdkGetPlayMode` calls, answers with the
@@ -1416,6 +1419,185 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         })?,
     )?;
 
+    // **The samsmite is a kamikaze**, and it is the smallest of the three AI
+    // machines: `mdkSamsmiteAttack(gob)` is 0x4403e0 into **0x434340**, two
+    // states on `walker + 0x7c`.
+    //
+    // - **0x12, prowl.** While `walker + 0x98` has time left it walks (gait
+    //   1), and if the path ahead is blocked within **3** units it turns a
+    //   right angle (0x4901b4 is pi/2) and keeps the clock. When the clock is
+    //   out it looks: inside **18** units (0x4901c8), with the target
+    //   reachable, no more than **0.5** above it, in front of it, and with
+    //   the target inside its own pen, it turns to face you and **charges**.
+    //   Otherwise it sets the clock to `chRand() + 0.3` and walks on -- at
+    //   you with a `(chRand() - 0.5) * pi/2` wobble if you are in its patch,
+    //   and at a random point in the pen if you are not.
+    // - **0x13, charge.** Gait 2 straight at you while the path is clear,
+    //   you are inside **36** units (0x4901cc) and it is not past its leash
+    //   less two. Any of those fails and it stops, turns round and prowls
+    //   again. Inside **2** units it arrives.
+    //
+    // **Arriving is an explosion.** 0x40e930 into 0x40e960 is the game's area
+    // damage: every gob within the radius takes `damage - distance` of the
+    // given type. A samsmite spends **15 at 5 units** and then dies -- event
+    // 10, `OnDie(gob, 1)`, straight out of 0x40e1b0. The one exception is
+    // type 0xd7, and that is **`OBJ_FLAMINGSAMSMITE`, 215** -- one of the
+    // eight constants that read as 1.4e-312 until today. It spends **7**,
+    // turns round and prowls again, which is why the level 5 spawners keep
+    // making them.
+    globals.set(
+        "mdkSamsmiteAttack",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(who) = args.first().and_then(gob_name) else { return Ok(0.0) };
+            let Some((at, yaw)) = stance(lua, &who) else { return Ok(0.0) };
+            /// Inside this it decides to charge, and past this it gives one
+            /// up: the floats at 0x4901c8 and 0x4901cc.
+            const CHARGE_AT: f64 = 18.0;
+            const GIVE_UP: f64 = 36.0;
+            /// How close is contact, and how much of the leash it will not
+            /// charge past: the 2.0 at 0x48f598, used for both.
+            const CONTACT: f64 = 2.0;
+            /// The right angle a blocked one turns, and the wobble it walks
+            /// with: the pi/2 at 0x4901b4, used for both.
+            const AWAY: f64 = std::f64::consts::FRAC_PI_2;
+            /// How far ahead it looks while prowling and while charging.
+            const LOOK_PROWL: f64 = 3.0;
+            const LOOK_CHARGE: f64 = 4.0;
+            /// How long it walks before looking again: `chRand() + 0.3`.
+            const AGAIN: f64 = 0.3;
+            /// It will not charge something more than this far above it.
+            const STEP_UP: f64 = 0.5;
+            /// The blast: five units, fifteen points, and seven for the
+            /// flaming one that survives its own.
+            const BLAST: f64 = 5.0;
+            const SPENDS: i64 = 15;
+            const FLAMING_SPENDS: i64 = 7;
+            /// `OBJ_FLAMINGSAMSMITE`, the one that walks away from it.
+            const FLAMING: f64 = 215.0;
+            /// `DAMAGE_KNOCKDOWN | DAMAGE_BADGUY`, the 0x402 it is dealt with.
+            const KNOCKDOWN: i64 = 0x402;
+            let hero = lua
+                .named_registry_value::<mlua::Table>("player")
+                .ok()
+                .and_then(|p| p.get::<String>("name").ok());
+            let to = hero.as_deref().and_then(|n| stance(lua, n).map(|(p, _)| p));
+            let Some(to) = to else {
+                boot_mut(lua)?.gait.insert(who, 0);
+                return Ok(0.0);
+            };
+            let kind = with_gob(lua, args.first(), |g| g.kind).unwrap_or(0.0);
+            let solid = lua
+                .app_data_ref::<std::rc::Rc<crate::game::body::Collision>>()
+                .map(|c| c.clone());
+            // the same ray the tick's probe casts, without its throttle or
+            // its cliff leg -- 0x434340 passes 0 for the cliff flag
+            let clear = |heading: f64, reach: f64| {
+                let ahead = crate::game::body::facing(heading).0;
+                let from = [at[0], at[1], at[2] + 1.0];
+                let end = [from[0] + ahead[0] * reach, from[1] + ahead[1] * reach, from[2]];
+                solid.as_ref().is_none_or(|c| c.sees(from, end))
+            };
+            let dist = (0..3).map(|c| (to[c] - at[c]).powi(2)).sum::<f64>().sqrt();
+            let bearing = crate::game::body::bearing(to[0] - at[0], to[1] - at[1]);
+            let mut boot = boot_mut(lua)?;
+            let state = boot.state.get(&who).copied().unwrap_or(0);
+            if state != 0x12 && state != 0x13 {
+                boot.state.insert(who, 0x12);
+                return Ok(0.0);
+            }
+            let (home, leash) = boot.pen.get(&who).copied().unwrap_or((at, 0.0));
+            let cool = boot.cooldown.get(&who).copied().unwrap_or(0.0);
+            let heading = boot.heading.get(&who).copied().unwrap_or(yaw);
+            if state == 0x13 {
+                // out of bounds stops a charge, and so does losing sight
+                let out = leash > 0.0
+                    && (0..3).map(|c| (home[c] - at[c]).powi(2)).sum::<f64>().sqrt()
+                        > leash - CONTACT;
+                if dist >= CONTACT {
+                    if clear(heading, LOOK_CHARGE) && dist <= GIVE_UP && !out {
+                        boot.gait.insert(who, 2);
+                        return Ok(0.0);
+                    }
+                    boot.gait.insert(who.clone(), 0);
+                    if !out {
+                        boot.heading.insert(who.clone(), heading + std::f64::consts::PI);
+                    }
+                    boot.state.insert(who, 0x12);
+                    return Ok(0.0);
+                }
+                let flaming = kind == FLAMING;
+                drop(boot);
+                blast(
+                    lua,
+                    &who,
+                    at,
+                    BLAST,
+                    if flaming { FLAMING_SPENDS } else { SPENDS },
+                    KNOCKDOWN,
+                )?;
+                let mut boot = boot_mut(lua)?;
+                if flaming {
+                    boot.gait.insert(who.clone(), 0);
+                    boot.heading.insert(who.clone(), heading + std::f64::consts::PI);
+                    boot.state.insert(who, 0x12);
+                    return Ok(0.0);
+                }
+                boot.state.remove(&who);
+                drop(boot);
+                // 0x40e1b0 is `OnDie(gob, 1)` and nothing else; [`die`] is
+                // that plus what the walker's own damage handler does to a
+                // corpse, which is what the rest of the engine expects
+                die(lua, &who)?;
+                return Ok(0.0);
+            }
+            // 0x12
+            if cool > 0.0 {
+                if !clear(heading, LOOK_PROWL) {
+                    let side = match boot.side.get(&who) {
+                        Some(&s) => s,
+                        None => {
+                            let s = if boot.random.next() < 0.5 { 1.0 } else { -1.0 };
+                            boot.side.insert(who.clone(), s);
+                            s
+                        }
+                    };
+                    boot.heading.insert(who, heading + side * AWAY);
+                    return Ok(0.0);
+                }
+                boot.gait.insert(who, 1);
+                return Ok(0.0);
+            }
+            let inside = leash <= 0.0
+                || (0..3).map(|c| (to[c] - home[c]).powi(2)).sum::<f64>().sqrt() < leash;
+            if dist < CHARGE_AT
+                && to[2] - at[2] < STEP_UP
+                && inside
+                && facing_within(yaw, bearing, std::f64::consts::FRAC_PI_2)
+                && solid.as_ref().is_none_or(|c| {
+                    let eye = crate::game::body::EYE;
+                    c.sees([at[0], at[1], at[2] + eye], [to[0], to[1], to[2] + eye])
+                })
+            {
+                boot.gait.insert(who.clone(), 2);
+                boot.heading.insert(who.clone(), bearing);
+                boot.state.insert(who, 0x13);
+                return Ok(0.0);
+            }
+            let wait = boot.random.next() + AGAIN;
+            boot.cooldown.insert(who.clone(), wait);
+            boot.gait.insert(who.clone(), 1);
+            let want = if inside {
+                bearing + (boot.random.next() - 0.5) * AWAY
+            } else {
+                let far = boot.random.next() * leash;
+                let angle = boot.random.next() * std::f64::consts::TAU - std::f64::consts::PI;
+                let spot = [home[0] + angle.sin() * far, home[1] + angle.cos() * far];
+                crate::game::body::bearing(spot[0] - at[0], spot[1] - at[1])
+            };
+            boot.heading.insert(who, want);
+            Ok(0.0)
+        })?,
+    )?;
     // **The conehead civilian**, which is the crowd rather than the fight.
     // `mdkConeheadCivUpdate(gob)` is 0x440440 into **0x4347e0**, and
     // `script.lua` hangs it on `OBJ_CONEHEADCIV1` in the default table, so
@@ -1506,7 +1688,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                         })
                 };
                 let mut boot = boot_mut(lua)?;
-                let state = boot.civ.get(&who).copied().unwrap_or(3);
+                let state = boot.state.get(&who).copied().unwrap_or(3);
                 let cool = boot.cooldown.get(&who).copied().unwrap_or(0.0);
                 // `OnHear`: 0x434b00 is two branches and neither of them
                 // looks at the noise. Standing, it looks up; walking or
@@ -1517,14 +1699,14 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                             let coin = boot.random.next() <= 0.5;
                             boot.playing.insert(who.clone(), SCARED + coin as i64 as f64);
                             boot.since.insert(who.clone(), 0.0);
-                            boot.civ.insert(who.clone(), 0x10);
+                            boot.state.insert(who.clone(), 0x10);
                             boot.cooldown.insert(who, LOOKING);
                         }
                         0x10 | 0x11 => {
                             if let Some(to) = spot(&mut boot, at) {
                                 if reachable(to) {
                                     boot.homing.insert(who.clone(), to);
-                                    boot.civ.insert(who.clone(), 0x0b);
+                                    boot.state.insert(who.clone(), 0x0b);
                                     boot.cooldown.insert(who, WANDERING);
                                 }
                             }
@@ -1598,7 +1780,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                         state = 3;
                     }
                 }
-                boot.civ.insert(who, state);
+                boot.state.insert(who, state);
                 Ok(0.0)
             })?,
         )?;
@@ -3260,6 +3442,45 @@ fn stream(lua: &Lua, checkpoint: f64) -> mlua::Result<()> {
 /// reaches Lua as the **name** of a model slot, or `nil` for -1 (0x40e7d8),
 /// not as a number: `level7.lua` compares it against `"SHWANG_PALML"`.
 /// Every one of the 48 call sites in the shipped scripts passes -1.
+/// **The game's area damage**, 0x40e930 into **0x40e960**: walk every gob,
+/// skip the source, and for anything inside `radius` deal `damage - distance`
+/// of `kind`. The falloff is a plain subtraction and the distance is measured
+/// centre to centre, less the victim's own collision radius.
+///
+/// ponytail: a gob is a point here, so the radius is not subtracted. That
+/// makes a blast slightly weaker at the edge than the original's and never
+/// stronger, which is the safe direction for a thing that kills the player.
+fn blast(
+    lua: &Lua,
+    source: &str,
+    from: [f64; 3],
+    radius: f64,
+    damage: i64,
+    kind: i64,
+) -> mlua::Result<()> {
+    let caught: Vec<(String, i64)> = {
+        let Some(w) = world::world(lua) else { return Ok(()) };
+        w.iter()
+            .filter(|(_, g)| g.hitpoints > 0 && !g.name.is_empty() && g.name != source)
+            .filter_map(|(_, g)| {
+                let d = (0..3).map(|c| (g.position[c] - from[c]).powi(2)).sum::<f64>().sqrt();
+                (d < radius).then(|| (g.name.clone(), damage - d as i64))
+            })
+            .collect()
+    };
+    let globals = lua.globals();
+    let me = globals.get::<mlua::Table>(source).ok().map(Value::Table);
+    for (name, hurt) in caught {
+        if hurt <= 0 {
+            continue;
+        }
+        if let Ok(gob) = globals.get::<mlua::Table>(name.as_str()) {
+            deal_damage(lua, me.clone(), Value::Table(gob), hurt, kind, -1, true)?;
+        }
+    }
+    Ok(())
+}
+
 fn deal_damage(
     lua: &Lua,
     source: Option<Value>,
@@ -5794,6 +6015,51 @@ mod tests {
         );
     }
 
+    /// A samsmite charges when you are close enough and in front, and its
+    /// arrival is an explosion: 15 points at 5 units, falling off by the
+    /// distance, and then it dies. A flaming one -- `OBJ_FLAMINGSAMSMITE`,
+    /// 215, one of the eight constants that read as 1.4e-312 until today --
+    /// spends 7 and walks away from its own blast.
+    #[test]
+    fn a_samsmite_charges_and_goes_off() {
+        let charge = |kind: f64| {
+            let scripts = Scripts::new().unwrap();
+            install(&scripts.lua, Default::default()).unwrap();
+            scripts
+                .lua
+                .load(&format!(
+                    "mdkRegisterObject('s', {kind}, scene, nil, -1, 0,0,0, \
+                     1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                     mdkRegisterObject('kurt', 100, scene, nil, -1, 0,1,0, \
+                     1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                     mdkSetPlayModeGobs(0, kurt)"
+                ))
+                .exec()
+                .unwrap();
+            let health = || {
+                let w = world::world(&scripts.lua).unwrap();
+                w.get(w.find("kurt").unwrap()).unwrap().hitpoints
+            };
+            let full = health();
+            // the first call only claims the state; the second decides, and
+            // one unit away is inside contact, so the third arrives
+            for _ in 0..4 {
+                scripts.lua.app_data_mut::<Boot>().unwrap().cooldown.insert("s".into(), 0.0);
+                scripts.lua.load("mdkSamsmiteAttack(s)").exec().unwrap();
+            }
+            let out =
+                (full - health(), scripts.lua.app_data_ref::<Boot>().unwrap().died.clone());
+            out
+        };
+        // one unit out: 15 (or 7) less the distance, which rounds to nothing
+        let (hurt, died) = charge(201.0);
+        assert_eq!(hurt, 14, "fifteen at the centre, less the one unit");
+        assert_eq!(died, vec!["s".to_string()], "and it goes with the blast");
+        let (hurt, died) = charge(215.0);
+        assert_eq!(hurt, 6, "a flaming one spends seven");
+        assert!(died.is_empty(), "and walks away from it");
+    }
+
     /// A conehead civilian mills about and reacts to you, and does neither
     /// when the player is Doc -- 0x4347fd compares the target's type with
     /// 0x66 and shrugs. The states are reached by driving the clock, because
@@ -5822,7 +6088,7 @@ mod tests {
                 scripts.lua.app_data_mut::<Boot>().unwrap().cooldown.insert("cc".into(), 0.0);
                 scripts.lua.load("mdkConeheadCivUpdate(cc)").exec().unwrap();
                 let b = scripts.lua.app_data_ref::<Boot>().unwrap();
-                looked |= b.civ.get("cc") == Some(&0x10);
+                looked |= b.state.get("cc") == Some(&0x10);
             }
             looked
         };
@@ -5844,11 +6110,11 @@ mod tests {
             )
             .exec()
             .unwrap();
-        let state = |s: &Scripts| s.lua.app_data_ref::<Boot>().unwrap().civ.get("cc").copied();
-        scripts.lua.app_data_mut::<Boot>().unwrap().civ.insert("cc".into(), 0x14);
+        let state = |s: &Scripts| s.lua.app_data_ref::<Boot>().unwrap().state.get("cc").copied();
+        scripts.lua.app_data_mut::<Boot>().unwrap().state.insert("cc".into(), 0x14);
         scripts.lua.load("mdkConeheadCivOnHear(cc, 0, 0, 0, 0)").exec().unwrap();
         assert_eq!(state(&scripts), Some(0x10), "standing, it looks up");
-        scripts.lua.app_data_mut::<Boot>().unwrap().civ.insert("cc".into(), 0x11);
+        scripts.lua.app_data_mut::<Boot>().unwrap().state.insert("cc".into(), 0x11);
         scripts.lua.load("mdkConeheadCivOnHear(cc, 0, 0, 0, 0)").exec().unwrap();
         assert_eq!(state(&scripts), Some(0x0b), "walking, it runs");
     }
