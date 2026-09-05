@@ -101,6 +101,14 @@ CORPUS = [
     ("the recorded demo replays without leaving the world",
      ["walksim.py", "extracted/base/l1.lua", "--resources", "extracted",
       "--demo", "extracted/base/demo1_5.omn"], "base/demo1_5.omn"),
+    # **Can the player stand where a checkpoint puts him?** One of the 129
+    # starts inside geometry and twenty-four have no floor beneath them at
+    # all -- a two-minute fall. The second number is a known deficiency and
+    # this pins it, so that a change to how a collision tree is bounded shows
+    # up as a number. See the journal.
+    ("checkpoints have somewhere to stand",
+     ["spawncheck.py", "extracted", "--expect-floorless", "24",
+      "--expect-inside", "1"], "base"),
     ("room graphs resolve",
      ["rooms.py", "extracted", "--check", "--expect", "823"],
      "scripts/level1.lua"),
