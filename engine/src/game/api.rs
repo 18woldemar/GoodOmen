@@ -447,10 +447,11 @@ pub struct Boot {
     /// half a second with `warptime * 2` and finishes by setting it to 1,
     /// which is what settles the direction.
     pub opacity: BTreeMap<String, f64>,
-    /// Objects whose animation **wrapped this tick**, which is the whole of
-    /// `omAnimJustLooped` — 0x420250 into 0x461850, one field on the
-    /// animation instance. Cleared and refilled by every tick.
-    pub looped: BTreeSet<String>,
+    /// Objects whose animation **wrapped this tick**, and **which
+    /// animation** -- 0x461520 looks the instance up by id and 0x461850
+    /// returns 0 when there is none, so an object looping animation A does
+    /// not answer a script waiting on B. Cleared and refilled every tick.
+    pub looped: BTreeMap<String, f64>,
     /// How fast each object plays its animation, from `omAnimSetSpeed`. One
     /// per object rather than per animation, because [`Boot::playing`] holds
     /// one animation. **Negative runs it backwards** — `elevators.lua` shuts
@@ -1438,7 +1439,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 return Ok(0.0);
             }
             let up = boot.playing.get(&who).copied();
-            let free = boot.looped.contains(&who)
+            let free = boot.looped.contains_key(&who)
                 || up.is_none_or(|a| {
                     crate::game::world::GAIT_ANIM.contains(&a)
                         || crate::game::world::GAIT_ANIM_HURT.contains(&a)
@@ -2903,7 +2904,19 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         "omAnimJustLooped",
         lua.create_function(|lua, args: Variadic<Value>| {
             let Some(name) = args.first().and_then(gob_name) else { return Ok(0.0) };
-            Ok(if boot_ref(lua)?.looped.contains(&name) { 1.0 } else { 0.0 })
+            // **and the animation matters.** 0x461520 looks the instance
+            // up *by id* and 0x461850 returns 0 when there is none, so an
+            // object looping animation A does not answer a script waiting on
+            // B. Called with no id -- which no shipped site does -- this
+            // answers for whatever is up.
+            let want = args.get(1).map(number);
+            let boot = boot_ref(lua)?;
+            let looped = boot.looped.get(&name).copied();
+            Ok(match (looped, want) {
+                (Some(a), Some(b)) => (a as i64 == b as i64) as i64 as f64,
+                (Some(_), None) => 1.0,
+                (None, _) => 0.0,
+            })
         })?,
     )?;
     // `omAnimSetSpeed(gob, animation, speed)` — a multiplier on the record's
@@ -5321,7 +5334,7 @@ pub fn tick_touching(
                 // looped, fired its key again every pass. It holds for one
                 // loop now, which is what an animation priority buys in the
                 // original, and then the legs take it back.
-                let idle = boot.looped.contains(name)
+                let idle = boot.looped.contains_key(name)
                     || now.is_none_or(|a| {
                         crate::game::world::GAIT_ANIM.contains(&a)
                             || crate::game::world::GAIT_ANIM_HURT.contains(&a)
@@ -5514,7 +5527,7 @@ pub fn tick_touching(
             }
             if wrapped {
                 now -= span * (now / span).floor();
-                looped.push(name.clone());
+                looped.push((name.clone(), anim));
             }
             advanced.push((name, now));
         }
@@ -6387,7 +6400,23 @@ mod tests {
             tick(&scripts, &rooms, [0.0, 0.0, 0.0], 0.0, 1.0 / 30.0, &mut ticking).unwrap();
             let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
             struck += boot.keys_fired - before;
-            loops += boot.looped.contains("h") as usize;
+            loops += boot.looped.contains_key("h") as usize;
+            // and `omAnimJustLooped` answers **for the animation asked
+            // about**: 0x461520 looks the instance up by id and 0x461850
+            // returns 0 when there is none. 56 is what is playing; 57 is not.
+            if boot.looped.contains_key("h") {
+                drop(boot);
+                let ask = |a: f64| {
+                    scripts
+                        .lua
+                        .load(&format!("answer = omAnimJustLooped(h, {a})"))
+                        .exec()
+                        .unwrap();
+                    scripts.lua.globals().get::<f64>("answer").unwrap()
+                };
+                assert_eq!(ask(56.0), 1.0, "the one that looped");
+                assert_eq!(ask(57.0), 0.0, "and not one that did not");
+            }
         }
         assert_eq!(loops, 3, "three seconds of a one-second loop wraps three times");
         assert_eq!(struck, 3, "and the key comes round with it");
