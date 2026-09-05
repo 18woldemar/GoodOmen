@@ -461,6 +461,13 @@ pub struct Boot {
     /// the heading is rewritten towards the target on every call -- a
     /// retreating walker that forgot would turn round and charge.
     pub fleeing: BTreeSet<String>,
+    /// Walkers that have been nailed down. `mdkWalkerSetTurret(gob, 1)` --
+    /// 0x440190 into 0x431850, one store -- writes `walker + 0x90`, and the
+    /// chooser at 0x4327ff reads it as the very first question it asks: with
+    /// the flag set the whole movement half of the tree is skipped and only
+    /// the shoot-or-taunt leaf is left. That is what a turret is -- a walker
+    /// that turns and fires from where it stands.
+    pub turret: BTreeSet<String>,
     /// **The pen**: where a walker is allowed to be. `mdkWalkerSetPen(gob,
     /// point, radius)` -- 0x43f4e0 into 0x431810, three stores -- puts the
     /// point in `walker + 0x6c`, the radius in `walker + 0x78` and sets the
@@ -1135,6 +1142,23 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             Ok(1.0)
         })?,
     )?;
+    // `mdkWalkerSetTurret(gob, on)` -- 0x440190 into **0x431850**, a single
+    // store of the argument into `walker + 0x90`. Eleven script sites and
+    // 2860 calls over the 129 checkpoints, because most of them sit inside an
+    // `OnUpdate`. See [`Boot::turret`] for what the flag costs the chooser.
+    globals.set(
+        "mdkWalkerSetTurret",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(who) = args.first().and_then(gob_name) else { return Ok(0.0) };
+            let mut boot = boot_mut(lua)?;
+            if args.get(1).map(number).unwrap_or(0.0) != 0.0 {
+                boot.turret.insert(who);
+            } else {
+                boot.turret.remove(&who);
+            }
+            Ok(0.0)
+        })?,
+    )?;
     // **The inventory.** `mdkDocGiveItem(gob, type, count)` is 0x43e0d0 into
     // 0x40ce40, which is four lines: look the record up, force the count to
     // **-1 when the record's give column is negative** — unlimited, which is
@@ -1426,6 +1450,12 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             const LEAD: f64 = 0.025; // 0x4901c4
             let lead = crate::game::world::ai(kind).is_some_and(|r| r.lead != 0.0);
             let mut boot = boot_mut(lua)?;
+            // **a turret answers the first question in the tree.** 0x4327ff
+            // asks `walker + 0x90` before anything else and, with it set,
+            // skips the whole movement half -- the walk home, the leap, the
+            // advance and both ways of giving ground -- leaving the taunt and
+            // the burst. Every guard below is that one branch.
+            let turret = boot.turret.contains(&who);
             let moving = hero.as_deref().and_then(|n| boot.velocity.get(n)).copied();
             let d = match moving {
                 Some(v) if lead => [0, 1, 2].map(|c| d[c] + v[c] * dist * LEAD),
@@ -1516,7 +1546,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             // Without a pen a walker is never out of bounds, which is why the
             // flag exists: the constructor leaves it clear and sets the leash
             // to 25 (0x42f400) that nothing then reads.
-            if let Some((home, leash)) = boot.pen.get(&who).copied() {
+            if let Some((home, leash)) = boot.pen.get(&who).copied().filter(|_| !turret) {
                 let out = (0..3).map(|c| (home[c] - at[c]).powi(2)).sum::<f64>().sqrt();
                 if out > leash && boot.homing.get(&who) != Some(&home) {
                     /// What being out of the pen costs before it may choose
@@ -1565,7 +1595,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             // it is past `+0x78`.
             let (hitpoints, payload) =
                 with_gob(lua, args.first(), |g| (g.hitpoints, g.payload)).unwrap_or((0, [0.0; 4]));
-            let choosing = cool <= 0.0 && left <= 0.0;
+            let choosing = cool <= 0.0 && left <= 0.0 && !turret;
             if let Some(rec) = crate::game::world::ai(kind) {
                 if choosing && crate::game::world::limping(kind, hitpoints) {
                     if boot.random.next() <= rec.act {
@@ -1611,7 +1641,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 }
             }
             if let Some(rec) = crate::game::world::ai(kind) {
-                let choosing = cool <= 0.0 && left <= 0.0 && dist >= near;
+                let choosing = cool <= 0.0 && left <= 0.0 && dist >= near && !turret;
                 let advance = if dist >= rec.reach {
                     // too far to shoot at all
                     choosing && boot.random.next() < rec.act
@@ -1660,7 +1690,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                     // and a **conehead** that is scared runs instead, half the
                     // time: 0x432a4f tests the def's type for 0xcb and only
                     // then chooses between state 11 and the animation
-                    if scared && kind == CONEHEAD && boot.random.next() < 0.5 {
+                    if scared && !turret && kind == CONEHEAD && boot.random.next() < 0.5 {
                         retreat(&mut boot, &who, at, to);
                         return Ok(0.0);
                     }
@@ -1737,7 +1767,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             // an invisogrunt fights anyway (0x432ac9), and everything else
             // rolls `scared`: under that it **runs** — state 11 — and over it
             // it backs away on its feet, state 2.
-            if dist < near && cool <= 0.0 {
+            if dist < near && cool <= 0.0 && !turret {
                 if let Some(rec) = crate::game::world::ai(kind) {
                     if boot.random.next() <= rec.act
                         && kind != INVISOGRUNT
@@ -1748,7 +1778,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                     }
                 }
             }
-            let gait = if dist < near && cool <= 0.0 { 3 } else { 0 };
+            let gait = if dist < near && cool <= 0.0 && !turret { 3 } else { 0 };
             if gait == 3 {
                 /// What giving ground costs, from the float 0x432af4 writes
                 /// into `walker + 0x64` on the way into state 2. Without it a
@@ -5449,6 +5479,57 @@ mod tests {
             (land[1] - 15.0) >= 15.0 && (land[1] - 15.0) <= 30.0,
             "half to all of the record's 30-unit leap beyond: {land:?}"
         );
+    }
+
+    /// A turret is a walker with the movement half of the chooser switched
+    /// off. Stood on top of the player -- inside `near`, where an ordinary
+    /// doganboy backs away or runs within a handful of calls -- it never
+    /// leaves gait 0, and it never picks up a pen, a leap or an advance.
+    #[test]
+    fn a_turret_never_moves() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('d', 207, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkRegisterObject('kurt', 100, scene, nil, -1, 0,5,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkSetPlayModeGobs(0, kurt)\n\
+                 mdkWalkerSetTurret(d, 1)",
+            )
+            .exec()
+            .unwrap();
+        for _ in 0..200 {
+            {
+                let mut b = scripts.lua.app_data_mut::<Boot>().unwrap();
+                b.cooldown.insert("d".into(), 0.0);
+                b.burst.insert("d".into(), 0.0);
+            }
+            scripts.lua.load("mdkDoganboyAttack(d)").exec().unwrap();
+            let b = scripts.lua.app_data_ref::<Boot>().unwrap();
+            assert_eq!(b.gait.get("d"), Some(&0), "a turret holds its ground");
+            assert!(b.fleeing.is_empty() && b.homing.is_empty() && b.jumps.is_empty());
+        }
+        // and clearing the flag hands the walker back its legs
+        scripts.lua.load("mdkWalkerSetTurret(d, 0)").exec().unwrap();
+        for tries in 0.. {
+            {
+                let mut b = scripts.lua.app_data_mut::<Boot>().unwrap();
+                b.cooldown.insert("d".into(), 0.0);
+                b.burst.insert("d".into(), 0.0);
+            }
+            scripts.lua.load("mdkDoganboyAttack(d)").exec().unwrap();
+            let moved = {
+                let b = scripts.lua.app_data_ref::<Boot>().unwrap();
+                b.gait.get("d") != Some(&0) || !b.fleeing.is_empty()
+            };
+            if moved {
+                break;
+            }
+            assert!(tries < 100, "an unpinned doganboy inside `near` gives ground");
+        }
     }
 
     /// Giving ground is not something a crowded walker does every frame:
