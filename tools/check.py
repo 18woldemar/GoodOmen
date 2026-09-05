@@ -159,11 +159,17 @@ ENGINE = [
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG", "--boot",
       "--expect", "129", "--expect-resources", "2093",
       "--expect-rooms", "677", "--expect-bindings", "59",
-      "--events", "--expect-events", "9986",
-      "--expect-survived", "9840", "--expect-plays", "253",
+      # 9986 -> 10079 and 9840 -> 9945 with the **eight object constants that
+      # were wrong** put right: 208..215 are the birdbrain, the bif turret,
+      # bad Max, the BFB, the superfish, the super and ultra doganboys and the
+      # flaming samsmite, and every one of them read as 1.4e-312. See the
+      # journal -- it is an alignment bug in `luaconst.py`, not the binary.
+      "--events", "--expect-events", "10079",
+      "--expect-survived", "9945", "--expect-plays", "253",
       "--expect-spawned", "152", "--expect-armed", "152",
       "--expect-destroyed", "19889", "--expect-roomless", "0",
-      "--expect-alerted", "1087"], None),
+      # 1087 -> 1180: the eight types are walkers and the levels alert them
+      "--expect-alerted", "1180"], None),
     ("the engine's controller replays the demo like walksim.py",
      ["walksim.py", "extracted/base/l1.lua", "--resources", "extracted",
       "--demo", "extracted/base/demo1_5.omn", "--engine", "$MDK2_GOG"],
@@ -350,7 +356,14 @@ ENGINE = [
       # the enemies sooner, and is killed at 49s of the 120 -- so the run is
       # shorter and every count with it. It reaches four rooms on the way,
       # against the one it used to.
-      "--run", "4", "1", "120", "--roam", "--expect-shots", "46",
+      # **and the eight wrong constants moved this one most.** Level 4 places
+      # four `OBJ_BIFTURRET` and two `OBJ_ULTRADOGANBOY`, and both types read
+      # as 1.4e-312 until `luaconst.py` was fixed -- so six enemies were
+      # nothing at all. With them: 34866 handler calls -> 41498, 46 shots at
+      # the player -> 38 (a bif turret does not close, so the doganboys that
+      # used to be alone now share the room), the same 20 land, and the player
+      # lives to **63s** instead of 49.
+      "--run", "4", "1", "120", "--roam", "--expect-shots", "38",
       "--expect-hits", "20", "--expect-health", "0", "--expect-rooms", "6",
       # 40 shots -> 39 and 29206 handler calls -> 28246: the player dies at
       # 47 seconds instead of 49 now that the exact collision test moves the
@@ -359,7 +372,7 @@ ENGINE = [
       # And back to 40 shots at 30026 calls with the leap and the retreat in:
       # he lives three seconds longer because a walker that runs away is not
       # shooting, and dies of the same fire at 50s.
-      "--expect-events", "34866", "--expect-survived", "34866"], None),
+      "--expect-events", "41498", "--expect-survived", "41498"], None),
     # and the loop closes: the player walks at an enemy, shoots it with the
     # hitscan the original uses, and it dies.
     # and what it kills falls over: the walker's own OnDamage (0x430a60) plays
@@ -406,13 +419,18 @@ ENGINE = [
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--play", "4", "1", "--window", "--for", "30",
-      "--expect-events", "18001", "--expect-fighting", "12",
-      "--expect-keys", "39", "--expect-shots", "21",
+      # and the same six enemies the wrong constants had erased show up here:
+      # 18001 handler calls -> 19801, 12 fighting -> 14, 39 keys -> 25, 21
+      # shots at the player -> 9, and he lives the thirty seconds out on 55
+      # instead of dying at 24. Six more bodies in the room is six more things
+      # in the way of a shot.
+      "--expect-events", "19801", "--expect-fighting", "14",
+      "--expect-keys", "25", "--expect-shots", "9",
       # **and the loop closes**: the player dies in these thirty seconds and
       # starts over at the checkpoint, whole. It used to end them on 0 and
       # keep walking a corpse; every other number here is unchanged, which
       # says the death is late in the run and the restart costs nothing.
-      "--expect-health", "100", "--expect-deaths", "1"], None),
+      "--expect-health", "55", "--expect-deaths", "0"], None),
     # **The scope.** `--sniper N` enters `PLAYMODE_SNIPER` at N degrees --
     # the same call the V key makes -- and pins what the mode costs: the legs
     # stop, so `walkers walked` is the enemies' own, and standing still in
@@ -421,9 +439,12 @@ ENGINE = [
     ("the sniper scope is a play mode, and standing still in it hurts",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
-      "--play", "1", "5", "--window", "--for", "30", "--sniper", "8",
-      "--expect-events", "13003", "--expect-shots", "15",
-      "--expect-health", "25"], None),
+      # Forty-five seconds rather than thirty, because that is long enough
+      # for the other half of the loop: he is killed and starts over at the
+      # checkpoint, whole, and finishes on 90.
+      "--play", "1", "5", "--window", "--for", "45", "--sniper", "8",
+      "--expect-events", "19303", "--expect-shots", "24",
+      "--expect-health", "90", "--expect-deaths", "1"], None),
     ("walking drives the player's own animation, and reaches the scripts",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",

@@ -123,7 +123,18 @@ def constants(image: Image) -> dict[str, float]:
                 value = struct.unpack("<d", struct.pack("<II", args[1], args[0]))[0]
                 target = image.base + sva + (p + 5 - raw) + \
                     struct.unpack_from("<i", data, p + 1)[0]
-                out.setdefault(target, {})[name] = value
+                # **first match wins**, and that is not a tie-break, it is the
+                # alignment. This walks byte by byte, so a start *inside* the
+                # first `push imm32` can also read as four pushes and a call:
+                # `68 00 e0 6a 40` is `push 0x406ae000`, and starting three
+                # bytes in it is `6a 40` -- `push 64`. That reads as a whole
+                # registration and, being later, used to overwrite the real
+                # one. It bites any value whose high dword ends in 0x6a or
+                # 0x68, which is why `OBJ_FLAMINGSAMSMITE` -- 215, whose high
+                # dword is 0x406ae000 -- came out as 1.4e-312. A misaligned
+                # match always starts after the aligned one, so keeping the
+                # first is exactly right.
+                out.setdefault(target, {}).setdefault(name, value)
         o += 1
     if not out:
         raise ValueError("no constant registrations found")
