@@ -488,6 +488,24 @@ pub struct Boot {
     /// stays and [`crate::game::body::Body`] chases it. Absent means the
     /// walker is on its feet.
     pub altitude: BTreeMap<String, f64>,
+    /// **The scripts have taken the controls.** `mdkDisablePlayerControl`
+    /// and `mdkEnablePlayerControl` (0x43a080 and 0x43a050, into 0x42a8d0 and
+    /// 0x42a8c0) are one global each -- `DAT_004bb6a8`, cleared and set --
+    /// and the scripts use them around a scripted moment: `boss.lua` three
+    /// times, `level4.lua` from inside a task list.
+    ///
+    /// Written the negative way round so that `Default` is the player
+    /// driving, which is what a level starts as.
+    ///
+    /// **Nothing reads it, deliberately.** A sweep of the 129 checkpoints
+    /// counts **13 disables and 1 enable**: the task lists are balanced in the
+    /// script -- `level9.lua` has four matched pairs -- but the sequences
+    /// between them stall on things this engine does not finish, so the
+    /// re-enable is never reached. Honouring the flag today strands the
+    /// player for the rest of the level, which is worse than ignoring it.
+    /// Wiring the driver to it cost level 9 its keys (48 struck -> 27) and
+    /// dropped the player out of the world, which is how this was found.
+    pub no_control: bool,
     /// **The play mode the level last asked for.** 0x42b940 parks
     /// `mdkSwitchPlayMode`'s argument in a pending slot and raises a flag;
     /// 0x42b9d0, which is what `mdkGetPlayMode` calls, answers with the
@@ -2729,6 +2747,26 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         "mdkSwitchPlayMode",
         lua.create_function(|lua, args: Variadic<Value>| {
             switch_play_mode(lua, args.first().map(number).unwrap_or(0.0) as i64)
+        })?,
+    )?;
+    // one flag each, and the driver reads it -- see [`Boot::controlled`]
+    for name in ["mdkEnablePlayerControl", "mdkDisablePlayerControl"] {
+        let on = name == "mdkEnablePlayerControl";
+        globals.set(
+            name,
+            lua.create_function(move |lua, ()| {
+                boot_mut(lua)?.no_control = !on;
+                Ok(())
+            })?,
+        )?;
+    }
+    // `mdkGetCameraGob()` -- 0x439fd0, which hands back whatever 0x42a980
+    // answers with. `mdk2.lua` makes exactly one `OBJ_DEFAULTCAMERA` and
+    // calls it `camera`, so that is the object.
+    globals.set(
+        "mdkGetCameraGob",
+        lua.create_function(|lua, ()| {
+            Ok(lua.globals().get::<Value>("camera").unwrap_or(Value::Nil))
         })?,
     )?;
     globals.set(

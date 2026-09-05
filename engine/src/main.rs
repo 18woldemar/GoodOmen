@@ -2009,10 +2009,11 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 // and in the scope the legs stop: 0x4198e0 writes -1.0 into
                 // both of the mover's speeds, so the input drives nothing.
                 // Gravity still runs -- it is the same body.
+                let frozen = sniping;
                 drive.push(
                     who,
-                    if sniping { 0 } else { held(Scancode::W) as i32 - held(Scancode::S) as i32 },
-                    if sniping { 0 } else { held(Scancode::D) as i32 - held(Scancode::A) as i32 },
+                    if frozen { 0 } else { held(Scancode::W) as i32 - held(Scancode::S) as i32 },
+                    if frozen { 0 } else { held(Scancode::D) as i32 - held(Scancode::A) as i32 },
                     dt,
                 );
                 let (step, speed) = drive.heading(yaw);
@@ -2027,7 +2028,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                     blown += 1;
                 }
                 body.blow(up, dt);
-                body.step(&collision, step, held(Scancode::Space) && !sniping, speed, dt);
+                body.step(&collision, step, held(Scancode::Space) && !frozen, speed, dt);
                 let _ = d;
                 at = body.position;
                 // and a hard landing hurts here too -- see `body::fall_damage`
