@@ -742,6 +742,48 @@ pub const LOOK_AHEAD: [(f64, f64); 19] = [
     (217.0, 8.0), (206.0, 10.0), (208.0, 10.0), (260.0, 10.0),
 ];
 
+/// **Which types fly, and how fast they climb.** `def + 0x14` **bit 2** and
+/// `def + 0x30`, and the two agree exactly: the four records with the bit set
+/// are the four with a vertical speed, and no other record has either. That
+/// is what makes the reading safe -- the flag is the AI's own first question
+/// (`(rec.flags & 4) == 0 && the mover is not on the ground` means "do
+/// nothing", so a flier is always awake and a walker has to be standing) and
+/// the speed is what state 0x0e writes into the mover.
+///
+/// `(type, climb)`. The zizzy is the flying turret, the angel and the BFB are
+/// level 9's, and the birdbrain is the one the scripts deploy in numbers.
+pub const FLIES: [(f64, f64); 4] = [
+    (211.0, 6.0),  // bfb
+    (206.0, 4.0),  // angel
+    (208.0, 6.5),  // birdbrain1
+    (260.0, 10.0), // zizzy
+];
+
+/// **The range a flier shoots from rather than closes to**, `def + 0x54`.
+/// Zero for eleven of the nineteen; the birdbrain's is 10 and the zizzy's 30.
+/// A bif, a grunt and a doganboy carry one too, and nothing this engine has
+/// built yet reads theirs.
+pub const SHOOT_WITHIN: [(f64, f64); 8] = [
+    (200.0, 7.5),  // bif
+    (202.0, 6.0),  // grunt
+    (219.0, 6.0),  // invisogrunt
+    (207.0, 5.0),  // doganboy
+    (214.0, 5.0),  // ultradogan
+    (208.0, 10.0), // birdbrain1
+    (260.0, 30.0), // zizzy
+    (0.0, 0.0),    // and the eleven that hold zero are not listed
+];
+
+/// How fast this type climbs, if it flies at all.
+pub fn climb(kind: f64) -> Option<f64> {
+    FLIES.iter().find(|(k, _)| *k == kind).map(|(_, c)| *c)
+}
+
+/// The range inside which a flier stops shooting and goes for you.
+pub fn shoot_within(kind: f64) -> f64 {
+    SHOOT_WITHIN.iter().find(|(k, _)| *k == kind).map(|(_, d)| *d).unwrap_or(0.0)
+}
+
 /// How far ahead this type looks, if the table names it.
 pub fn look_ahead(kind: f64) -> Option<f64> {
     LOOK_AHEAD.iter().find(|(k, _)| *k == kind).map(|(_, d)| *d)

@@ -361,6 +361,10 @@ pub struct Body {
     /// Frames that finished inside geometry. This one must stay zero.
     pub inside: usize,
     pub travelled: f64,
+    /// **This body flies**: no gravity, no floor, and the vertical move is
+    /// whatever its `velocity_z` says, refused only by geometry. Set for the
+    /// four types in [`crate::game::world::FLIES`].
+    pub flying: bool,
     /// The collision trees the body is against **this frame** — what it
     /// walked into and what it stands on. The driver diffs this between
     /// frames, and a name entering it is an `OnCollision` and a name leaving
@@ -403,6 +407,7 @@ impl Body {
             hits: 0,
             inside: 0,
             travelled: 0.0,
+            flying: false,
             touching: Default::default(),
             landed: 0.0,
         }
@@ -512,6 +517,30 @@ impl Body {
         if self.on_ground && jump {
             self.velocity_z = JUMP_SPEED;
             self.on_ground = false;
+        }
+        // **A body that flies has no floor.** The four types whose
+        // `def + 0x14` carries bit 2 -- see [`crate::game::world::FLIES`] --
+        // never ask about the ground: their AI writes the mover's own z
+        // velocity from `def + 0x30` and everything under them is scenery.
+        // So the vertical half of a frame becomes one line, and the only
+        // thing that refuses a climb is geometry.
+        if self.flying {
+            let want = self.position[2] + self.velocity_z * dt;
+            if !world.blocked([self.position[0], self.position[1], want], self.height, self.width) {
+                self.position[2] = want;
+            }
+            self.on_ground = false;
+            if world.blocked(self.position, self.height, self.width) {
+                self.inside += 1;
+            }
+            if let Some(t) = world.blocking(self.position, self.height, self.width) {
+                self.touching.insert(t);
+            }
+            self.travelled += (0..2)
+                .map(|c| (self.position[c] - was[c]).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            return;
         }
         // **Gravity only bites when there is nothing underfoot.** Integrating
         // it while the body is resting makes the body bob for ever, because

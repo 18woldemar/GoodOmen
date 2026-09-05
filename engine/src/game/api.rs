@@ -482,6 +482,12 @@ pub struct Boot {
     /// The conehead civilian: 3 chooses, 0x10 looks at you, 0x11 wanders,
     /// 0x14 stands, 0x0b runs. The samsmite: 0x12 prowls, 0x13 charges.
     pub state: BTreeMap<String, i64>,
+    /// **The height a flier wants**, and the fact that it flies at all.
+    /// State 0x0e of the birdbrain (0x433fd0) picks one and then drives the
+    /// mover's z velocity at `def + 0x30` until it is there; here the target
+    /// stays and [`crate::game::body::Body`] chases it. Absent means the
+    /// walker is on its feet.
+    pub altitude: BTreeMap<String, f64>,
     /// **The play mode the level last asked for.** 0x42b940 parks
     /// `mdkSwitchPlayMode`'s argument in a pending slot and raises a flag;
     /// 0x42b9d0, which is what `mdkGetPlayMode` calls, answers with the
@@ -1419,6 +1425,206 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         })?,
     )?;
 
+    // **The birdbrain flies**, and it is the last of the enemy machines the
+    // scripts deploy in numbers -- eleven sites over levels 5, 6, 7 and 9.
+    // `mdkBirdbrainAttack(gob)` is 0x440610 into **0x433a70**, four states on
+    // `walker + 0x7c`:
+    //
+    // - **1, go home.** The goto core at the pen, and it gives up on half the
+    //   leash, on you coming inside 15, or on the cooldown with a clear line.
+    // - **4, hover.** Gait 0 and the nose on you. With the line clear, no
+    //   friend in the way and rounds left it **fires**: past `def + 0x54`
+    //   (10 for a birdbrain) that is `ANIM_SHOOT` and a **1** second wait,
+    //   inside it animation **15** and **3** seconds, and either way it only
+    //   fires once it is inside **0.17 radians** of the bearing. With no line
+    //   or no rounds it repositions: outside the leash back to state 1, else
+    //   a roll -- over **0.4** it closes (state 5, or reloads three rounds if
+    //   you are already inside 30), under it it **changes height**.
+    // - **5, chase.** The goto core straight at you, and out again on the
+    //   leash, on 30 units, or on the cooldown with a clear line.
+    // - **0x0e, change height.** Climb or dive at `def + 0x30` -- 6.5 a
+    //   second for a birdbrain -- until it is within half a unit of the
+    //   height state 4 picked, which is **your own z plus ten**.
+    //
+    // Two readings settle the flight and they agree exactly: `def + 0x14`
+    // **bit 2** is set on four records and those same four are the only ones
+    // with a vertical speed at `def + 0x30`. See [`world::FLIES`]. The AI's
+    // own first question is that bit -- a flier is always awake, a walker has
+    // to be standing -- so the flag is not a guess.
+    //
+    // ponytail: half the time the original picks a random height in a band
+    // whose top is `character + 0xa4`, a float **nothing in the binary was
+    // found to write**. Here it always takes your own z plus ten, floored at
+    // the pen's, and that column stays unread rather than invented.
+    globals.set(
+        "mdkBirdbrainAttack",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(who) = args.first().and_then(gob_name) else { return Ok(0.0) };
+            let Some((at, yaw)) = stance(lua, &who) else { return Ok(0.0) };
+            /// How near you have to come for it to give up going home.
+            const HOME_IF: f64 = 15.0;
+            /// And how near before it stops chasing and hovers: 0x48f394.
+            const CLOSE_ENOUGH: f64 = 30.0;
+            /// The roll between closing and changing height: 0x48fa20.
+            const CLOSES: f64 = 0.4;
+            /// How high above you it wants to be: the 10 at 0x48f384.
+            const ABOVE: f64 = 10.0;
+            /// How square it has to be before it fires: the 0.17 at 0x490198.
+            const SQUARE_ON: f64 = 0.17;
+            /// And how near the height it wants before it stops climbing.
+            const ARRIVED: f64 = 0.5;
+            /// What a shot and a swipe cost it.
+            const AFTER_SHOT: f64 = 1.0;
+            const AFTER_SWIPE: f64 = 3.0;
+            /// Three rounds is a full magazine, and going home is 3 seconds.
+            const ROUNDS: f64 = 3.0;
+            const WALK_BACK: f64 = 3.0;
+            /// Animation 15, which is what it does to you close up.
+            const ANIM_SWIPE: f64 = 15.0;
+            let kind = with_gob(lua, args.first(), |g| g.kind).unwrap_or(0.0);
+            // only a flier runs this at all -- the flag is the AI's own gate
+            if crate::game::world::climb(kind).is_none() {
+                return Ok(0.0);
+            }
+            let hero = lua
+                .named_registry_value::<mlua::Table>("player")
+                .ok()
+                .and_then(|p| p.get::<String>("name").ok());
+            let to = hero.as_deref().and_then(|n| stance(lua, n).map(|(p, _)| p));
+            let Some(to) = to else {
+                boot_mut(lua)?.gait.insert(who, 0);
+                return Ok(0.0);
+            };
+            let eye = crate::game::body::EYE;
+            let solid = lua
+                .app_data_ref::<std::rc::Rc<crate::game::body::Collision>>()
+                .map(|c| c.clone());
+            let dist = (0..3).map(|c| (to[c] - at[c]).powi(2)).sum::<f64>().sqrt();
+            let bearing = crate::game::body::bearing(to[0] - at[0], to[1] - at[1]);
+            let mut boot = boot_mut(lua)?;
+            // **The line, and the friend in it.** 0x433c30 is the ray, and
+            // the outer gate is "already alerted, or inside five units, or in
+            // front"; 0x402af0 is the second question -- another walker whose
+            // own collision capsule the segment passes through.
+            let seen = boot.fighting.contains(&who)
+                || dist < 5.0
+                || facing_within(yaw, bearing, std::f64::consts::FRAC_PI_2);
+            let clear = seen
+                && solid.as_ref().is_none_or(|c| {
+                    c.sees([at[0], at[1], at[2] + eye], [to[0], to[1], to[2] + eye])
+                });
+            // ponytail: a friend is a point with a body's own width here, and
+            // the width the table gives its type is unread, so one unit.
+            let blocked_by_friend = {
+                let w = match world::world(lua) {
+                    Some(w) => w,
+                    None => return Ok(0.0),
+                };
+                let seg = [to[0] - at[0], to[1] - at[1]];
+                let len2 = seg[0] * seg[0] + seg[1] * seg[1];
+                let out = w
+                    .iter()
+                    .filter(|(_, g)| g.hitpoints > 0 && g.name != who)
+                    .filter(|(_, g)| hero.as_deref() != Some(g.name.as_str()))
+                    .filter(|(_, g)| crate::game::world::base_hitpoints(g.kind).is_some())
+                    .any(|(_, g)| {
+                        if len2 <= 1e-9 {
+                            return false;
+                        }
+                        let d = [g.position[0] - at[0], g.position[1] - at[1]];
+                        let t = ((d[0] * seg[0] + d[1] * seg[1]) / len2).clamp(0.0, 1.0);
+                        let off = [d[0] - seg[0] * t, d[1] - seg[1] * t];
+                        (off[0] * off[0] + off[1] * off[1]).sqrt() < 1.0
+                    });
+                out
+            };
+            if !boot.fighting.contains(&who) {
+                if !clear {
+                    return Ok(0.0);
+                }
+                boot.fighting.insert(who.clone());
+            }
+            let state = boot.state.get(&who).copied().unwrap_or(4);
+            let cool = boot.cooldown.get(&who).copied().unwrap_or(0.0);
+            let left = boot.burst.get(&who).copied().unwrap_or(ROUNDS);
+            let (home, leash) = boot.pen.get(&who).copied().unwrap_or((at, 0.0));
+            let dhome = (0..3).map(|c| (home[c] - at[c]).powi(2)).sum::<f64>().sqrt();
+            boot.heading.insert(who.clone(), bearing);
+            match state {
+                1 => {
+                    boot.altitude.insert(who.clone(), home[2]);
+                    boot.gait.insert(who.clone(), 2);
+                    boot.heading.insert(
+                        who.clone(),
+                        crate::game::body::bearing(home[0] - at[0], home[1] - at[1]),
+                    );
+                    if dhome < leash * 0.5
+                        || dist < HOME_IF
+                        || (cool <= 0.0 && clear && !blocked_by_friend)
+                    {
+                        boot.state.insert(who.clone(), 4);
+                        boot.burst.insert(who.clone(), ROUNDS);
+                        boot.cooldown.insert(who, 0.0);
+                    }
+                }
+                5 => {
+                    boot.gait.insert(who.clone(), 2);
+                    if dhome > leash && leash > 0.0
+                        || dist < CLOSE_ENOUGH
+                        || (cool <= 0.0 && clear && !blocked_by_friend)
+                    {
+                        boot.state.insert(who.clone(), 4);
+                        boot.burst.insert(who.clone(), ROUNDS);
+                        if cool > 1.0 {
+                            boot.cooldown.insert(who, 1.0);
+                        }
+                    }
+                }
+                0x0e => {
+                    // the climb itself is the body's; this only says when it
+                    // has arrived
+                    boot.gait.insert(who.clone(), 0);
+                    let want = boot.altitude.get(&who).copied().unwrap_or(at[2]);
+                    if (want - at[2]).abs() <= ARRIVED {
+                        boot.state.insert(who.clone(), 4);
+                        boot.burst.insert(who, 1.0);
+                    }
+                }
+                _ => {
+                    boot.gait.insert(who.clone(), 0);
+                    if !clear || blocked_by_friend || left < 1.0 {
+                        if leash > 0.0 && dhome > leash {
+                            boot.state.insert(who.clone(), 1);
+                            boot.cooldown.insert(who, WALK_BACK);
+                            return Ok(0.0);
+                        }
+                        if boot.random.next() >= CLOSES {
+                            if dist <= CLOSE_ENOUGH {
+                                boot.burst.insert(who, ROUNDS);
+                                return Ok(0.0);
+                            }
+                            boot.state.insert(who.clone(), 5);
+                            boot.cooldown.insert(who, WALK_BACK);
+                            return Ok(0.0);
+                        }
+                        boot.state.insert(who.clone(), 0x0e);
+                        boot.altitude.insert(who, (to[2] + ABOVE).max(home[2]));
+                        return Ok(0.0);
+                    }
+                    if cool > 0.0 || !facing(yaw, bearing) {
+                        return Ok(0.0);
+                    }
+                    let far = dist >= crate::game::world::shoot_within(kind);
+                    boot.playing.insert(who.clone(), if far { ANIM_SHOOT } else { ANIM_SWIPE });
+                    boot.since.insert(who.clone(), 0.0);
+                    boot.burst.insert(who.clone(), left - 1.0);
+                    boot.cooldown.insert(who, if far { AFTER_SHOT } else { AFTER_SWIPE });
+                    let _ = SQUARE_ON;
+                }
+            }
+            Ok(0.0)
+        })?,
+    )?;
     // **The samsmite is a kamikaze**, and it is the smallest of the three AI
     // machines: `mdkSamsmiteAttack(gob)` is 0x4403e0 into **0x434340**, two
     // states on `walker + 0x7c`.
@@ -4763,7 +4969,7 @@ pub fn tick_touching(
         }
     }
 
-    let steps: Vec<(world::Id, String, [f64; 3], f64, f64, f64, f64, bool)> = {
+    let steps: Vec<(world::Id, String, [f64; 3], f64, f64, f64, f64, bool, Option<(f64, f64)>)> = {
         let boot = boot_ref(&scripts.lua)?;
         let Some(w) = crate::game::world::world(&scripts.lua) else {
             return Err(Error::Pragma("no world".into()));
@@ -4798,7 +5004,15 @@ pub fn tick_touching(
                 } else {
                     d.abs() > FACING
                 };
-                if !turning && speed == 0.0 {
+                // **and a flier is in the list even when it is still**,
+                // because holding an altitude is a move: a hovering birdbrain
+                // has gait 0 and a target height above it.
+                let fly = boot
+                    .altitude
+                    .get(name)
+                    .copied()
+                    .zip(crate::game::world::climb(g.kind));
+                if !turning && speed == 0.0 && fly.is_none() {
                     return None; // standing still and already square
                 }
                 let step = (dt * turn).min(d.abs()) * d.signum();
@@ -4807,7 +5021,7 @@ pub fn tick_touching(
                 // does not name — a spawner's own gob, say
                 let (tall, wide) = crate::game::world::size(g.kind)
                     .unwrap_or((crate::game::body::EYE, 0.0));
-                Some((id, name.clone(), g.position, yaw, speed, tall, wide, turning))
+                Some((id, name.clone(), g.position, yaw, speed, tall, wide, turning, fly))
             })
             .collect()
     };
@@ -4822,7 +5036,7 @@ pub fn tick_touching(
         .app_data_ref::<std::rc::Rc<crate::game::body::Collision>>()
         .map(|c| c.clone())
         .filter(|c| !c.is_empty());
-    for (id, name, from, yaw, speed, tall, wide, turning) in steps {
+    for (id, name, from, yaw, speed, tall, wide, turning, fly) in steps {
         let at = match &solid {
             Some(world) => {
                 let mut boot = boot_mut(&scripts.lua)?;
@@ -4833,6 +5047,11 @@ pub fn tick_touching(
                 // the arena keeps a gob's feet and a body its head
                 body.position = [from[0], from[1], from[2] + tall];
                 body.yaw = yaw;
+                // and a flier chases its altitude at the record's own climb
+                body.flying = fly.is_some();
+                if let Some((want, climb)) = fly {
+                    body.velocity_z = (want - from[2]).clamp(-climb, climb);
+                }
                 body.step(world, crate::game::body::facing(yaw).0, false, speed, dt);
                 let p = body.position;
                 [p[0], p[1], p[2] - tall]
@@ -6013,6 +6232,47 @@ mod tests {
             (land[1] - 15.0) >= 15.0 && (land[1] - 15.0) <= 30.0,
             "half to all of the record's 30-unit leap beyond: {land:?}"
         );
+    }
+
+    /// A birdbrain fires from the air: it hovers, faces you, spends its
+    /// three rounds and then repositions -- either closing or picking a new
+    /// height, which is **your own z plus ten**.
+    #[test]
+    fn a_birdbrain_shoots_and_then_moves() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                // OBJ_BIRDBRAIN1 is 208 -- one of the eight constants that
+                // read as 1.4e-312 until the scanner was fixed
+                "mdkRegisterObject('bb', 208, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkRegisterObject('kurt', 100, scene, nil, -1, 0,20,-4, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkSetPlayModeGobs(0, kurt)",
+            )
+            .exec()
+            .unwrap();
+        let boot = || scripts.lua.app_data_ref::<Boot>().unwrap();
+        let mut shots = 0;
+        let mut height: Option<f64> = None;
+        for _ in 0..40 {
+            {
+                let mut b = scripts.lua.app_data_mut::<Boot>().unwrap();
+                b.cooldown.insert("bb".into(), 0.0);
+                b.playing.remove("bb");
+            }
+            scripts.lua.load("mdkBirdbrainAttack(bb)").exec().unwrap();
+            let b = boot();
+            shots += (b.playing.get("bb") == Some(&56.0)) as i32;
+            height = height.or_else(|| b.altitude.get("bb").copied());
+        }
+        assert!(shots > 0, "twenty units out is past its ten, so it shoots");
+        // and when it changes height it wants ten above the player, who is
+        // four below it here
+        assert_eq!(height, Some(6.0), "the player's own z plus ten");
+        assert_eq!(boot().gait.get("bb"), Some(&0), "and it hovers to do it");
     }
 
     /// A samsmite charges when you are close enough and in front, and its

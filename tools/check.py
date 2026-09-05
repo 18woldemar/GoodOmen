@@ -327,7 +327,9 @@ ENGINE = [
       # 46070 -> 47868 with the conehead civilians alive: level 9 places
       # fourteen of them and each one now takes a task list to the end
       # instead of falling off `mdkConeheadCivUpdate` as a recorder.
-      "--expect-events", "47868", "--expect-survived", "47868"], None),
+      # 47868 -> 49604 with the birdbrain built: level 9 places three and
+      # they are the last enemy class the scripts deploy in numbers.
+      "--expect-events", "49604", "--expect-survived", "49604"], None),
     # level 10's zizzy turrets shoot: nine bullets in thirty seconds, each one
     # carrying its damage, damage type, lifetime and speed out of the shot
     # table at 0x497388 rather than out of the call.
