@@ -377,6 +377,15 @@ pub struct Boot {
     /// the heading is rewritten towards the target on every call -- a
     /// retreating walker that forgot would turn round and charge.
     pub fleeing: BTreeSet<String>,
+    /// **The pen**: where a walker is allowed to be. `mdkWalkerSetPen(gob,
+    /// point, radius)` -- 0x43f4e0 into 0x431810, three stores -- puts the
+    /// point in `walker + 0x6c`, the radius in `walker + 0x78` and sets the
+    /// flag at `walker + 0x68`. Thirteen live calls in the shipped scripts,
+    /// with radii from 5 to 60.
+    pub pen: BTreeMap<String, ([f64; 3], f64)>,
+    /// Walkers in **state 1**, walking back to their pen, and where to. Same
+    /// reason as [`Boot::fleeing`]: the heading has to survive the rewrite.
+    pub homing: BTreeMap<String, [f64; 3]>,
     /// **The animation keys**, by model name: `(animation, time, code)`.
     /// A channel whose target kind is 23 carries no geometry — its values are
     /// key codes, and 0x42bf80 splits them four ways:
@@ -1020,6 +1029,25 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             })?,
         )?;
     }
+    // `mdkWalkerSetPen(gob, point, radius)` -- 0x43f4e0 into **0x431810**,
+    // which is three stores and no arithmetic: the point goes into `walker +
+    // 0x6c`, the radius into `walker + 0x78`, and `walker + 0x68` is set to 1
+    // so the AI starts checking it. A null point leaves the home where the
+    // constructor put it, which is where the walker was placed (0x42f3e5).
+    //
+    // Thirteen live calls across five levels, radii 5 to 60, and every one of
+    // them names a waypoint object. Nothing clears a pen once set.
+    globals.set(
+        "mdkWalkerSetPen",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(who) = args.first().and_then(gob_name) else { return Ok(0.0) };
+            let Some((at, _)) = stance(lua, &who) else { return Ok(0.0) };
+            let home = point_at(lua, args.get(1)).unwrap_or(at);
+            let leash = args.get(2).map(number).unwrap_or(0.0);
+            boot_mut(lua)?.pen.insert(who, (home, leash));
+            Ok(1.0)
+        })?,
+    )?;
     globals.set(
         "mdkWalkerStop",
         lua.create_function(|lua, args: Variadic<Value>| {
@@ -1100,17 +1128,26 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 _ => d,
             };
             let cool = boot.cooldown.get(&who).copied().unwrap_or(0.0);
-            // a walker in **state 11** is running away, and its heading is
-            // the one thing about it that is not the bearing to the target
-            let away = cool > 0.0 && boot.fleeing.contains(&who);
-            if !away {
-                boot.fleeing.remove(&who);
-            }
-            let look = if away {
-                crate::game::body::bearing(at[0] - to[0], at[1] - to[1])
+            // **two states point a walker somewhere other than at you**, and
+            // both have to survive the rewrite the next call would make:
+            // state 1 walks it back to its pen and state 11 runs it away.
+            // Each recomputes its bearing every call, because the walker is
+            // moving and so, for the retreat, is what it is running from.
+            let held = if cool <= 0.0 {
+                None
+            } else if let Some(home) = boot.homing.get(&who).copied() {
+                Some(crate::game::body::bearing(home[0] - at[0], home[1] - at[1]))
+            } else if boot.fleeing.contains(&who) {
+                Some(crate::game::body::bearing(at[0] - to[0], at[1] - to[1]))
             } else {
-                crate::game::body::bearing(d[0], d[1])
+                None
             };
+            if cool <= 0.0 {
+                boot.fleeing.remove(&who);
+                boot.homing.remove(&who);
+            }
+            let look = held
+                .unwrap_or_else(|| crate::game::body::bearing(d[0], d[1]));
             boot.heading.insert(who.clone(), look);
             // too close and off cooldown: give ground, still facing
             // **the burst**, states 4 and 0. State 4 loads `record[+0x00]`
@@ -1151,8 +1188,43 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             // very next one. At 30 frames a second that cost most of the walk
             // and in the window, which runs at over a thousand, it cost all of
             // it: the same level gave 177 units headless and 8 in a window.
+            // and a walker on its way home **stops when it is back inside
+            // half the leash** (0x4335da halves `walker + 0x78` with the 0.5
+            // at 0x48f2fc), not when it reaches the point itself
+            if let Some(home) = boot.homing.get(&who).copied() {
+                let leash = boot.pen.get(&who).map(|p| p.1).unwrap_or(0.0);
+                let back = (0..3).map(|c| (home[c] - at[c]).powi(2)).sum::<f64>().sqrt();
+                if back < leash * 0.5 {
+                    boot.homing.remove(&who);
+                    boot.cooldown.insert(who.clone(), 0.0);
+                }
+            }
             if cool > 0.0 && boot.gait.get(&who) == Some(&2) {
                 return Ok(0.0);
+            }
+            // **State 1, go home**, and it comes before every other choice:
+            // 0x4328f0 checks the pen flag, measures the walker against
+            // `walker + 0x78` and, outside it, sets state 1 and a **3 second**
+            // cooldown before anything about the fight is looked at. The state
+            // runs the goto core with `(run 1, mustFace 1, wobble 0, avoid 1,
+            // radius 4)` and gives up on the cooldown or on half the leash.
+            //
+            // Without a pen a walker is never out of bounds, which is why the
+            // flag exists: the constructor leaves it clear and sets the leash
+            // to 25 (0x42f400) that nothing then reads.
+            if let Some((home, leash)) = boot.pen.get(&who).copied() {
+                let out = (0..3).map(|c| (home[c] - at[c]).powi(2)).sum::<f64>().sqrt();
+                if out > leash && boot.homing.get(&who) != Some(&home) {
+                    /// What being out of the pen costs before it may choose
+                    /// again, from the float 0x43291e writes.
+                    const WALK_BACK: f64 = 3.0;
+                    boot.homing.insert(who.clone(), home);
+                    boot.heading
+                        .insert(who.clone(), crate::game::body::bearing(home[0] - at[0], home[1] - at[1]));
+                    boot.gait.insert(who.clone(), 2);
+                    boot.cooldown.insert(who.clone(), WALK_BACK);
+                    return Ok(0.0);
+                }
             }
 
             // **State 7, the leap, and the health split above it.** 0x432940
@@ -1183,9 +1255,9 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             // gob is inside [`FACING`] of the bearing, and the heading written
             // above is what walks it there.
             //
-            // Not built: the original refuses a leap whose landing is outside
-            // its leash (`walker + 0x6c` against `+0x78`), and the engine
-            // keeps neither a home nor a leash.
+            // And it will not leap out of its pen: 0x433720 measures the
+            // landing against `walker + 0x6c` and gives the whole thing up if
+            // it is past `+0x78`.
             let (hitpoints, payload) =
                 with_gob(lua, args.first(), |g| (g.hitpoints, g.payload)).unwrap_or((0, [0.0; 4]));
             let choosing = cool <= 0.0 && left <= 0.0;
@@ -1220,8 +1292,11 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                     } else {
                         far * APEX
                     };
+                    let penned = boot.pen.get(&who).is_some_and(|&(home, leash)| {
+                        (0..3).map(|c| (land[c] - home[c]).powi(2)).sum::<f64>().sqrt() > leash
+                    });
                     let arc = launch(at, land, apex);
-                    if arc.time.is_finite() && arc.time > 0.0 {
+                    if !penned && arc.time.is_finite() && arc.time > 0.0 {
                         boot.heading.insert(who.clone(), arc.heading);
                         boot.gait.insert(who.clone(), 0);
                         boot.jumps.insert(who.clone(), Jump { from: at, arc, elapsed: 0.0 });
@@ -4605,6 +4680,41 @@ mod tests {
         assert!(thrown > 0, "the last round of the burst should be a grenade");
         let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
         assert!(boot.fired > 0, "and it is a real shot, with the table's numbers");
+    }
+
+    /// **A walker will not leave its pen.** `mdkWalkerSetPen(gob, point,
+    /// radius)` gives it a home and a leash, and the first thing the attack
+    /// does from then on is measure itself against them: outside the leash it
+    /// sets state 1, runs home for three seconds, and looks at nothing about
+    /// the fight until it is back inside half of it.
+    #[test]
+    fn a_penned_walker_goes_home_before_it_fights() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "points = {home = {x=0, y=0, z=0}}\n\
+                 mdkRegisterObject('d', 207, scene, nil, -1, 30,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkRegisterObject('kurt', 100, scene, nil, -1, 35,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkSetPlayModeGobs(0, kurt)\n\
+                 mdkWalkerSetPen(d, 'home', 5)\n\
+                 mdkDoganboyAttack(d)",
+            )
+            .exec()
+            .unwrap();
+        let b = scripts.lua.app_data_ref::<Boot>().unwrap();
+        assert_eq!(b.gait["d"], 2, "it runs");
+        assert_eq!(b.cooldown["d"], 3.0, "for three seconds");
+        // the player is the other way; home is at -x, whose bearing is +PI/2
+        let home = std::f64::consts::FRAC_PI_2;
+        assert!(
+            (b.heading["d"] - home).abs() < 1e-9,
+            "and towards the pen, not the player: {}",
+            b.heading["d"]
+        );
     }
 
     /// **An enemy leaps at you**, and past you: the destination is
