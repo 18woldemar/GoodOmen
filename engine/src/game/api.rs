@@ -3860,8 +3860,8 @@ pub fn stalls(lua: &Lua) -> Vec<(String, String, i64, [f64; 3])> {
     }
     let mut out: Vec<(String, String, i64, [f64; 3])> = Vec::new();
     let Some(w) = world::world(lua) else { return Vec::new() };
-    let frozen_now: BTreeSet<String> = match boot_ref(lua) {
-        Ok(b) => b.stasis.clone(),
+    let (frozen_now, ticking) = match boot_ref(lua) {
+        Ok(b) => (b.stasis.clone(), b.scripted.clone()),
         Err(_) => Default::default(),
     };
     for (id, g) in w.iter() {
@@ -3882,6 +3882,16 @@ pub fn stalls(lua: &Lua) -> Vec<(String, String, i64, [f64; 3])> {
             .find(|(_, other)| *other == f)
             .map(|(n, _)| n.clone())
             .unwrap_or_else(|| "an anonymous function".into());
+        // **and whether it is being ticked at all**, which is a different
+        // fault from waiting: `StartScript` calls `mdkGobEnableScript`, and
+        // an object that is not in that set has a task list nothing runs.
+        let mut name = if ticking.contains(&g.name) { name } else { format!("{name} (untouched)") };
+        // and `script.lua`'s own clock if the object is on one, because
+        // "waiting on Wait" and "waiting on Wait with eight seconds still on
+        // it every time you look" are different faults
+        if let Ok(left) = gob.get::<f64>("waittimer") {
+            name = format!("{name} [{left:.2} left]");
+        }
         out.push((g.name.clone(), name, next, g.position));
     }
     out
@@ -6501,6 +6511,38 @@ mod tests {
             (land[1] - 15.0) >= 15.0 && (land[1] - 15.0) <= 30.0,
             "half to all of the record's 30-unit leap beyond: {land:?}"
         );
+    }
+
+    /// `Wait` is `script.lua`'s own clock -- `self.waittimer` counted down by
+    /// `chGetDeltaT()` -- and a task list that waits a second has to get past
+    /// it. Level 7's spawner sits on one for ever, so this asks whether the
+    /// mechanism works at all.
+    #[test]
+    fn a_task_list_gets_past_a_wait() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        // `script.lua` is not loaded in a unit test, so this is the two
+        // engine-side facts `Wait` rests on and nothing else: an object that
+        // called `mdkGobEnableScript` gets `ScriptUpdate` every tick, and
+        // `chGetDeltaT` answers with the tick's own dt while it runs.
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('g', 800, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 past = 0\n\
+                 function ScriptUpdate(self) past = past + chGetDeltaT() end\n\
+                 mdkGobEnableScript(g)",
+            )
+            .exec()
+            .unwrap();
+        let rooms = Visibility::default();
+        let mut state = Ticking::default();
+        for _ in 0..60 {
+            tick(&scripts, &rooms, [0.0; 3], 0.0, 1.0 / 30.0, &mut state).unwrap();
+        }
+        let past = scripts.lua.globals().get::<f64>("past").unwrap();
+        assert!((past - 2.0).abs() < 1e-6, "sixty thirtieths of a second: {past}");
     }
 
     /// A birdbrain fires from the air: it hovers, faces you, spends its
