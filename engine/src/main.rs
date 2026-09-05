@@ -2140,6 +2140,38 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                     from,
                 )?;
             }
+            // **`--save PATH` writes the frame the session ended on**, as a
+            // plain PPM the way `--level` does. Over a terminal it is the only
+            // way to see what the engine drew, and the two features built
+            // blind this session -- a faded object and a shaken camera -- are
+            // exactly the kind that a number cannot confirm.
+            // the frame the session ends *on*: `expired` returns at the top
+            // of the next one, before anything is drawn
+            if quit_after.is_some_and(|n| ticking.clock + dt >= n) {
+                if let Some(i) = std::env::args().position(|a| a == "--save") {
+                    if let Some(path) = std::env::args().nth(i + 1) {
+                        let (w, h) = video.window.drawable_size();
+                        let (w, h) = (w as i32, h as i32);
+                        let mut pixels = vec![0u8; (w * h * 4) as usize];
+                        unsafe {
+                            video.gl.read_pixels(
+                                0, 0, w, h,
+                                glow::RGBA,
+                                glow::UNSIGNED_BYTE,
+                                glow::PixelPackData::Slice(Some(&mut pixels)),
+                            );
+                        }
+                        let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
+                        for row in (0..h).rev() {
+                            for col in 0..w {
+                                let o = ((row * w + col) * 4) as usize;
+                                ppm.extend_from_slice(&pixels[o..o + 3]);
+                            }
+                        }
+                        let _ = std::fs::write(&path, ppm);
+                    }
+                }
+            }
             video.window.gl_swap_window();
         }
     }
