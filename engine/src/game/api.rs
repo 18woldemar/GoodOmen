@@ -4976,6 +4976,49 @@ mod tests {
         assert!(scripts.lua.app_data_ref::<Boot>().unwrap().shots.is_empty(), "spent");
     }
 
+    /// The scope shoots along the camera and not along the nose, which is
+    /// the only reason `fire_along` exists: a sniper aims **up**, and every
+    /// other shot in the game leaves flat. A target thirty units out and ten
+    /// up is unreachable by the nose and hit by the camera.
+    #[test]
+    fn the_scope_shoots_where_it_is_looking() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('bob', 100, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkRegisterObject('victim', 203, scene, nil, -1, 30,0,10, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)",
+            )
+            .exec()
+            .unwrap();
+        let health = || {
+            let w = world::world(&scripts.lua).unwrap();
+            w.get(w.find("victim").unwrap()).unwrap().hitpoints
+        };
+        let full = health();
+        // `OBJ_SNIPERBULLET`, up the slope the camera is looking along
+        let d = (30.0f64 * 30.0 + 10.0 * 10.0).sqrt();
+        fire_along(&scripts.lua, "bob", 406.0, [0.0, 0.0, 0.0], [30.0 / d, 0.0, 10.0 / d])
+            .unwrap();
+        let rooms = Visibility::default();
+        let mut state = Ticking::default();
+        for _ in 0..60 {
+            tick(&scripts, &rooms, [0.0, 0.0, 0.0], 0.0, 1.0 / 30.0, &mut state).unwrap();
+        }
+        assert!(health() < full, "the sniper bullet reached what the camera pointed at");
+        // and the same shot along the nose goes under it, which is what makes
+        // the test about the pitch and not about the shot
+        let hurt = health();
+        fire_along(&scripts.lua, "bob", 406.0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]).unwrap();
+        for _ in 0..60 {
+            tick(&scripts, &rooms, [0.0, 0.0, 0.0], 0.0, 1.0 / 30.0, &mut state).unwrap();
+        }
+        assert_eq!(health(), hurt, "flat, it passes ten units beneath");
+    }
+
     /// **An animation key is where an enemy's shot comes from.** `hans.mod`
     /// animation 56 carries the code 421 at t = 0.513, and 421 is `hansshot`
     /// — so a hans playing that animation fires one 0.513 seconds in, and
