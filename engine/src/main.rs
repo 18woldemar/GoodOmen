@@ -1326,7 +1326,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     }
 
     // what the scripts actually did to the world while it ran
-    let (moved, playing, doors, what, fired_sounds, spawned, jumped, shots, landed, struck, fighting, died, walled, buried, walkers, walked, (lost, gone), started, miss, drop, deleted, health) = {
+    let (moved, playing, doors, what, fired_sounds, spawned, jumped, shots, landed, struck, fighting, died, walled, (buried, stuck), walkers, walked, (lost, gone), started, miss, drop, deleted, health) = {
         let w = world::world(&scripts.lua).expect("a world");
         let boot = scripts.lua.app_data_ref::<api::Boot>().expect("boot state");
         let what: Vec<String> = boot
@@ -1361,7 +1361,23 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
             .take(6)
             .collect::<Vec<_>>()
             .join(" ");
-        (w.generation(), boot.playing.len(), boot.doors, what, sounds, boot.spawned.len(), boot.jumped, boot.fired, boot.hits, boot.keys_fired, boot.fighting.len(), boot.died.len(), walled, boot.bodies.values().map(|b| b.inside).sum::<usize>(), boot.bodies.len(), walked, (lost, gone), boot.ever_scripted.len(), boot.nearest_miss, boot.nearest_drop, boot.destroyed.len(),
+        // and the same for the ones that end frames *inside* the world, worst
+        // first: a body that is buried is usually the one that is about to be
+        // lost, and a count alone never says which
+        let mut buried_by: Vec<(&str, usize)> = boot
+            .bodies
+            .iter()
+            .filter(|(_, b)| b.inside > 0)
+            .map(|(n, b)| (n.as_str(), b.inside))
+            .collect();
+        buried_by.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
+        let stuck = buried_by
+            .iter()
+            .take(4)
+            .map(|(n, c)| format!("{n}:{c}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        (w.generation(), boot.playing.len(), boot.doors, what, sounds, boot.spawned.len(), boot.jumped, boot.fired, boot.hits, boot.keys_fired, boot.fighting.len(), boot.died.len(), walled, (boot.bodies.values().map(|b| b.inside).sum::<usize>(), stuck), boot.bodies.len(), walked, (lost, gone), boot.ever_scripted.len(), boot.nearest_miss, boot.nearest_drop, boot.destroyed.len(),
          boot.player.as_deref().and_then(|n| w.find(n)).and_then(|i| w.get(i))
              .map(|g| (g.hitpoints, g.max_hitpoints)).unwrap_or((0, 0)))
     };
@@ -1429,7 +1445,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
          {fired_sounds} sounds fired, {spawned} objects spawned, \
          {jumped} walkers launched, {started} objects given a script, \
          {walkers} walkers walked {walked:.0} units ({lost} left the world{}) \
-         and met a wall on {walled} frames ({buried} inside), \
+         and met a wall on {walled} frames ({buried} inside{}), \
          {shots} shots fired ({landed} hit, nearest {}, {drop:.1} of it height), \
          {doors} door movements, {blown} frames in a blower, {deleted} objects deleted, {anim_keys} keys in {struck} struck, {fighting} enemies fighting, {shot_at} shot by the player and {died} killed, \
          the player on {} of {} hitpoints{} ({fell} of it to landings), \
@@ -1442,6 +1458,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         body.inside,
         state.rooms_entered,
         if gone.is_empty() { String::new() } else { format!(": {gone}") },
+        if stuck.is_empty() { String::new() } else { format!(": {stuck}") },
         match miss { Some(d) => format!("{d:.1}"), None => "never".into() },
         health.0,
         health.1,
