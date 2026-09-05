@@ -140,10 +140,20 @@ pub const BASE_HITPOINTS: [(f64, &str, i32); 19] = [
 /// Kurt's constructor writes the **current** hitpoints and never the maximum,
 /// so the 100 here stands for both and where the original's maximum comes
 /// from is unread. Hyde and Max write both.
-pub const PLAYER: [(f64, i16, i16); 3] = [
+///
+/// **Doc was missing entirely**, which is why a played session of level 3 or
+/// level 9 reported the player on "0 of 0" — those are his two levels, and
+/// `CreateDoctor` in `mdk2.lua` is what makes the player there. His filter is
+/// read outright, the **0x8c0** written at 0x40a6cb; his 60 is not, and the
+/// evidence for it is one clamp: 0x40bd7a is the `pop` pickup, and it does
+/// `hp += 50; if (hp > 60) hp = 60`. A heal that clamps at 60 is a heal
+/// clamping to the maximum, and there is no literal maximum for Doc anywhere
+/// in the binary — the same silence Kurt's constructor keeps.
+pub const PLAYER: [(f64, i16, i16); 4] = [
     (100.0, 100, 0x9d6), // OBJ_KURT
     (103.0, 240, 0x8d6), // OBJ_HYDE
     (101.0, 200, 0x8d6), // OBJ_MAX
+    (102.0, 60, 0x8c0),  // OBJ_DOC
 ];
 
 /// **A playable character's speed is a 3x3 table**, and there is one pair per

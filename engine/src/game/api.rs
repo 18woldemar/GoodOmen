@@ -2090,6 +2090,30 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             Ok(lua.named_registry_value::<Value>("player").unwrap_or(Value::Nil))
         })?,
     )?;
+    // `mdkSwitchPlayMode(mode)` — 0x439e40 into **0x42b940**, which takes the
+    // gob and the inventory for that mode out of the table at 0x4bb6b0
+    // (stride three dwords, filled by `mdkSetPlayModeGobs`) and makes them
+    // the current pair. **This is what names the player**, and the engine had
+    // been guessing at the last `mdkSetPlayModeGobs` instead: on levels 3 and
+    // 9 that landed on a gob with no hitpoints at all, so a played session
+    // reported "0 of 0" and nothing could hurt it.
+    //
+    // `mdk2.lua` sets the gobs for a mode and switches to it in the same
+    // breath — 0x815 then 0x816 for Max, 0x840 then 0x842 for Kurt — so the
+    // switch is the level's own statement of who is being played.
+    globals.set(
+        "mdkSwitchPlayMode",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let mode = args.first().map(number).unwrap_or(0.0) as i64;
+            let who = boot_ref(lua)?.play_modes.get(&mode).cloned();
+            let Some(who) = who else { return Ok(()) };
+            if let Ok(gob) = lua.globals().get::<mlua::Table>(who.as_str()) {
+                lua.set_named_registry_value("player", gob)?;
+            }
+            boot_mut(lua)?.player = Some(who);
+            Ok(())
+        })?,
+    )?;
     globals.set(
         "mdkGetPlayerGob",
         lua.create_function(|lua, ()| {
