@@ -1556,7 +1556,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         goodomen::game::world::world(&level_scripts.lua),
         level_scripts.lua.app_data_ref::<goodomen::game::api::Boot>(),
     ) {
-        scene.follow(&w, &boot.playing, &boot.hidden);
+        scene.follow(&w, &boot.playing, &boot.hidden, &boot.opacity);
         // and the fog the level start asked for. `Level.Init` sets it on
         // nine of the levels; the rest do it from an `OnEnterRoom`, so it
         // arrives once the player is in the room that wants it.
@@ -1923,7 +1923,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 goodomen::game::world::world(&level_scripts.lua),
                 level_scripts.lua.app_data_ref::<goodomen::game::api::Boot>(),
             ) {
-                scene.follow(&w, &boot.playing, &boot.hidden);
+                scene.follow(&w, &boot.playing, &boot.hidden, &boot.opacity);
                 // the game's own draw distance, once it has named one
                 scene.fog = boot.fog;
             }

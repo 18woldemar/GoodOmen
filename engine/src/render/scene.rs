@@ -81,6 +81,7 @@ in vec3 vary_world;
 in vec3 vary_normal;
 uniform sampler2D albedo;
 uniform float alpha_test;
+uniform float opacity;
 uniform vec4 fog;          // start, end, enabled, unused
 uniform vec3 fog_colour;
 uniform int light_count;
@@ -121,7 +122,7 @@ void main() {
     // `chFogStartEnd`, the colour through `chFogColor`. GL 3.3 core has no
     // fixed-function fog, so the same arithmetic is done here.
     float f = clamp((fog.y - vary_depth) / max(fog.y - fog.x, 0.001), 0.0, 1.0);
-    fragment = vec4(mix(fog_colour, colour, mix(1.0, f, fog.z)), 1.0);
+    fragment = vec4(mix(fog_colour, colour, mix(1.0, f, fog.z)), opacity);
 }
 "#;
 
@@ -211,6 +212,11 @@ pub struct Scene {
     playing: Vec<Option<f64>>,
     /// Node indices the scripts have hidden, per draw.
     hidden: Vec<Vec<u32>>,
+    /// How solid each draw is, from `omGobGMSetTransparency` — **1 is
+    /// opaque**, which the warp in `level6.lua` settles: `warptime * 2` runs
+    /// 0 to 1 as the enemy arrives, and the last thing the warp does is set
+    /// it to 1. Anything under 1 is drawn in a second pass with blending on.
+    opacity: Vec<f32>,
     /// The game's own fog, from `chFogStartEnd`, `chFogColor` and
     /// `chFogEnable` — see [`Fog`].
     pub fog: Fog,
@@ -519,6 +525,7 @@ impl Scene {
         self.owners.push(owner);
         self.playing.push(None);
         self.hidden.push(Vec::new());
+        self.opacity.push(1.0);
     }
 
     /// Which arena ids already have a draw, so the caller can find the ones
@@ -538,11 +545,13 @@ impl Scene {
         world: &crate::game::world::World,
         playing: &std::collections::BTreeMap<String, f64>,
         hidden: &std::collections::BTreeSet<(String, String)>,
+        opacity: &std::collections::BTreeMap<String, f64>,
     ) {
         for i in 0..self.draws.len() {
             let Some(id) = self.owners[i] else { continue };
             let Some(gob) = world.get(id) else { continue };
             self.playing[i] = playing.get(&gob.name).copied();
+            self.opacity[i] = opacity.get(&gob.name).copied().unwrap_or(1.0) as f32;
             // the slot names are the model's node names, resolved here
             // because this is where the model is
             self.hidden[i].clear();
@@ -748,7 +757,25 @@ impl Scene {
 
         let mut drawn = 0usize;
         let mut unposed = false;
+        let opacity_at = gl.get_uniform_location(shader, "opacity");
+        // **two passes, and only when there is something to put in the
+        // second.** Anything the scripts have faded is drawn after everything
+        // solid, with blending on and the depth buffer read-only, so a
+        // half-there warping enemy does not punch a hole in what is behind
+        // it. No sorting inside the pass: the game fades one or two objects
+        // at a time and never two overlapping ones.
+        let fading = self.opacity.iter().any(|&a| a < 1.0);
+        for pass in 0..if fading { 2 } else { 1 } {
+            if pass == 1 {
+                gl.enable(glow::BLEND);
+                gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+                gl.depth_mask(false);
+                unposed = false;
+            }
         for (i, (name, transform)) in self.draws.iter().enumerate() {
+            if (self.opacity[i] < 1.0) != (pass == 1) {
+                continue;
+            }
             // the authored cull list: a room draws the rooms it names, and
             // an object in no room is always drawn
             if let (Some(visible), Some(room)) = (visible, self.rooms[i]) {
@@ -756,6 +783,7 @@ impl Scene {
                     continue;
                 }
             }
+            gl.uniform_1_f32(opacity_at.as_ref(), self.opacity[i]);
             let Some(model) = self.models.get(name) else { continue };
             drawn += model.triangles;
             gl.uniform_matrix_4_f32_slice(model_at.as_ref(), false, &transform.0);
@@ -796,6 +824,11 @@ impl Scene {
                 );
                 gl.draw_arrays(glow::TRIANGLES, part.first, part.count);
             }
+        }
+        }
+        if fading {
+            gl.disable(glow::BLEND);
+            gl.depth_mask(true);
         }
         Ok(drawn)
     }

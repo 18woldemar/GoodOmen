@@ -372,6 +372,11 @@ pub struct Boot {
     /// Objects that have been told to fight at least once. `mdkDoganboyAttack`
     /// is a *task*, so this counts the enemies whose script got that far.
     pub fighting: BTreeSet<String>,
+    /// How solid each object is, from `omGobGMSetTransparency` — 1 opaque,
+    /// 0 invisible, and absent means 1. `level6.lua` warps an enemy in over
+    /// half a second with `warptime * 2` and finishes by setting it to 1,
+    /// which is what settles the direction.
+    pub opacity: BTreeMap<String, f64>,
     /// Objects whose animation **wrapped this tick**, which is the whole of
     /// `omAnimJustLooped` — 0x420250 into 0x461850, one field on the
     /// animation instance. Cleared and refilled by every tick.
@@ -1059,6 +1064,28 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             let leash = args.get(2).map(number).unwrap_or(0.0);
             boot_mut(lua)?.pen.insert(who, (home, leash));
             Ok(1.0)
+        })?,
+    )?;
+    // `omGobGMSetTransparency(gob, alpha)` — 0x41f780 into **0x462920**,
+    // which writes the value into the gob's two renderer nodes and then
+    // **recurses through its children** (0x45f7b0 walks them), so a character
+    // and everything it wears fade together. 3664 calls in a two-minute run
+    // of the ten levels, the top of the work list after the animation clock.
+    globals.set(
+        "omGobGMSetTransparency",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(who) = args.first().and_then(gob_name) else { return Ok(()) };
+            let alpha = args.get(1).map(number).unwrap_or(1.0);
+            let family = {
+                let Some(w) = world::world(lua) else { return Ok(()) };
+                let Some(id) = w.find(&who) else { return Ok(()) };
+                w.family(id)
+            };
+            let mut boot = boot_mut(lua)?;
+            for name in family {
+                boot.opacity.insert(name, alpha);
+            }
+            Ok(())
         })?,
     )?;
     // `omGobDelete(gob)` — 0x41f1c0 into 0x46e5e0, one argument and no

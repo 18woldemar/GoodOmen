@@ -940,6 +940,27 @@ impl World {
     /// out by position and must not move), but they are emptied and their
     /// names unindexed: a destroyed room cannot be found, drawn or hit, and
     /// nothing that held an id gets a different object back.
+    /// An object and every named object under it, which is what the tree
+    /// walks the original does mean: 0x46e5e0 deletes a gob's children and
+    /// 0x462920 fades them, both through 0x45f7b0's child-by-index.
+    pub fn family(&self, id: Id) -> Vec<String> {
+        let mut all = vec![id];
+        let mut i = 0;
+        while i < all.len() {
+            let parent = all[i];
+            for (child, gob) in self.gobs.iter().enumerate() {
+                if gob.parent == Some(parent) && !gob.name.is_empty() {
+                    all.push(child as Id);
+                }
+            }
+            i += 1;
+        }
+        all.iter()
+            .filter_map(|&id| self.get(id).map(|g| g.name.clone()))
+            .filter(|n| !n.is_empty())
+            .collect()
+    }
+
     pub fn destroy(&mut self, id: Id) -> Vec<String> {
         let mut doomed = vec![id];
         let mut i = 0;
