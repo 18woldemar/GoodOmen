@@ -468,6 +468,17 @@ pub struct Boot {
     /// the shoot-or-taunt leaf is left. That is what a turret is -- a walker
     /// that turns and fires from where it stands.
     pub turret: BTreeSet<String>,
+    /// **The play mode the level last asked for.** 0x42b940 parks
+    /// `mdkSwitchPlayMode`'s argument in a pending slot and raises a flag;
+    /// 0x42b9d0, which is what `mdkGetPlayMode` calls, answers with the
+    /// pending one while the flag is up and the committed one otherwise --
+    /// so the number a script sees is always the last mode *asked for*.
+    ///
+    /// It cannot be derived from who the player is, which is what this used
+    /// to do: `mdk2.lua` gives `PLAYMODE_KURT` and `PLAYMODE_SNIPER` the
+    /// **same gob**, `bob`, so the derivation could never answer 4 and every
+    /// `mdkGetPlayMode() == PLAYMODE_SNIPER` in the scripts was false.
+    pub mode: i64,
     /// **The pen**: where a walker is allowed to be. `mdkWalkerSetPen(gob,
     /// point, radius)` -- 0x43f4e0 into 0x431810, three stores -- puts the
     /// point in `walker + 0x6c`, the radius in `walker + 0x78` and sets the
@@ -2091,16 +2102,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
     // `mdkGetPlayMode() == PLAYMODE_DOC` in the scripts was false.
     globals.set(
         "mdkGetPlayMode",
-        lua.create_function(|lua, ()| {
-            let boot = boot_ref(lua)?;
-            let Some(who) = boot.player.as_deref() else { return Ok(0.0) };
-            Ok(boot
-                .play_modes
-                .iter()
-                .find(|(_, name)| name.as_str() == who)
-                .map(|(&mode, _)| mode as f64)
-                .unwrap_or(0.0))
-        })?,
+        lua.create_function(|lua, ()| Ok(boot_ref(lua)?.mode as f64))?,
     )?;
     globals.set(
         "mdkGetPlayModePlayerGob",
@@ -2134,14 +2136,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
     globals.set(
         "mdkSwitchPlayMode",
         lua.create_function(|lua, args: Variadic<Value>| {
-            let mode = args.first().map(number).unwrap_or(0.0) as i64;
-            let who = boot_ref(lua)?.play_modes.get(&mode).cloned();
-            let Some(who) = who else { return Ok(()) };
-            if let Ok(gob) = lua.globals().get::<mlua::Table>(who.as_str()) {
-                lua.set_named_registry_value("player", gob)?;
-            }
-            boot_mut(lua)?.player = Some(who);
-            Ok(())
+            switch_play_mode(lua, args.first().map(number).unwrap_or(0.0) as i64)
         })?,
     )?;
     globals.set(
@@ -3216,6 +3211,45 @@ fn spawn(lua: &Lua, spawner: &str) -> mlua::Result<Option<mlua::Table>> {
 /// point, so the shot takes the nearest thing inside a narrow cone that the
 /// collision world can see. A wall stops it — [`Collision::sees`] is exact —
 /// but a near miss on a wide target counts as a hit.
+/// **Who is being played, and as what.** The commit at 0x42b9f0 takes the gob
+/// and the inventory for a mode out of the table at 0x4bb6b0 (stride three
+/// dwords, filled by `mdkSetPlayModeGobs`), shows them, hands the camera to
+/// 0x42a760 and only then writes the mode down. The engine keeps the two
+/// halves that are visible from Lua: the player and the number.
+///
+/// The window calls this too -- the sniper scope is a play mode, not a
+/// weapon, and 0x4198e0 enters it with exactly this call on **4**.
+/// **The sniper's zoom**, in degrees of field of view. 0x41ad00 is the whole
+/// of it: `fov += (fov * 0.4 + 1) * dt * step`, with the step **-5 for
+/// `COM_SMZOOMIN` and +5 for `COM_SMZOOMOUT`** (0x41a302 and 0x41a343 push
+/// the two literals), clamped to **0.8** at 0x48fa18 and **60** at 0x48fa1c.
+///
+/// The rate is proportional, which is what makes the scope feel the way it
+/// does: held down at thirty frames a second it goes 60 -> 5.4 in the first
+/// second and then crawls, because at one degree the step is a sixtieth of
+/// what it was at sixty. `direction` is negative to zoom in.
+pub fn zoom(fov: f64, direction: f64, dt: f64) -> f64 {
+    /// The 0.4 at 0x48fa20 and the 1.0 at 0x48f2f4.
+    const RATE: f64 = 0.4;
+    /// The +-5 the two zoom commands push.
+    const STEP: f64 = 5.0;
+    /// The two clamps, 0x48fa18 and 0x48fa1c.
+    const NARROWEST: f64 = 0.8;
+    const WIDEST: f64 = 60.0;
+    (fov + (fov * RATE + 1.0) * dt * direction * STEP).clamp(NARROWEST, WIDEST)
+}
+
+pub fn switch_play_mode(lua: &Lua, mode: i64) -> mlua::Result<()> {
+    boot_mut(lua)?.mode = mode;
+    let who = boot_ref(lua)?.play_modes.get(&mode).cloned();
+    let Some(who) = who else { return Ok(()) };
+    if let Ok(gob) = lua.globals().get::<mlua::Table>(who.as_str()) {
+        lua.set_named_registry_value("player", gob)?;
+    }
+    boot_mut(lua)?.player = Some(who);
+    Ok(())
+}
+
 pub fn hitscan(lua: &Lua, shooter: &str, mode: i64) -> Option<String> {
     /// How far Kurt's gun reaches, from the 100.0 pushed at 0x417e9c.
     const REACH: f64 = 100.0;
@@ -3480,7 +3514,7 @@ const MIN_LEAD_RANGE: f64 = 50.0;
 
 fn fire_key_object(lua: &Lua, who: &str, kind: f64) -> Result<(), Error> {
     let Some((at, yaw)) = stance(lua, who) else { return Ok(()) };
-    let Some((_, filter, damage, life, speed, lead, flags)) = crate::game::world::bullet(kind) else {
+    let Some((_, _, _, _, speed, lead, flags)) = crate::game::world::bullet(kind) else {
         return Ok(()); // an effect or a prop, and the engine has nowhere to put it
     };
     let ahead = crate::game::body::facing(yaw).0;
@@ -3527,6 +3561,23 @@ fn fire_key_object(lua: &Lua, who: &str, kind: f64) -> Result<(), Error> {
             }
         }
     }
+    fire_along(lua, who, kind, at, direction)
+}
+
+/// The launch itself, once something has decided where the shot starts and
+/// which way it goes: register the gob, hand it the shot table's own damage,
+/// lifetime and speed, and count it. `fire_key_object` is this with the
+/// animation key's own direction; the sniper scope is this with the camera's.
+pub fn fire_along(
+    lua: &Lua,
+    who: &str,
+    kind: f64,
+    at: [f64; 3],
+    direction: [f64; 3],
+) -> Result<(), Error> {
+    let Some((_, filter, damage, life, speed, _, _)) = crate::game::world::bullet(kind) else {
+        return Ok(());
+    };
     let name = format!("{who}_key{}", kind as i64);
     let id = {
         let Some(mut w) = world::world_mut(lua) else { return Ok(()) };
@@ -5479,6 +5530,28 @@ mod tests {
             (land[1] - 15.0) >= 15.0 && (land[1] - 15.0) <= 30.0,
             "half to all of the record's 30-unit leap beyond: {land:?}"
         );
+    }
+
+    /// The scope's zoom is proportional, and both ends are hard stops.
+    #[test]
+    fn the_scope_zooms_and_stops() {
+        // a second of holding zoom-in at thirty frames, from the wide end
+        let mut fov = 60.0;
+        for _ in 0..30 {
+            fov = zoom(fov, -1.0, 1.0 / 30.0);
+        }
+        assert!((5.0..6.0).contains(&fov), "a second in takes 60 to about 5.4: {fov}");
+        // and it never passes 0.8 however long it is held
+        for _ in 0..3000 {
+            fov = zoom(fov, -1.0, 1.0 / 30.0);
+        }
+        assert_eq!(fov, 0.8);
+        // nor 60 the other way, and the way back is not the way in: the rate
+        // is a share of where it already is
+        for _ in 0..3000 {
+            fov = zoom(fov, 1.0, 1.0 / 30.0);
+        }
+        assert_eq!(fov, 60.0);
     }
 
     /// A turret is a walker with the movement half of the chooser switched

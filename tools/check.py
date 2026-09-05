@@ -399,6 +399,17 @@ ENGINE = [
       "--expect-events", "18001", "--expect-fighting", "12",
       "--expect-keys", "39", "--expect-shots", "21",
       "--expect-health", "0"], None),
+    # **The scope.** `--sniper N` enters `PLAYMODE_SNIPER` at N degrees --
+    # the same call the V key makes -- and pins what the mode costs: the legs
+    # stop, so `walkers walked` is the enemies' own, and standing still in
+    # front of two doganboys on level 1 checkpoint 5 is expensive. The health
+    # is the number that says the mode is really frozen; it was 100 before.
+    ("the sniper scope is a play mode, and standing still in it hurts",
+     ["cargo", "run", "--quiet", "--release",
+      "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
+      "--play", "1", "5", "--window", "--for", "30", "--sniper", "8",
+      "--expect-events", "13003", "--expect-shots", "15",
+      "--expect-health", "25"], None),
     ("walking drives the player's own animation, and reaches the scripts",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",

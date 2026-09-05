@@ -1326,7 +1326,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     }
 
     // what the scripts actually did to the world while it ran
-    let (moved, playing, doors, what, fired_sounds, spawned, jumped, shots, landed, struck, fighting, died, walled, buried, walkers, walked, lost, started, miss, drop, deleted, health) = {
+    let (moved, playing, doors, what, fired_sounds, spawned, jumped, shots, landed, struck, fighting, died, walled, buried, walkers, walked, (lost, gone), started, miss, drop, deleted, health) = {
         let w = world::world(&scripts.lua).expect("a world");
         let boot = scripts.lua.app_data_ref::<api::Boot>().expect("boot state");
         let what: Vec<String> = boot
@@ -1350,7 +1350,18 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         let bottom = collision.underworld();
         let lost = boot.bodies.values().filter(|b| b.position[2] < bottom).count()
             + (body.position[2] < bottom) as usize;
-        (w.generation(), boot.playing.len(), boot.doors, what, sounds, boot.spawned.len(), boot.jumped, boot.fired, boot.hits, boot.keys_fired, boot.fighting.len(), boot.died.len(), walled, boot.bodies.values().map(|b| b.inside).sum::<usize>(), boot.bodies.len(), walked, lost, boot.ever_scripted.len(), boot.nearest_miss, boot.nearest_drop, boot.destroyed.len(),
+        // and **which** of them, because a count says a mover is wrong and a
+        // name says where to look. Six is enough to tell one bad spawn from a
+        // level-wide fault.
+        let gone = boot
+            .bodies
+            .iter()
+            .filter(|(_, b)| b.position[2] < bottom)
+            .map(|(n, _)| n.as_str())
+            .take(6)
+            .collect::<Vec<_>>()
+            .join(" ");
+        (w.generation(), boot.playing.len(), boot.doors, what, sounds, boot.spawned.len(), boot.jumped, boot.fired, boot.hits, boot.keys_fired, boot.fighting.len(), boot.died.len(), walled, boot.bodies.values().map(|b| b.inside).sum::<usize>(), boot.bodies.len(), walked, (lost, gone), boot.ever_scripted.len(), boot.nearest_miss, boot.nearest_drop, boot.destroyed.len(),
          boot.player.as_deref().and_then(|n| w.find(n)).and_then(|i| w.get(i))
              .map(|g| (g.hitpoints, g.max_hitpoints)).unwrap_or((0, 0)))
     };
@@ -1417,7 +1428,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
          {moved} object moves, {playing} animations chosen, \
          {fired_sounds} sounds fired, {spawned} objects spawned, \
          {jumped} walkers launched, {started} objects given a script, \
-         {walkers} walkers walked {walked:.0} units ({lost} left the world) \
+         {walkers} walkers walked {walked:.0} units ({lost} left the world{}) \
          and met a wall on {walled} frames ({buried} inside), \
          {shots} shots fired ({landed} hit, nearest {}, {drop:.1} of it height), \
          {doors} door movements, {blown} frames in a blower, {deleted} objects deleted, {anim_keys} keys in {struck} struck, {fighting} enemies fighting, {shot_at} shot by the player and {died} killed, \
@@ -1430,6 +1441,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         body.hits,
         body.inside,
         state.rooms_entered,
+        if gone.is_empty() { String::new() } else { format!(": {gone}") },
         match miss { Some(d) => format!("{d:.1}"), None => "never".into() },
         health.0,
         health.1,
@@ -1470,6 +1482,17 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
 /// The camera stands where the game would put the player, which is what
 /// makes the culling figure mean anything: a room's `visible` list is
 /// authored for the places a player can be.
+/// `PLAYMODE_KURT` and `PLAYMODE_SNIPER`, out of `docs/lua-constants.md`.
+/// `mdk2.lua` gives both the same gob, which is why the mode has to be a
+/// number the engine keeps and not something derived from who is being played.
+const PLAYMODE_KURT: i64 = 1;
+const PLAYMODE_SNIPER: i64 = 4;
+/// The wide end of the sniper's zoom, in degrees -- the float at 0x48fa1c,
+/// which is where the scope opens. See [`goodomen::game::api::zoom`].
+const WIDEST: f64 = 60.0;
+/// `OBJ_SNIPERBULLET`, which is what the scope fires.
+const SNIPERBULLET: f64 = 406.0;
+
 fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Result<String, String> {
     use goodomen::game::body::EYE;
     use goodomen::render::{scene::Scene, Offscreen};
@@ -1686,6 +1709,23 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 .unwrap_or(100.0)
         };
         let mut cull = true;
+        // **The sniper's field of view, in degrees.** 0x41ad00 is the whole
+        // zoom: `fov += (fov * 0.4 + 1) * dt * step` with the step **-5 on
+        // COM_SMZOOMIN and +5 on COM_SMZOOMOUT** (0x41a302 and 0x41a343), and
+        // the two clamps are literals -- 0.8 at 0x48fa18 and 60 at 0x48fa1c.
+        // A proportional rate is why the last stop of the zoom crawls: at 0.8
+        // degrees the step is a thirtieth of what it is at 60.
+        let mut zoom = WIDEST;
+        // **`--sniper` starts in the scope**, because V is a key and a check
+        // has no fingers. It is the same call the key makes.
+        if let Some(i) = std::env::args().position(|a| a == "--sniper") {
+            let _ = goodomen::game::api::switch_play_mode(&level_scripts.lua, PLAYMODE_SNIPER);
+            // and `--sniper 3` opens it at three degrees, which is the only
+            // way a check can see through a zoomed scope
+            if let Some(deg) = std::env::args().nth(i + 1).and_then(|a| a.parse::<f64>().ok()) {
+                zoom = deg;
+            }
+        }
         let mut shot_at: std::collections::BTreeSet<String> = Default::default();
         // -1 is not an environment, so the first frame always sets one; the
         // same trick starts the music, since -1 is also "stop"
@@ -1764,16 +1804,49 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                              ({hit} hit, nearest {}), walkers walked {walked:.0} units, \
                              {doors} door movements, {blown} frames in a blower, \
                              {fell} hitpoints lost to landings, \
-                             you on {} of {} hitpoints",
+                             you on {} of {} hitpoints{}",
                             ticking.clock,
                             ticking.rooms_entered,
                             shot_at.len(),
                             match near { Some(d) => format!("{d:.1}"), None => "never".into() },
                             health.0,
                             health.1,
+                            // and whether the session was spent in the scope,
+                            // which is the one thing a still frame cannot say
+                            match level_scripts
+                                .lua
+                                .app_data_ref::<goodomen::game::api::Boot>()
+                                .map(|b| b.mode)
+                            {
+                                Some(PLAYMODE_SNIPER) =>
+                                    format!(", in the scope at {zoom:.1} degrees"),
+                                _ => String::new(),
+                            },
                         ));
                     }
                     Event::KeyDown { keycode: Some(Keycode::C), .. } => cull = !cull,
+                    // **the sniper scope**, which is a play mode and not a
+                    // weapon: 0x4198e0 reads command 99 and calls the play
+                    // mode switch on **4**, `PLAYMODE_SNIPER`, which
+                    // `mdk2.lua` gave the same gob as Kurt himself. So the
+                    // scripts see the mode change, the camera goes to the eye
+                    // and the legs stop -- the original writes -1 into both of
+                    // the mover's speeds at the same moment.
+                    //
+                    // ponytail: the game's own key for this is **space**
+                    // (`omBindCommandI(COM_SMTOGGLE, 57)`), and space is this
+                    // window's jump. V is the string `omMakeCommand` names,
+                    // which is as close as the two layouts get.
+                    Event::KeyDown { keycode: Some(Keycode::V), repeat: false, .. } => {
+                        let now = level_scripts
+                            .lua
+                            .app_data_ref::<goodomen::game::api::Boot>()
+                            .map(|b| b.mode)
+                            .unwrap_or(0);
+                        let want = if now == PLAYMODE_SNIPER { PLAYMODE_KURT } else { PLAYMODE_SNIPER };
+                        let _ = goodomen::game::api::switch_play_mode(&level_scripts.lua, want);
+                        zoom = zoom.min(WIDEST);
+                    }
                     // **the mouse fires.** The hitscan is the original's —
                     // 100 units along the nose, 2 damage, `DAMAGE_GOODGUY`,
                     // through the collision world — and the button is the
@@ -1785,6 +1858,35 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                             .app_data_ref::<goodomen::game::api::Boot>()
                             .and_then(|b| b.player.clone())
                         {
+                            // **and through the scope it is a real shot.**
+                            // `COM_SMSHOOT` fires `kurtsnipe`'s own weapon,
+                            // `OBJ_SNIPERBULLET`, and the sniper is the one
+                            // place where the pitch matters as much as the
+                            // yaw -- so this launches along the camera's own
+                            // direction instead of along the nose, which is
+                            // all the hitscan knows how to do.
+                            let sniping = level_scripts
+                                .lua
+                                .app_data_ref::<goodomen::game::api::Boot>()
+                                .map(|b| b.mode)
+                                .unwrap_or(0)
+                                == PLAYMODE_SNIPER;
+                            if sniping {
+                                let ahead = goodomen::game::body::facing(yaw).0;
+                                let d = [
+                                    ahead[0] * pitch.cos(),
+                                    ahead[1] * pitch.cos(),
+                                    pitch.sin(),
+                                ];
+                                let _ = goodomen::game::api::fire_along(
+                                    &level_scripts.lua,
+                                    &name,
+                                    SNIPERBULLET,
+                                    at,
+                                    d,
+                                );
+                                continue;
+                            }
                             // and it waits the weapon's own interval, which
                             // for the magnum is 0.2 seconds
                             if goodomen::game::api::may_fire(
@@ -1830,6 +1932,35 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 video.events.keyboard_state().pressed_scancodes().collect();
             let held = |s: Scancode| keys.contains(&s);
             let fast = held(Scancode::LShift);
+            let sniping = level_scripts
+                .lua
+                .app_data_ref::<goodomen::game::api::Boot>()
+                .map(|b| b.mode)
+                .unwrap_or(0)
+                == PLAYMODE_SNIPER;
+            if sniping {
+                // the game's own zoom keys are COM_SMZOOMIN and
+                // COM_SMZOOMOUT, bound in `defaultkeys.lua` to scancodes 200
+                // and 208 -- the up and down arrows
+                let step = held(Scancode::Down) as i32 as f64 - held(Scancode::Up) as i32 as f64;
+                if step != 0.0 {
+                    zoom = goodomen::game::api::zoom(zoom, step, dt);
+                }
+            }
+            // **and Kurt gets out of his own way.** The original hides the
+            // body outright on the way into the scope (0x461790 with 0x38)
+            // and shows `kurtsnipe` instead; here the same thing is done with
+            // the transparency the scripts use, because that is per object
+            // and the hide is per node.
+            if let Some(mut boot) = level_scripts.lua.app_data_mut::<goodomen::game::api::Boot>() {
+                if let Some(me) = boot.player.clone() {
+                    if sniping {
+                        boot.opacity.insert(me, 0.0);
+                    } else {
+                        boot.opacity.remove(&me);
+                    }
+                }
+            }
             let ([fx, fy], [rx, ry]) = goodomen::game::body::facing(yaw);
             let mut d = [0.0f64, 0.0];
             if held(Scancode::W) { d = [d[0] + fx, d[1] + fy]; }
@@ -1841,10 +1972,13 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 // one row is all a playable character has. Shift still makes
                 // the free camera quick, which is the harness's own.
                 body.yaw = yaw;
+                // and in the scope the legs stop: 0x4198e0 writes -1.0 into
+                // both of the mover's speeds, so the input drives nothing.
+                // Gravity still runs -- it is the same body.
                 drive.push(
                     who,
-                    held(Scancode::W) as i32 - held(Scancode::S) as i32,
-                    held(Scancode::D) as i32 - held(Scancode::A) as i32,
+                    if sniping { 0 } else { held(Scancode::W) as i32 - held(Scancode::S) as i32 },
+                    if sniping { 0 } else { held(Scancode::D) as i32 - held(Scancode::A) as i32 },
                     dt,
                 );
                 let (step, speed) = drive.heading(yaw);
@@ -1859,7 +1993,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                     blown += 1;
                 }
                 body.blow(up, dt);
-                body.step(&collision, step, held(Scancode::Space), speed, dt);
+                body.step(&collision, step, held(Scancode::Space) && !sniping, speed, dt);
                 let _ = d;
                 at = body.position;
                 // and a hard landing hurts here too -- see `body::fall_damage`
@@ -2082,7 +2216,10 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 (ahead2[1] * pitch.cos()) as f32,
                 pitch.sin() as f32,
             ];
-            let from = if walk {
+            // **the scope is the eye**: the commit at 0x42bb2a hands the
+            // camera to 0x46b330 with the player's own gob when the mode is
+            // 4, which is where the third person stops.
+            let from = if walk && !sniping {
                 // and it comes in when there is a wall behind: without this
                 // the camera sits inside the geometry every time the player
                 // backs into a corner, and the room it culls by is the wrong
@@ -2126,7 +2263,12 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
             }
             let view = Mat4::look_at(from, ahead, [0.0, 0.0, 1.0]);
             let (w, h) = video.window.drawable_size();
-            let projection = Mat4::perspective(1.1, w as f32 / h.max(1) as f32, 0.05, 4000.0);
+            let projection = Mat4::perspective(
+                if sniping { (zoom as f32).to_radians() } else { 1.1 },
+                w as f32 / h.max(1) as f32,
+                0.05,
+                4000.0,
+            );
             unsafe {
                 video.gl.viewport(0, 0, w as i32, h as i32);
                 video.gl.clear_color(0.05, 0.06, 0.09, 1.0);
