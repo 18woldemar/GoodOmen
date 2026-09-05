@@ -372,6 +372,19 @@ pub struct Boot {
     /// Objects that have been told to fight at least once. `mdkDoganboyAttack`
     /// is a *task*, so this counts the enemies whose script got that far.
     pub fighting: BTreeSet<String>,
+    /// Objects whose animation **wrapped this tick**, which is the whole of
+    /// `omAnimJustLooped` — 0x420250 into 0x461850, one field on the
+    /// animation instance. Cleared and refilled by every tick.
+    pub looped: BTreeSet<String>,
+    /// How fast each object plays its animation, from `omAnimSetSpeed`. One
+    /// per object rather than per animation, because [`Boot::playing`] holds
+    /// one animation. **Negative runs it backwards** — `elevators.lua` shuts
+    /// a door it opened with `omAnimSetSpeed(door, ANIM_OPEN, -1)`.
+    pub speed: BTreeMap<String, f64>,
+    /// **Which gob plays each mode**, from `mdkSetPlayModeGobs(mode, gob,
+    /// inventory)`. A level names several -- level 6 names Doc, the fish and
+    /// Hyde -- and the scripts ask back with `mdkGetPlayModePlayerGob`.
+    pub play_modes: BTreeMap<i64, String>,
     /// Walkers in **state 11**, running away from what they were fighting.
     /// The state is held by the cooldown, and it has to be remembered because
     /// the heading is rewritten towards the target on every call -- a
@@ -1045,6 +1058,74 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             let home = point_at(lua, args.get(1)).unwrap_or(at);
             let leash = args.get(2).map(number).unwrap_or(0.0);
             boot_mut(lua)?.pen.insert(who, (home, leash));
+            Ok(1.0)
+        })?,
+    )?;
+    // `omGobDelete(gob)` — 0x41f1c0 into 0x46e5e0, one argument and no
+    // result. Thirty-seven calls in a run: a missile deleting itself
+    // `OnTimer`, a level clearing its stars at a checkpoint, every conehead
+    // at once. The engine already takes an object and its children out of the
+    // world for `mdkDestroyRoom`, and a gob is a room's own case of that.
+    globals.set(
+        "omGobDelete",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(who) = args.first().and_then(gob_name) else { return Ok(()) };
+            destroy_room(lua, &who)?;
+            Ok(())
+        })?,
+    )?;
+    // `mdkWalkerAnimUpdate(gob)` — 0x43f490 into **0x42f700**, and it returns
+    // nothing: it is a command, and the command is "put the animation that
+    // matches this walker's gait up". The tick already does that for every
+    // walker it knows, so all this has to add is **knowing the walker**: a
+    // tick already does that for every walker it has a gait for, so this has
+    // nothing left to do.
+    //
+    // It **enrolled** the walker at first — a gait of 0 where there was none,
+    // to put a scripted idle character into `ANIM_READY0`. That was an
+    // invention and it cost level 8 its whole run: the scripts call this for
+    // the player too, the tick then drove `bob` as a walker beside the
+    // driver's own body, and the two fought each other into a wall for 3413
+    // of 3600 frames. A gait entry is what `mdkWalkerGotoPoint`, the stop and
+    // the attack create; nothing else may.
+    globals.set(
+        "mdkWalkerAnimUpdate",
+        lua.create_function(|_, _: Variadic<Value>| Ok(()))?,
+    )?;
+    // `mdkWalkerPlayAnim(gob, animation)` — 0x43f580 into **0x4317b0**, and
+    // it is a *request*, not an order. Three gates: `walker + 0x4` is a latch
+    // meaning no one-off pose is up, 0x461650 asks whether the model even
+    // carries that animation, and only then does it clear the latch, remember
+    // the id in `walker + 0x48` and play it with **`ANIMFLAG_INTERRUPT`**. It
+    // answers 1 when it played and 0 when it refused, which is why the
+    // scripts call it every frame until it takes — 3625 times in a run.
+    //
+    // The engine has no latch, and does not need one: the same predicate the
+    // tick uses to decide whether the legs may take a pose back is what
+    // `walker + 0x4` holds. A gait animation, nothing at all, or a one-off
+    // that has played its loop, and the walker is free.
+    globals.set(
+        "mdkWalkerPlayAnim",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(who) = args.first().and_then(gob_name) else { return Ok(0.0) };
+            let id = args.get(1).map(number).unwrap_or(0.0);
+            let kind = with_gob(lua, args.first(), |g| g.kind).unwrap_or(0.0);
+            let Some(model) = model_for_type(kind) else { return Ok(0.0) };
+            let mut boot = boot_mut(lua)?;
+            if !boot.spans.contains_key(&(model, id as i64)) {
+                return Ok(0.0);
+            }
+            let up = boot.playing.get(&who).copied();
+            let free = boot.looped.contains(&who)
+                || up.is_none_or(|a| {
+                    crate::game::world::GAIT_ANIM.contains(&a)
+                        || crate::game::world::GAIT_ANIM_HURT.contains(&a)
+                });
+            if !free {
+                return Ok(0.0);
+            }
+            boot.playing.insert(who.clone(), id);
+            boot.since.insert(who, 0.0);
             Ok(1.0)
         })?,
     )?;
@@ -1736,10 +1817,53 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 // anything that walks `_G`
                 lua.set_named_registry_value("player", gob.clone())?;
                 if let Some(name) = gob.get::<Option<String>>("name")? {
-                    boot_mut(lua)?.player = Some(name);
+                    let mode = args.first().map(number).unwrap_or(0.0) as i64;
+                    let mut boot = boot_mut(lua)?;
+                    boot.play_modes.insert(mode, name.clone());
+                    boot.player = Some(name);
                 }
             }
             Ok(())
+        })?,
+    )?;
+    // `mdkGetPlayMode()` — 0x439f90 into 0x42b9c0, an int the engine keeps;
+    // `mdkGetPlayModePlayerGob(mode)` — 0x439e90 into 0x42bbc0, the gob that
+    // mode is played with. The engine has no second player to switch to, so
+    // the mode it answers with is **the mode whose gob is the current
+    // player**, which is the same number for every level that has one.
+    //
+    // Answering these two at all matters more than it looks: they are called
+    // 3600 times each in a two-minute run, and `PLAYMODE_NONE` is 0, so every
+    // `mdkGetPlayMode() == PLAYMODE_DOC` in the scripts was false.
+    globals.set(
+        "mdkGetPlayMode",
+        lua.create_function(|lua, ()| {
+            let boot = boot_ref(lua)?;
+            let Some(who) = boot.player.as_deref() else { return Ok(0.0) };
+            Ok(boot
+                .play_modes
+                .iter()
+                .find(|(_, name)| name.as_str() == who)
+                .map(|(&mode, _)| mode as f64)
+                .unwrap_or(0.0))
+        })?,
+    )?;
+    globals.set(
+        "mdkGetPlayModePlayerGob",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let mode = args.first().map(number).unwrap_or(0.0) as i64;
+            let name = boot_ref(lua)?.play_modes.get(&mode).cloned();
+            let Some(name) = name else { return Ok(Value::Nil) };
+            Ok(lua.globals().get::<Value>(name).unwrap_or(Value::Nil))
+        })?,
+    )?;
+    // `mdkGetAITargetGob()` — 0x439d20 into **0x42a850**, the same lookup the
+    // enemy AI makes for what to fight. It takes no argument: there is one
+    // target and it is the player.
+    globals.set(
+        "mdkGetAITargetGob",
+        lua.create_function(|lua, ()| {
+            Ok(lua.named_registry_value::<Value>("player").unwrap_or(Value::Nil))
         })?,
     )?;
     globals.set(
@@ -1825,6 +1949,29 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 boot.playing.insert(name.clone(), id);
                 boot.since.insert(name, 0.0);
             }
+            Ok(())
+        })?,
+    )?;
+    // `omAnimJustLooped(gob, slot)` — 0x420250 into 0x461850, which finds the
+    // animation instance and returns one field of it. The engine's tick sets
+    // it on the frame the clock wraps; see [`Boot::looped`].
+    globals.set(
+        "omAnimJustLooped",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(name) = args.first().and_then(gob_name) else { return Ok(0.0) };
+            Ok(if boot_ref(lua)?.looped.contains(&name) { 1.0 } else { 0.0 })
+        })?,
+    )?;
+    // `omAnimSetSpeed(gob, animation, speed)` — a multiplier on the record's
+    // own rate, and the sign is the point: `elevators.lua` opens a door with
+    // `omAnimPlay(door, ANIM_OPEN, ...)` and **shuts it with a speed of -1**
+    // on the same animation rather than a second one.
+    globals.set(
+        "omAnimSetSpeed",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(name) = args.first().and_then(gob_name) else { return Ok(()) };
+            let speed = args.get(2).map(number).unwrap_or(1.0);
+            boot_mut(lua)?.speed.insert(name, speed);
             Ok(())
         })?,
     )?;
@@ -3883,10 +4030,18 @@ pub fn tick_touching(
                 let g = w.get(w.find(name)?)?;
                 let want = crate::game::world::gait_animation(g.kind, gait, g.hitpoints)?;
                 let now = boot.playing.get(name).copied();
-                let idle = now.is_none_or(|a| {
-                    crate::game::world::GAIT_ANIM.contains(&a)
-                        || crate::game::world::GAIT_ANIM_HURT.contains(&a)
-                });
+                // **or what is up has played itself out.** An attack pose is
+                // held so the frame after the AI struck it does not wipe it,
+                // and before the clock wrapped that hold was for ever: a
+                // standing walker kept `ANIM_SHOOT` up and, once animations
+                // looped, fired its key again every pass. It holds for one
+                // loop now, which is what an animation priority buys in the
+                // original, and then the legs take it back.
+                let idle = boot.looped.contains(name)
+                    || now.is_none_or(|a| {
+                        crate::game::world::GAIT_ANIM.contains(&a)
+                            || crate::game::world::GAIT_ANIM_HURT.contains(&a)
+                    });
                 (now != Some(want) && (gait != 0 || idle)).then(|| (name.clone(), want))
             })
             .collect()
@@ -4035,19 +4190,46 @@ pub fn tick_touching(
                 })
                 .collect()
         };
-        let (mut out, mut advanced) = (Vec::new(), Vec::new());
+        let (mut out, mut advanced, mut looped) = (Vec::new(), Vec::new(), Vec::new());
         for (name, anim, model) in live {
             let was = boot.since.get(&name).copied().unwrap_or(0.0);
-            let now = was + dt;
+            let speed = boot.speed.get(&name).copied().unwrap_or(1.0);
+            let mut now = was + dt * speed;
+            // **an animation is a loop.** The record's rate is a rate, so one
+            // pass lasts `1 / |rate|` and the clock wraps at it; without the
+            // wrap `since` ran to infinity and every key on a model fired
+            // once in the life of the object. A conehead's fart is on nearly
+            // every animation it has and it went off once.
+            //
+            // ponytail: a tick longer than a whole loop fires each key once
+            // rather than once per loop crossed. At 30 frames a second and a
+            // shortest loop of 0.2s that cannot happen.
+            let span = boot.spans.get(&(model.clone(), anim as i64)).copied().unwrap_or(0.0);
+            let wrapped = span > 0.0 && !(0.0..span).contains(&now);
             if let Some(keys) = boot.keys.get(&model) {
                 for &(a, at, code) in keys {
-                    if a == anim && at > was && at <= now {
+                    if a != anim {
+                        continue;
+                    }
+                    let struck = match (wrapped, speed < 0.0) {
+                        (false, false) => at > was && at <= now,
+                        (false, true) => at < was && at >= now,
+                        // over the wrap the window is two pieces
+                        (true, false) => at > was || at <= now - span,
+                        (true, true) => at < was || at >= now + span,
+                    };
+                    if struck {
                         out.push((name.clone(), code));
                     }
                 }
             }
+            if wrapped {
+                now -= span * (now / span).floor();
+                looped.push(name.clone());
+            }
             advanced.push((name, now));
         }
+        boot.looped = looped.into_iter().collect();
         for (name, now) in advanced {
             boot.since.insert(name, now);
         }
@@ -4680,6 +4862,58 @@ mod tests {
         assert!(thrown > 0, "the last round of the burst should be a grenade");
         let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
         assert!(boot.fired > 0, "and it is a real shot, with the table's numbers");
+    }
+
+    /// **An animation is a loop**, so its keys come round again. Before the
+    /// clock wrapped, `since` ran to infinity and a key fired once in the
+    /// life of the object -- a conehead's fart is on nearly every animation
+    /// it owns and it went off exactly once.
+    ///
+    /// `omAnimJustLooped` is the same fact from the script's side: true on
+    /// the frame the clock wrapped and no other.
+    #[test]
+    fn an_animation_comes_round_and_its_key_fires_again() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('h', 205, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)",
+            )
+            .exec()
+            .unwrap();
+        /// One second a loop, and the key a third of the way through.
+        const SPAN: f64 = 1.0;
+        const AT: f64 = 0.3;
+        {
+            let mut boot = scripts.lua.app_data_mut::<Boot>().unwrap();
+            boot.keys.insert("hoser".into(), vec![(56.0, AT, 421.0)]);
+            boot.spans.insert(("hoser".into(), 56), SPAN);
+            boot.playing.insert("h".into(), 56.0);
+            boot.since.insert("h".into(), 0.0);
+        }
+        let rooms = Visibility::default();
+        let mut ticking = Ticking::default();
+        let (mut struck, mut loops) = (0usize, 0usize);
+        // 95 ticks is 3.167 seconds: three wraps, and three passes of a key
+        // at 0.3. Not 90, because thirty thirtieths sum to a hair under one
+        // and the third wrap would fall outside the loop.
+        for _ in 0..95 {
+            let before = scripts.lua.app_data_ref::<Boot>().unwrap().keys_fired;
+            {
+                // the gait would take the pose back the frame after a loop,
+                // and this test is about the clock, not the legs
+                let mut boot = scripts.lua.app_data_mut::<Boot>().unwrap();
+                boot.playing.insert("h".into(), 56.0);
+            }
+            tick(&scripts, &rooms, [0.0, 0.0, 0.0], 0.0, 1.0 / 30.0, &mut ticking).unwrap();
+            let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
+            struck += boot.keys_fired - before;
+            loops += boot.looped.contains("h") as usize;
+        }
+        assert_eq!(loops, 3, "three seconds of a one-second loop wraps three times");
+        assert_eq!(struck, 3, "and the key comes round with it");
     }
 
     /// **A walker will not leave its pen.** `mdkWalkerSetPen(gob, point,

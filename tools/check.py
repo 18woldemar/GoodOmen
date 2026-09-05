@@ -151,10 +151,10 @@ ENGINE = [
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG", "--boot",
       "--expect", "129", "--expect-resources", "2093",
       "--expect-rooms", "677", "--expect-bindings", "59",
-      "--events", "--expect-events", "9996",
-      "--expect-survived", "9850", "--expect-plays", "253",
+      "--events", "--expect-events", "9986",
+      "--expect-survived", "9840", "--expect-plays", "253",
       "--expect-spawned", "152", "--expect-armed", "152",
-      "--expect-destroyed", "19881", "--expect-roomless", "0",
+      "--expect-destroyed", "19889", "--expect-roomless", "0",
       "--expect-alerted", "1087"], None),
     ("the engine's controller replays the demo like walksim.py",
      ["walksim.py", "extracted/base/l1.lua", "--resources", "extracted",
@@ -185,7 +185,12 @@ ENGINE = [
       # and on the game's own recorded input **nothing leaves the world**,
       # which is the number that must stay zero however the others move
       "--expect-lost", "0",
-      "--expect-events", "20250", "--expect-survived", "20250",
+      # **Animations loop now**, which moved two numbers and both the right
+      # way: keys struck 4 -> 23, because a key used to fire once in the life
+      # of an object, and handler calls 20250 -> 19318, because
+      # `omAnimJustLooped` and `mdkGetPlayMode` answer instead of returning
+      # nothing and the scripts take branches that end sooner. Still 100%.
+      "--expect-events", "19318", "--expect-survived", "19318",
       "--expect-shot-at", "0", "--expect-killed", "0",
       "--expect-touched", "1"], None),
     ("a run reaches a spawner and the enemies arrive with hitpoints",
@@ -232,7 +237,7 @@ ENGINE = [
       # strike fewer animation keys (13 -> 8), because a walker that is
       # running away is not firing.
       "--expect-walled", "5627", "--expect-buried", "1123",
-      "--expect-keys", "8", "--expect-fighting", "12",
+      "--expect-keys", "9", "--expect-fighting", "12",
       "--expect-moves", "7867",
       "--expect-events", "18004", "--expect-survived", "18004"], None),
     # and the driver that reaches more than the first room. Held forwards
@@ -285,9 +290,9 @@ ENGINE = [
       "--run", "9", "1", "30", "--expect-walkers", "18",
       # 8994 -> 8781 walled with the retreat built: a walker that turns and
       # runs leaves the wall it was pressed against.
-      "--expect-walled", "8781", "--expect-buried", "0", "--expect-keys", "3",
+      "--expect-walled", "8781", "--expect-buried", "0", "--expect-keys", "9",
       "--expect-lost", "1",
-      "--expect-events", "45156", "--expect-survived", "45156"], None),
+      "--expect-events", "46070", "--expect-survived", "46070"], None),
     # level 10's zizzy turrets shoot: nine bullets in thirty seconds, each one
     # carrying its damage, damage type, lifetime and speed out of the shot
     # table at 0x497388 rather than out of the call.
@@ -320,7 +325,7 @@ ENGINE = [
       # the enemies sooner, and is killed at 49s of the 120 -- so the run is
       # shorter and every count with it. It reaches four rooms on the way,
       # against the one it used to.
-      "--run", "4", "1", "120", "--roam", "--expect-shots", "40",
+      "--run", "4", "1", "120", "--roam", "--expect-shots", "44",
       "--expect-hits", "20", "--expect-health", "0", "--expect-rooms", "6",
       # 40 shots -> 39 and 29206 handler calls -> 28246: the player dies at
       # 47 seconds instead of 49 now that the exact collision test moves the
@@ -329,7 +334,7 @@ ENGINE = [
       # And back to 40 shots at 30026 calls with the leap and the retreat in:
       # he lives three seconds longer because a walker that runs away is not
       # shooting, and dies of the same fire at 50s.
-      "--expect-events", "30026", "--expect-survived", "30026"], None),
+      "--expect-events", "34986", "--expect-survived", "34986"], None),
     # and the loop closes: the player walks at an enemy, shoots it with the
     # hitscan the original uses, and it dies.
     # and what it kills falls over: the walker's own OnDamage (0x430a60) plays
@@ -340,11 +345,21 @@ ENGINE = [
     # driver had been guessing at one second. Five times the shots is five
     # times the damage into the same encounter, so six times the kills is the
     # encounter finally being winnable rather than the driver being luckier.
+    # **And then level 8 stopped being the place to measure it**, because
+    # `omGobDelete` started working. `Level.ConeScaredTimer` gives a
+    # frightened conehead a timer, and when it fires the civilian shrieks,
+    # leaves a teleport effect and **deletes itself** -- which is the game's
+    # own behaviour and what a scared civilian does. Twenty of level 8's
+    # twenty-five coneheads are gone inside twenty seconds, so what the check
+    # had been pinning was the player shooting at civilians who, in the real
+    # game, run away. Level 9 with both drivers is the honest subject: 106
+    # shot and four dead, none of them a civilian.
     ("the player kills something",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
-      "--run", "8", "1", "120", "--hunt", "--expect-shot-at", "361",
-      "--expect-killed", "12"], None),
+      "--run", "9", "1", "120", "--hunt", "--roam",
+      "--expect-shot-at", "106", "--expect-killed", "4",
+      "--expect-deleted", "16", "--expect-keys", "42"], None),
     ("walking drives the player's own animation, and reaches the scripts",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",

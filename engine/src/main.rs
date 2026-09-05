@@ -1326,7 +1326,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     }
 
     // what the scripts actually did to the world while it ran
-    let (moved, playing, doors, what, fired_sounds, spawned, jumped, shots, landed, struck, fighting, died, walled, buried, walkers, walked, lost, started, miss, drop, health) = {
+    let (moved, playing, doors, what, fired_sounds, spawned, jumped, shots, landed, struck, fighting, died, walled, buried, walkers, walked, lost, started, miss, drop, deleted, health) = {
         let w = world::world(&scripts.lua).expect("a world");
         let boot = scripts.lua.app_data_ref::<api::Boot>().expect("boot state");
         let what: Vec<String> = boot
@@ -1350,7 +1350,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         let bottom = collision.underworld();
         let lost = boot.bodies.values().filter(|b| b.position[2] < bottom).count()
             + (body.position[2] < bottom) as usize;
-        (w.generation(), boot.playing.len(), boot.doors, what, sounds, boot.spawned.len(), boot.jumped, boot.fired, boot.hits, boot.keys_fired, boot.fighting.len(), boot.died.len(), walled, boot.bodies.values().map(|b| b.inside).sum::<usize>(), boot.bodies.len(), walked, lost, boot.ever_scripted.len(), boot.nearest_miss, boot.nearest_drop,
+        (w.generation(), boot.playing.len(), boot.doors, what, sounds, boot.spawned.len(), boot.jumped, boot.fired, boot.hits, boot.keys_fired, boot.fighting.len(), boot.died.len(), walled, boot.bodies.values().map(|b| b.inside).sum::<usize>(), boot.bodies.len(), walked, lost, boot.ever_scripted.len(), boot.nearest_miss, boot.nearest_drop, boot.destroyed.len(),
          boot.player.as_deref().and_then(|n| w.find(n)).and_then(|i| w.get(i))
              .map(|g| (g.hitpoints, g.max_hitpoints)).unwrap_or((0, 0)))
     };
@@ -1385,6 +1385,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         ("shots fired", shots, expect_flag("--expect-shots")),
         ("hitpoints lost to landings", fell, expect_flag("--expect-fell")),
         ("shots that hit", landed, expect_flag("--expect-hits")),
+        ("objects deleted", deleted, expect_flag("--expect-deleted")),
         ("animation keys", struck, expect_flag("--expect-keys")),
         ("enemies fighting", fighting, expect_flag("--expect-fighting")),
         ("things the player shot", shot_at, expect_flag("--expect-shot-at")),
@@ -1393,6 +1394,19 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         if let Some(want) = want {
             if got != want {
                 return Err(format!("{got} {what}, expected {want}"));
+            }
+        }
+    }
+    // **and what a run asked for and did not get.** The boot has had this
+    // since M2 and a run had not, which is backwards: a boot calls menus, a
+    // run calls the game. Ranked, because the next thing to build is the one
+    // at the top and not the one that reads best.
+    if std::env::args().any(|a| a == "--work-list") {
+        if let Some(boot) = scripts.lua.app_data_ref::<api::Boot>() {
+            let mut ranked: Vec<(&String, &usize)> = boot.unimplemented.iter().collect();
+            ranked.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+            for (name, count) in ranked {
+                println!("{name} {count}");
             }
         }
     }
@@ -1406,7 +1420,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
          {walkers} walkers walked {walked:.0} units ({lost} left the world) \
          and met a wall on {walled} frames ({buried} inside), \
          {shots} shots fired ({landed} hit, nearest {}, {drop:.1} of it height), \
-         {doors} door movements, {blown} frames in a blower, {anim_keys} keys in {struck} struck, {fighting} enemies fighting, {shot_at} shot by the player and {died} killed, \
+         {doors} door movements, {blown} frames in a blower, {deleted} objects deleted, {anim_keys} keys in {struck} struck, {fighting} enemies fighting, {shot_at} shot by the player and {died} killed, \
          the player on {} of {} hitpoints{} ({fell} of it to landings), \
          {} objects touched and {} of them \
          scripted{}{} [{}]{}",
