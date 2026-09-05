@@ -5007,11 +5007,13 @@ pub fn tick_touching(
                 // **and a flier is in the list even when it is still**,
                 // because holding an altitude is a move: a hovering birdbrain
                 // has gait 0 and a target height above it.
-                let fly = boot
-                    .altitude
-                    .get(name)
-                    .copied()
-                    .zip(crate::game::world::climb(g.kind));
+                // **and it flies because of what it is, not what it is
+                // doing**: the flag is on the record (`def + 0x14` bit 2), so
+                // a birdbrain holds its height from the frame it is made,
+                // long before its AI has picked one. Without that a spawned
+                // one fell out of level 8 while it was still deciding.
+                let fly = crate::game::world::climb(g.kind)
+                    .map(|c| (boot.altitude.get(name).copied().unwrap_or(g.position[2]), c));
                 if !turning && speed == 0.0 && fly.is_none() {
                     return None; // standing still and already square
                 }

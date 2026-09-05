@@ -109,6 +109,21 @@ CORPUS = [
     ("checkpoints have somewhere to stand",
      ["spawncheck.py", "extracted", "--expect-floorless", "24",
       "--expect-inside", "1"], "base"),
+    # **What the whole game loses, at the scale it happens.** 129 checkpoints
+    # of sixty seconds is half a minute of machine time and it is the only
+    # measurement that catches a mover fault the size of one object. Twenty-
+    # three named bodies leave the world, and every one is accounted for:
+    # `l7r7_grnt1` and `l7r7_grnt2` are placed at z=165 over nothing, the four
+    # `samfire` samsmites walk off level 2's tunnels chasing the player (they
+    # have no pen, and the original gives them no cliff check either -- level
+    # 2's `mdkWalkerCheckCliffs` calls are commented out in the shipped
+    # script), and the rest stand one unit above a floor at spawn and walk off
+    # something later. Everything else the counter reports is **the player**
+    # on one of the 24 floorless checkpoints, which is the original's own
+    # arrangement.
+    ("the game loses the bodies it is known to lose, and no others",
+     ["sweep.py", "extracted", "--run", "$MDK2_GOG", "--expect-lost", "23"],
+     None),
     ("room graphs resolve",
      ["rooms.py", "extracted", "--check", "--expect", "823"],
      "scripts/level1.lua"),
