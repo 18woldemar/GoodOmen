@@ -1033,26 +1033,25 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
     // the **last** task in a list, and it returns 0 forever, which is how a
     // task list ends in something rather than finishing.
     //
-    // Three of the twelve are built, and they are the three an enemy spends
-    // most of its time in:
+    // All twelve are read. What this function collapses them into, in the
+    // order it decides:
     //
     // - **no target at all** (0x42a850 answers nothing): gait 0, strafe 0,
     //   state 3, cooldown **0.3** (the float at 0x43254c), and return.
-    // - **state 4**, stand ready and aim: the heading goes to the bearing to
-    //   the target and the gait to 0, so the walker turns on the spot.
+    // - the heading, with the lead of **state 4** (0x432d90) on it.
+    // - **state 5**, advance: the chooser's two ways out, gait 2 for the
+    //   3.0 seconds at 0x432cde, and it holds the gait while they last.
+    // - **state 9**, play what the chooser picked — a taunt or `ANIM_SCARED`
+    //   — and stand still for as long as the animation lasts.
+    // - **states 4 and 0**, the burst: `record[+0x00]` rounds, one every
+    //   `record[+0x04]` seconds, each playing `ANIM_SHOOT`, the last of a
+    //   doganboy's throwing a grenade instead.
     // - **state 2**, back away: inside the record's near distance and with
     //   the cooldown spent, the gait goes to **3** — backwards, the negative
-    //   speed in the enemy table — while the heading stays on the target. It
-    //   walks backwards facing you.
+    //   speed in the enemy table — while the heading stays on the target.
     //
-    // What is *not* built is the firing, and the reason is honest rather than
-    // tidy: the branches that fire are states 0, 1, 5, 7, 8 and 11, which are
-    // unread. What state 3 picks in the branches that *are* read is a taunt
-    // (`ANIM_TAUNT0`, 0x70) or `ANIM_SCARED` (0x12), not an attack.
-    //
-    // The lead is left out too. 0x432d90 aims at `target + velocity * (dist *
-    // 0.025)` when the record's flag is set, and the arena keeps no velocity
-    // for a gob.
+    // Not built, and each named where it would go: the leap (7), the charge
+    // (11), the walk home past the leash (1) and getting up (8).
     globals.set(
         "mdkDoganboyAttack",
         lua.create_function(|lua, args: Variadic<Value>| {

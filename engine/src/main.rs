@@ -1503,6 +1503,12 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         collision,
     } = started_level;
 
+    // the same animation keys and spans a headless run loads. Without them an
+    // enemy plays `ANIM_SHOOT` and nothing comes out of it, and a taunt whose
+    // length is unknown is never started at all -- which is why a window
+    // showed nine enemies fighting and not one shot fired at the player.
+    let anim_keys = load_animation_keys(&mut install, &level_scripts);
+
     let spawn = checkpoints
         .iter()
         .find(|c| c.index as u32 == checkpoint)
@@ -1686,7 +1692,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                         let (fired, survived) = ticking.total();
                         // the same combat numbers a headless run reports, so
                         // that playing a level says as much as running one
-                        let (died, fighting, shots, hit, near, walked, doors, health) = level_scripts
+                        let (died, fighting, shots, hit, near, walked, doors, struck, health) = level_scripts
                             .lua
                             .app_data_ref::<goodomen::game::api::Boot>()
                             .map(|b| {
@@ -1704,6 +1710,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                                     b.nearest_miss,
                                     b.bodies.values().map(|x| x.travelled).sum::<f64>(),
                                     b.doors,
+                                    b.keys_fired,
                                     health.unwrap_or((0, 0)),
                                 )
                             })
@@ -1712,7 +1719,8 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                             "{summary}, ran {:.0}s: {} rooms entered, \
                              {survived} of {fired} handler calls ran to the end, \
                              {} shot by you and {died} killed, \
-                             {fighting} enemies fighting, {shots} shots fired at you \
+                             {fighting} enemies fighting, {anim_keys} animation keys in {struck} struck, \
+                             {shots} shots fired at you \
                              ({hit} hit, nearest {}), walkers walked {walked:.0} units, \
                              {doors} door movements, {blown} frames in a blower, \
                              {fell} hitpoints lost to landings, \
