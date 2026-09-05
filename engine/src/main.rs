@@ -1754,6 +1754,17 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         // the same two the headless run counts, so a session says whether a
         // blower ever lifted you and what the floor cost you
         let (mut blown, mut fell) = (0usize, 0usize);
+        // **and dying puts you back at the checkpoint.** The original's death
+        // is two halves: 0x40fe40 begins the sequence and 0x410770 ends it,
+        // and between them it plays an animation and moves the camera and
+        // **reloads nothing** -- what reloads is the level-change path,
+        // through `mdkSwitchPlayMode` and `mdkShowLoadingScreen`, which is the
+        // menu. So the second half of the loop is menu-shaped and this is
+        // ours: full hitpoints, back at the checkpoint the session started
+        // from. Without it a window walks a corpse and every number after the
+        // frame it died on is a lie -- which is exactly what a headless run
+        // refuses to do (it stops).
+        let mut deaths = 0usize;
         // **`--for N` quits after N seconds of play**, which is what makes the
         // played path measurable at all. The two bugs this session found in it
         // -- a window that loaded no animation keys, so nothing shot at the
@@ -1807,6 +1818,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                             ("animation keys", struck, expect_flag("--expect-keys")),
                             ("shots fired at you", shots, expect_flag("--expect-shots")),
                             ("hitpoints", health.0 as usize, expect_flag("--expect-health")),
+                            ("deaths", deaths, expect_flag("--expect-deaths")),
                         ] {
                             if want.is_some_and(|want| want != got) {
                                 return Err(format!("{got} {what}, expected {}", want.unwrap()));
@@ -1821,7 +1833,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                              ({hit} hit, nearest {}), walkers walked {walked:.0} units, \
                              {doors} door movements, {blown} frames in a blower, \
                              {fell} hitpoints lost to landings, \
-                             you on {} of {} hitpoints{}",
+                             you on {} of {} hitpoints{}{}",
                             ticking.clock,
                             ticking.rooms_entered,
                             shot_at.len(),
@@ -1838,6 +1850,11 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                                 Some(PLAYMODE_SNIPER) =>
                                     format!(", in the scope at {zoom:.1} degrees"),
                                 _ => String::new(),
+                            },
+                            match deaths {
+                                0 => String::new(),
+                                1 => ", died once and started over".into(),
+                                n => format!(", died {n} times and started over"),
                             },
                         ));
                     }
@@ -2072,6 +2089,41 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 )
             {
                 eprintln!("goodomen: {e}");
+            }
+
+            // dead? back to the checkpoint, whole. See `deaths`.
+            let down = goodomen::game::world::world(&level_scripts.lua)
+                .and_then(|w| {
+                    let name = level_scripts
+                        .lua
+                        .app_data_ref::<goodomen::game::api::Boot>()?
+                        .player
+                        .clone()?;
+                    let g = w.get(w.find(&name)?)?;
+                    Some(g.max_hitpoints > 0 && g.hitpoints <= 0)
+                })
+                .unwrap_or(false);
+            if down {
+                deaths += 1;
+                let name = level_scripts
+                    .lua
+                    .app_data_ref::<goodomen::game::api::Boot>()
+                    .and_then(|b| b.player.clone());
+                if let (Some(name), Some(mut w)) = (
+                    name,
+                    level_scripts.lua.app_data_mut::<goodomen::game::world::World>(),
+                ) {
+                    if let Some(g) = w.find(&name).and_then(|id| w.get_mut(id)) {
+                        g.hitpoints = g.max_hitpoints;
+                    }
+                }
+                body = goodomen::game::body::Body::new(
+                    [eye[0] as f64, eye[1] as f64, eye[2] as f64],
+                    spawn.facing,
+                );
+                yaw = spawn.facing;
+                pitch = 0.0;
+                at = body.position;
             }
 
             // **and its population, not just its positions.** The draw list

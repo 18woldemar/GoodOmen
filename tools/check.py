@@ -408,7 +408,11 @@ ENGINE = [
       "--play", "4", "1", "--window", "--for", "30",
       "--expect-events", "18001", "--expect-fighting", "12",
       "--expect-keys", "39", "--expect-shots", "21",
-      "--expect-health", "0"], None),
+      # **and the loop closes**: the player dies in these thirty seconds and
+      # starts over at the checkpoint, whole. It used to end them on 0 and
+      # keep walking a corpse; every other number here is unchanged, which
+      # says the death is late in the run and the restart costs nothing.
+      "--expect-health", "100", "--expect-deaths", "1"], None),
     # **The scope.** `--sniper N` enters `PLAYMODE_SNIPER` at N degrees --
     # the same call the V key makes -- and pins what the mode costs: the legs
     # stop, so `walkers walked` is the enemies' own, and standing still in
