@@ -3686,6 +3686,51 @@ fn stream(lua: &Lua, checkpoint: f64) -> mlua::Result<()> {
 /// reaches Lua as the **name** of a model slot, or `nil` for -1 (0x40e7d8),
 /// not as a number: `level7.lua` compares it against `"SHWANG_PALML"`.
 /// Every one of the 48 call sites in the shipped scripts passes -1.
+/// **What every live task list is waiting on.** `ScriptUpdate` in
+/// `script.lua` reads a task's return value as a *step*: `nexttask += res`,
+/// with `nil` counting as 1, so a task that returns **0** holds its list at
+/// the same index for ever. That is the shipped way to spell "wait", and it
+/// is also what a function the engine answers wrongly looks like from the
+/// outside -- the list stops and everything queued behind it never happens.
+///
+/// This walks every named object, finds the ones with a `stack`, and names
+/// the function sitting at `stack.script[stack.nexttask][1]`. The name comes
+/// from the globals table by identity, which is exact for the engine's own
+/// bindings and for anything `Level.*` puts there.
+pub fn stalls(lua: &Lua) -> Vec<(String, Vec<String>)> {
+    let globals = lua.globals();
+    let mut named: Vec<(String, mlua::Function)> = Vec::new();
+    if let Ok(pairs) = globals.clone().pairs::<String, Value>().collect::<mlua::Result<Vec<_>>>() {
+        for (name, v) in pairs {
+            if let Value::Function(f) = v {
+                named.push((name, f));
+            }
+        }
+    }
+    let mut count: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let Some(w) = world::world(lua) else { return Vec::new() };
+    for (_, g) in w.iter() {
+        if g.name.is_empty() {
+            continue;
+        }
+        let Ok(gob) = globals.get::<mlua::Table>(g.name.as_str()) else { continue };
+        let Ok(stack) = gob.get::<mlua::Table>("stack") else { continue };
+        let Ok(next) = stack.get::<i64>("nexttask") else { continue };
+        let Ok(script) = stack.get::<mlua::Table>("script") else { continue };
+        let Ok(task) = script.get::<mlua::Table>(next) else { continue };
+        let Ok(Value::Function(f)) = task.get::<Value>(1) else { continue };
+        let name = named
+            .iter()
+            .find(|(_, other)| *other == f)
+            .map(|(n, _)| n.clone())
+            .unwrap_or_else(|| "an anonymous function".into());
+        count.entry(name).or_default().push(g.name.clone());
+    }
+    let mut out: Vec<(String, Vec<String>)> = count.into_iter().collect();
+    out.sort_by_key(|(n, who)| (std::cmp::Reverse(who.len()), n.clone()));
+    out
+}
+
 /// **The game's area damage**, 0x40e930 into **0x40e960**: walk every gob,
 /// skip the source, and for anything inside `radius` deal `damage - distance`
 /// of `kind`. The falloff is a plain subtraction and the distance is measured

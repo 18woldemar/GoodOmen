@@ -1325,6 +1325,26 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         }
     }
 
+    // **`--stalls` names what every live task list is waiting on**, which is
+    // the direct form of "what stops this level". See `api::stalls`.
+    if std::env::args().any(|a| a == "--stalls") {
+        let waiting = api::stalls(&scripts.lua);
+        println!(
+            "l{number} cp{checkpoint} stalls: {}",
+            if waiting.is_empty() {
+                "nothing is waiting".to_string()
+            } else {
+                waiting
+                    .iter()
+                    .map(|(n, who)| {
+                        format!("{n} x{} <{}>", who.len(), who.join(" "))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        );
+    }
+
     // what the scripts actually did to the world while it ran
     let (moved, playing, doors, what, fired_sounds, spawned, jumped, shots, landed, struck, fighting, died, walled, (buried, stuck), walkers, walked, (lost, gone), started, miss, drop, deleted, health) = {
         let w = world::world(&scripts.lua).expect("a world");
