@@ -2202,6 +2202,14 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
             // hands them to 0x46fd20) and the amplitudes the scripts ask for
             // are 0.01 to 0.03 -- half a degree to two. See `api::Shake`.
             //
+            // **and which sine is which was wrong.** 0x46abba pushes the
+            // three in reverse -- the call is `0x46fd20(quat, sin 6t, sin
+            // 10t, sin 16t)` -- and 0x46fd20's own argument order falls out
+            // of the conehead lemming at 0x434c6a, which calls it with
+            // `(quat, heading, 0, 0)`: the first angle is the **yaw**. So the
+            // yaw is `sin 6t`, the pitch `sin 10t` and the roll `sin 16t`,
+            // and this used to take the roll for the yaw.
+            //
             // ponytail: two of the three are used. The third is a roll, and
             // this camera is a `look_at` with a fixed up vector.
             let shake = level_scripts
@@ -2209,7 +2217,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 .app_data_ref::<goodomen::game::api::Boot>()
                 .and_then(|b| b.shake.map(|s| s.angles()))
                 .unwrap_or([0.0; 3]);
-            let (yaw, pitch) = (yaw + shake[2], pitch + shake[1]);
+            let (yaw, pitch) = (yaw + shake[0], pitch + shake[1]);
             let ahead2 = goodomen::game::body::facing(yaw).0;
             let look = [
                 (ahead2[0] * pitch.cos()) as f32,

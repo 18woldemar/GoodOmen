@@ -116,7 +116,11 @@ pub struct Shake {
 }
 
 impl Shake {
-    /// The three angles this instant: x, y and z, in radians.
+    /// The three angles this instant, **in the order 0x46fd20 takes them:
+    /// yaw, pitch, roll**, in radians. 0x46abba pushes them in reverse, so
+    /// the call is `(quat, sin 6t, sin 10t, sin 16t)`, and which slot is the
+    /// yaw comes from the conehead lemming at 0x434c6a -- the one other call
+    /// with a known angle in it, `(quat, heading, 0, 0)`.
     pub fn angles(&self) -> [f64; 3] {
         if self.duration <= 0.0 || self.elapsed > self.duration {
             return [0.0; 3];
