@@ -94,6 +94,40 @@ pub struct Checkpoint {
     pub prev: Option<usize>,
 }
 
+/// **The screen shake**, read at 0x46aa98..0x46ab12. The offset is three
+/// Euler angles handed to 0x46fd20 and added to the camera's own, and the
+/// three are sines of the *same* phase at 6, 10 and 16 times it — mutually
+/// incommensurate, which is why a shake looks like noise rather than a wobble.
+/// Each is scaled by the amplitude and by a linear fade to nothing over the
+/// duration.
+///
+/// The amplitudes the scripts ask for are 0.01 to 0.03, which is half a
+/// degree to two — nonsense as a distance and exactly right as an angle.
+#[derive(Clone, Copy, Debug)]
+pub struct Shake {
+    /// `scene + 0x11c`, radians.
+    pub amplitude: f64,
+    /// `scene + 0x120`.
+    pub frequency: f64,
+    /// `scene + 0x118`; the shake ends when the clock passes it.
+    pub duration: f64,
+    /// `scene + 0x114`, which `omSceneShake` zeroes.
+    pub elapsed: f64,
+}
+
+impl Shake {
+    /// The three angles this instant: x, y and z, in radians.
+    pub fn angles(&self) -> [f64; 3] {
+        if self.duration <= 0.0 || self.elapsed > self.duration {
+            return [0.0; 3];
+        }
+        let fade = 1.0 - self.elapsed / self.duration;
+        let t = self.frequency * self.elapsed;
+        // 0x490374, 0x48f384 and 0x490378
+        [6.0, 10.0, 16.0].map(|k| (t * k).sin() * self.amplitude * fade)
+    }
+}
+
 /// A command the scripts declare, and the input it answers to.
 ///
 /// `omMakeCommand(COM_JETCHEAT, "J", CON_BUTTON_HELD, 0, 0)` declares one
@@ -372,6 +406,11 @@ pub struct Boot {
     /// Objects that have been told to fight at least once. `mdkDoganboyAttack`
     /// is a *task*, so this counts the enemies whose script got that far.
     pub fighting: BTreeSet<String>,
+    /// The screen shake: **amplitude in radians, frequency, duration and how
+    /// far in it is**. `omSceneShake(scene, amplitude, frequency, duration,
+    /// sound)` — 0x41ee00 into 0x45f5f0 — writes the first four into
+    /// `scene + 0x11c, +0x120, +0x118` and zeroes the clock at `+0x114`.
+    pub shake: Option<Shake>,
     /// Walkers the AI is steering, which is where the original passes
     /// **`avoid`** to the goto core: states 1, 5 and 11 all set it and none
     /// of the 52 `mdkWalkerGotoPoint` calls in the shipped scripts does.
@@ -1083,6 +1122,23 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             let leash = args.get(2).map(number).unwrap_or(0.0);
             boot_mut(lua)?.pen.insert(who, (home, leash));
             Ok(1.0)
+        })?,
+    )?;
+    // `omSceneShake(scene, amplitude, frequency, duration, sound)` —
+    // 0x41ee00 into **0x45f5f0**, four stores and a string copy. The sound is
+    // `rumble1` in every one of the game's calls and the engine does not play
+    // it. See [`Shake`] for what the four numbers become.
+    globals.set(
+        "omSceneShake",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let at = |i: usize| args.get(i).map(number).unwrap_or(0.0);
+            boot_mut(lua)?.shake = Some(Shake {
+                amplitude: at(1),
+                frequency: at(2),
+                duration: at(3),
+                elapsed: 0.0,
+            });
+            Ok(())
         })?,
     )?;
     // `mdkWalkerCheckCliffs(gob)` sets `walker + 0x5c`, and all that field
@@ -4389,6 +4445,33 @@ pub fn tick_touching(
                     let _ = h.call::<Value>((gob.clone(), "", code));
                 }
             }
+        } else if let Some((f, n)) = match code {
+            // 0x42c02a and 0x42c05e: the dispatch calls the **Lua** globals,
+            // and both read their magnitude out of `quakeparams` and
+            // `flashparams` in `mdk2.lua`, so all the numbers are the game's
+            // own. `Earthquake` ends in `omSceneShake`.
+            c if (20.0..30.0).contains(&c) => Some(("Earthquake", c - 19.0)),
+            c if (30.0..100.0).contains(&c) => Some(("ScreenFlash", c - 29.0)),
+            _ => None,
+        } {
+            if let (Ok(gob), Ok(call)) = (
+                globals.get::<mlua::Table>(name.as_str()),
+                globals.get::<mlua::Function>(f),
+            ) {
+                let _ = call.call::<Value>((gob, n));
+            }
+        }
+    }
+    // and the shake runs down. 0x46aa4b stops it when the clock passes the
+    // duration; the offset itself is [`Shake::angles`], read by whoever holds
+    // a camera.
+    {
+        let mut boot = boot_mut(&scripts.lua)?;
+        if let Some(shake) = boot.shake.as_mut() {
+            shake.elapsed += dt;
+            if shake.elapsed > shake.duration {
+                boot.shake = None;
+            }
         }
     }
 
@@ -5006,6 +5089,42 @@ mod tests {
         assert!(thrown > 0, "the last round of the burst should be a grenade");
         let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
         assert!(boot.fired > 0, "and it is a real shot, with the table's numbers");
+    }
+
+    /// **The screen shake is three sines of one phase**, at 6, 10 and 16
+    /// times it, each on the amplitude and on a linear fade to nothing. An
+    /// `Earthquake` key is the same thing with the game's own numbers.
+    #[test]
+    fn a_shake_is_three_sines_that_fade_to_nothing() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load("omSceneShake(0, 0.02, 3, 1, 'rumble1')")
+            .exec()
+            .unwrap();
+        let angles = |s: &Scripts, t: f64| {
+            let mut b = s.lua.app_data_mut::<Boot>().unwrap();
+            b.shake.as_mut().unwrap().elapsed = t;
+            b.shake.unwrap().angles()
+        };
+        let t: f64 = 0.1;
+        for (k, mul) in [6.0f64, 10.0, 16.0].into_iter().enumerate() {
+            let want = (3.0 * t * mul).sin() * 0.02 * (1.0 - t);
+            let got = angles(&scripts, t)[k];
+            assert!((got - want).abs() < 1e-12, "axis {k}: {got} against {want}");
+        }
+        assert_eq!(angles(&scripts, 1.0), [0.0; 3], "and it is nothing at the end");
+        // and the tick runs it down
+        let rooms = Visibility::default();
+        let mut ticking = Ticking::default();
+        for _ in 0..40 {
+            tick(&scripts, &rooms, [0.0, 0.0, 0.0], 0.0, 1.0 / 30.0, &mut ticking).unwrap();
+        }
+        assert!(
+            scripts.lua.app_data_ref::<Boot>().unwrap().shake.is_none(),
+            "a one-second shake is over after forty thirtieths"
+        );
     }
 
     /// **A walker that looks into a wall stops.** The path probe is what the

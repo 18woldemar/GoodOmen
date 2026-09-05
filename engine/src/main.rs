@@ -2028,6 +2028,19 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
             // and `MLOOKUP`, and this engine does not replay them yet.
             const BACK: f64 = 4.0;
             const PIVOT: f64 = 1.5168;
+            // **and the shake goes on the angles, not the position.** The
+            // original adds three Euler angles to the camera's own (0x46ab12
+            // hands them to 0x46fd20) and the amplitudes the scripts ask for
+            // are 0.01 to 0.03 -- half a degree to two. See `api::Shake`.
+            //
+            // ponytail: two of the three are used. The third is a roll, and
+            // this camera is a `look_at` with a fixed up vector.
+            let shake = level_scripts
+                .lua
+                .app_data_ref::<goodomen::game::api::Boot>()
+                .and_then(|b| b.shake.map(|s| s.angles()))
+                .unwrap_or([0.0; 3]);
+            let (yaw, pitch) = (yaw + shake[2], pitch + shake[1]);
             let ahead2 = goodomen::game::body::facing(yaw).0;
             let look = [
                 (ahead2[0] * pitch.cos()) as f32,
