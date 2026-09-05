@@ -3834,11 +3834,19 @@ pub(crate) fn goto_core(
 /// is also what a function the engine answers wrongly looks like from the
 /// outside -- the list stops and everything queued behind it never happens.
 ///
-/// This walks every named object, finds the ones with a `stack`, and names
-/// the function sitting at `stack.script[stack.nexttask][1]`. The name comes
-/// from the globals table by identity, which is exact for the engine's own
-/// bindings and for anything `Level.*` puts there.
-pub fn stalls(lua: &Lua) -> Vec<(String, Vec<String>)> {
+/// This walks every named object, finds the ones with a `stack`, and returns
+/// `(object, the function at stack.script[stack.nexttask][1], nexttask)`. The
+/// name comes from the globals table by identity, which is exact for the
+/// engine's own bindings and for anything `Level.*` puts there.
+///
+/// **Waiting is not stalling**, and telling them apart needs the index over
+/// time rather than at the end. `l9r5aconekiss01` sits on
+/// `{ omAnimJustLooped, { ANIM_ACTION00 } }` at almost any instant you look,
+/// and it is perfectly healthy: the animation is 0.2 seconds long, so five
+/// ticks in six the answer is 0 and the sixth it is 1 and the list loops. So
+/// the driver samples this every second and reports only the objects whose
+/// index **never moved**.
+pub fn stalls(lua: &Lua) -> Vec<(String, String, i64)> {
     let globals = lua.globals();
     let mut named: Vec<(String, mlua::Function)> = Vec::new();
     if let Ok(pairs) = globals.clone().pairs::<String, Value>().collect::<mlua::Result<Vec<_>>>() {
@@ -3848,10 +3856,17 @@ pub fn stalls(lua: &Lua) -> Vec<(String, Vec<String>)> {
             }
         }
     }
-    let mut count: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut out: Vec<(String, String, i64)> = Vec::new();
     let Some(w) = world::world(lua) else { return Vec::new() };
-    for (_, g) in w.iter() {
-        if g.name.is_empty() {
+    let frozen_now: BTreeSet<String> = match boot_ref(lua) {
+        Ok(b) => b.stasis.clone(),
+        Err(_) => Default::default(),
+    };
+    for (id, g) in w.iter() {
+        // **a frozen object's list is not stuck, it is asleep.** 0x46d505
+        // skips a frozen object's whole update, so its `nexttask` cannot
+        // move and it would read as a stall for ever.
+        if g.name.is_empty() || frozen(&w, &frozen_now, id) {
             continue;
         }
         let Ok(gob) = globals.get::<mlua::Table>(g.name.as_str()) else { continue };
@@ -3865,10 +3880,8 @@ pub fn stalls(lua: &Lua) -> Vec<(String, Vec<String>)> {
             .find(|(_, other)| *other == f)
             .map(|(n, _)| n.clone())
             .unwrap_or_else(|| "an anonymous function".into());
-        count.entry(name).or_default().push(g.name.clone());
+        out.push((g.name.clone(), name, next));
     }
-    let mut out: Vec<(String, Vec<String>)> = count.into_iter().collect();
-    out.sort_by_key(|(n, who)| (std::cmp::Reverse(who.len()), n.clone()));
     out
 }
 

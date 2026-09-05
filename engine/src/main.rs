@@ -1072,6 +1072,10 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     // always the same way, which is the left-hand rule and is enough to walk
     // a level. Nobody plays like this; it is a way to reach the triggers.
     let roam = std::env::args().any(|a| a == "--roam");
+    let stalls = std::env::args().any(|a| a == "--stalls");
+    // `object -> (the function it is waiting on, whether its index ever moved)`
+    let mut watched: std::collections::BTreeMap<String, (String, bool)> = Default::default();
+    let mut seen: std::collections::BTreeMap<String, i64> = Default::default();
     const TURN: f64 = 0.35;
     /// Frames of wall following after a jam before the hunt may steer again.
     /// A second and a half: less and the driver turns back into the same
@@ -1323,24 +1327,45 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
             ran = step + 1;
             break;
         }
+        // once a second, which is often enough to catch a list that moves
+        // and cheap enough to leave on for the whole run
+        if stalls && step % 30 == 0 {
+            for (who, what, at) in api::stalls(&scripts.lua) {
+                let moved = seen.insert(who.clone(), at).is_some_and(|was| was != at);
+                let entry = watched.entry(who).or_insert((what.clone(), false));
+                entry.0 = what;
+                entry.1 |= moved;
+            }
+        }
     }
 
-    // **`--stalls` names what every live task list is waiting on**, which is
-    // the direct form of "what stops this level". See `api::stalls`.
-    if std::env::args().any(|a| a == "--stalls") {
-        let waiting = api::stalls(&scripts.lua);
+    // **`--stalls` names what is *stuck*, not what is waiting.** A healthy
+    // loop sits on its wait most of the time -- see `api::stalls` -- so the
+    // driver samples the index once a second and keeps only the objects
+    // whose task never moved for the whole run.
+    if stalls {
+        // the five AI machines are the last task in their own list and
+        // return 0 for ever on purpose -- that is how a task list ends in
+        // something rather than finishing -- so they are stuck by design and
+        // reporting them would bury the ones that are not
+        const TERMINAL: [&str; 5] = [
+            "mdkDoganboyAttack",
+            "mdkBirdbrainAttack",
+            "mdkSamsmiteAttack",
+            "mdkConeheadCivUpdate",
+            "mdkConeheadLemming",
+        ];
+        let stuck: Vec<String> = watched
+            .into_iter()
+            .filter(|(_, (what, moved))| !*moved && !TERMINAL.contains(&what.as_str()))
+            .map(|(who, (what, _))| format!("{who} on {what}"))
+            .collect();
         println!(
             "l{number} cp{checkpoint} stalls: {}",
-            if waiting.is_empty() {
-                "nothing is waiting".to_string()
+            if stuck.is_empty() {
+                "every task list moved".to_string()
             } else {
-                waiting
-                    .iter()
-                    .map(|(n, who)| {
-                        format!("{n} x{} <{}>", who.len(), who.join(" "))
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                format!("{} stuck -- {}", stuck.len(), stuck.join(", "))
             }
         );
     }
