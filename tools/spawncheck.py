@@ -10,12 +10,14 @@ collision the engine uses:
   * is there **any floor beneath him**? Twenty-four have none within 400
     units, and a run of those checkpoints is a two-minute fall.
 
-The second is a known deficiency and this pins it, so that a change to how
-the engine bounds a collision tree shows up as a number rather than as a
-feeling. See the journal: a `.bsp` is a partition of *all* space and the
-engine bounds each tree by its model's rendering box, which is too small --
-`l2_r5`'s tree calls a point 22 units outside that box solid, and level 2's
-fifth checkpoint stands half a unit above exactly that floor.
+Neither number is an engine defect and the second one was suspected of being
+one. The original culls a collision query by the model's **per-node** boxes
+(0x471930 tests `node + 0x1c` against `node + 0x28` before anything else) and
+`Collision::load` bounds each tree by the union of exactly those, so the
+engine's bound is never the tighter of the two. The 24 have no floor in the
+original either: they are respawn points, not starts.
+
+What this pins is the *fact*, so that it is noticed if it moves.
 
 Usage:
     python3 spawncheck.py extracted [--expect-floorless 24] [--expect-inside 1]
