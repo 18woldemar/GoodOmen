@@ -122,7 +122,7 @@ CORPUS = [
     # on one of the 24 floorless checkpoints, which is the original's own
     # arrangement.
     ("the game loses the bodies it is known to lose, and no others",
-     ["sweep.py", "extracted", "--run", "$MDK2_GOG", "--expect-lost", "23"],
+     ["sweep.py", "extracted", "--run", "$MDK2_GOG", "--expect-lost", "22"],
      None),
     ("room graphs resolve",
      ["rooms.py", "extracted", "--check", "--expect", "823"],
@@ -219,7 +219,10 @@ ENGINE = [
       # of an object, and handler calls 20250 -> 19318, because
       # `omAnimJustLooped` and `mdkGetPlayMode` answer instead of returning
       # nothing and the scripts take branches that end sooner. Still 100%.
-      "--expect-events", "19318", "--expect-survived", "19318",
+      # 19318 -> 19330 with the goto core's aim frame: a walker given a new
+      # heading spends one frame on whatever it was already doing, so a task
+      # list runs one step further before the frame is over.
+      "--expect-events", "19330", "--expect-survived", "19330",
       "--expect-shot-at", "0", "--expect-killed", "0",
       "--expect-touched", "1"], None),
     ("a run reaches a spawner and the enemies arrive with hitpoints",
@@ -273,9 +276,16 @@ ENGINE = [
       # left of level 7's four is what the file already says: two placed at
       # z=165 over nothing, waiting for the task list that jumps pilots onto
       # perches.
-      "--expect-walled", "634", "--expect-buried", "418",
-      "--expect-keys", "36", "--expect-fighting", "12",
-      "--expect-moves", "5119",
+      # **And the goto core's re-aim clock and wobble moved all of these
+      # again**, mostly by moving the random stream: 0x431b80 keeps a heading
+      # for `chRand() * 3 + 1` seconds and, past ten units, points it off the
+      # destination by `(chRand() * 2 - 1) * wobble`. Two extra rolls a walker
+      # a second is a different game from the same seed, which is what these
+      # numbers are: 634 wall frames -> 723, 418 buried -> 482, 36 keys -> 38,
+      # 5119 moves -> 5306.
+      "--expect-walled", "723", "--expect-buried", "482",
+      "--expect-keys", "38", "--expect-fighting", "12",
+      "--expect-moves", "5306",
       "--expect-events", "18004", "--expect-survived", "18004"], None),
     # and the driver that reaches more than the first room. Held forwards
     # jams on the first corner -- level 6 spends 1162 of 1200 frames against a
@@ -337,7 +347,9 @@ ENGINE = [
       # both the path probe.
       # 964 -> 885 with the civilians alive: a conehead that walks somewhere
       # is a conehead not leaning on the wall it was left facing.
-      "--expect-walled", "885", "--expect-buried", "0", "--expect-keys", "9",
+      # 885 -> 1320 with the goto core's wobble in: a civilian that wanders
+      # to a corner of its pen finds more corners.
+      "--expect-walled", "1320", "--expect-buried", "0", "--expect-keys", "9",
       "--expect-lost", "0",
       # 46070 -> 47868 with the conehead civilians alive: level 9 places
       # fourteen of them and each one now takes a task list to the end
@@ -421,7 +433,7 @@ ENGINE = [
       # 56 -> 48 keys with the civilians alive: they hold their walk and look
       # animations, which are the two clips in the corpus with no key on them,
       # in place of the ready pose that has one.
-      "--expect-deleted", "16", "--expect-keys", "48"], None),
+      "--expect-deleted", "16", "--expect-keys", "50"], None),
     # **The path a person actually plays**, which had never been checked
     # because it could only be watched. Two bugs lived in it this session --
     # a window that loaded no animation keys, so nothing ever shot at the
@@ -464,7 +476,7 @@ ENGINE = [
       # for the other half of the loop: he is killed and starts over at the
       # checkpoint, whole, and finishes on 90.
       "--play", "1", "5", "--window", "--for", "45", "--sniper", "8",
-      "--expect-events", "19303", "--expect-shots", "24",
+      "--expect-events", "19313", "--expect-shots", "24",
       "--expect-health", "90", "--expect-deaths", "1"], None),
     ("walking drives the player's own animation, and reaches the scripts",
      ["cargo", "run", "--quiet", "--release",

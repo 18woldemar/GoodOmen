@@ -488,6 +488,13 @@ pub struct Boot {
     /// stays and [`crate::game::body::Body`] chases it. Absent means the
     /// walker is on its feet.
     pub altitude: BTreeMap<String, f64>,
+    /// **`walker + 0x98`, the goto core's re-aim clock.** 0x431b80 keeps a
+    /// heading for `chRand() * 3 + 1` seconds at a time and only then points
+    /// at the destination again -- and past ten units it points **off** it by
+    /// `(chRand() * 2 - 1) * wobble`, the fourth argument. That is why a
+    /// walker crossing a room does not draw a straight line, and it is the
+    /// same field the samsmite prowls on.
+    pub reaim: BTreeMap<String, f64>,
     /// **The scripts have taken the controls.** `mdkDisablePlayerControl`
     /// and `mdkEnablePlayerControl` (0x43a080 and 0x43a050, into 0x42a8d0 and
     /// 0x42a8c0) are one global each -- `DAT_004bb6a8`, cleared and set --
@@ -1157,24 +1164,38 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                         args.get(6).map(number).unwrap_or(REACHED),
                     )
                 };
-                let d = [to[0] - at[0], to[1] - at[1], to[2] - at[2]];
-                let dist = if direct {
-                    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
-                } else {
-                    (d[0] * d[0] + d[1] * d[1]).sqrt()
-                };
-                if dist < radius {
-                    return Ok(1.0);
+                // **and only one of the two is the core.** 0x431e30 sets
+                // the destination and hands it to 0x431b80; the direct one
+                // (0x431f70) is its own twenty lines -- a **three**
+                // dimensional distance against the radius, the bearing
+                // straight at the point with no wobble and no clock, and the
+                // 0.17-radian gate always on.
+                if direct {
+                    let d = [to[0] - at[0], to[1] - at[1], to[2] - at[2]];
+                    if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() < radius {
+                        return Ok(1.0);
+                    }
+                    let heading = crate::game::body::bearing(d[0], d[1]);
+                    let square = facing(yaw, heading);
+                    let mut boot = boot_mut(lua)?;
+                    boot.heading.insert(who.clone(), heading);
+                    boot.avoiding.remove(&who);
+                    boot.gait.insert(who, if !square { 0 } else if run { 2 } else { 1 });
+                    return Ok(0.0);
                 }
-                let heading = crate::game::body::bearing(d[0], d[1]);
-                let moving = !must_face || facing(yaw, heading);
+                let wobble = args.get(4).map(number).unwrap_or(0.0);
+                let avoid = args.get(5).map(number).unwrap_or(0.0) != 0.0;
+                let kind = with_gob(lua, args.first(), |g| g.kind).unwrap_or(0.0);
                 let mut boot = boot_mut(lua)?;
-                boot.heading.insert(who.clone(), heading);
                 // every one of the 52 shipped calls passes `avoid` 0, so a
                 // script's goto is the one movement that does not probe
-                boot.avoiding.remove(&who);
-                boot.gait.insert(who, if !moving { 0 } else if run { 2 } else { 1 });
-                Ok(0.0)
+                if !avoid {
+                    boot.avoiding.remove(&who);
+                }
+                let there = goto_core(
+                    &mut boot, &who, kind, at, yaw, to, run, must_face, wobble, avoid, radius,
+                );
+                Ok(if there { 1.0 } else { 0.0 })
             })?,
         )?;
     }
@@ -1570,11 +1591,11 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             boot.heading.insert(who.clone(), bearing);
             match state {
                 1 => {
-                    boot.altitude.insert(who.clone(), home[2]);
-                    boot.gait.insert(who.clone(), 2);
-                    boot.heading.insert(
-                        who.clone(),
-                        crate::game::body::bearing(home[0] - at[0], home[1] - at[1]),
+                    // 0x433cf0 hands the core `(run 1, mustFace 1, wobble 0,
+                    // avoid 1, radius 4)` -- the same arguments the doganboy's
+                    // walk home uses
+                    goto_core(
+                        &mut boot, &who, kind, at, yaw, home, true, true, 0.0, true, 4.0,
                     );
                     if dhome < leash * 0.5
                         || dist < HOME_IF
@@ -1586,7 +1607,22 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                     }
                 }
                 5 => {
-                    boot.gait.insert(who.clone(), 2);
+                    // and the chase is `(run 1, mustFace 0, wobble pi/6,
+                    // avoid 1, radius 4)` -- 0x433e6a, and the thirty degrees
+                    // is why a closing birdbrain does not come in straight
+                    goto_core(
+                        &mut boot,
+                        &who,
+                        kind,
+                        at,
+                        yaw,
+                        to,
+                        true,
+                        false,
+                        std::f64::consts::FRAC_PI_6,
+                        true,
+                        4.0,
+                    );
                     if dhome > leash && leash > 0.0
                         || dist < CLOSE_ENOUGH
                         || (cool <= 0.0 && clear && !blocked_by_friend)
@@ -1855,7 +1891,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             name,
             lua.create_function(move |lua, args: Variadic<Value>| {
                 let Some(who) = args.first().and_then(gob_name) else { return Ok(0.0) };
-                let Some((at, _)) = stance(lua, &who) else { return Ok(0.0) };
+                let Some((at, yaw)) = stance(lua, &who) else { return Ok(0.0) };
                 /// How near you have to be before a civilian reacts at all --
                 /// the 20 at 0x48f388.
                 const NOTICE: f64 = 20.0;
@@ -1976,21 +2012,26 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 // switch in the original and every state below asks
                 // `walker + 0x64` for itself
                 let cool = boot.cooldown.get(&who).copied().unwrap_or(cool);
-                let arrived = |boot: &Boot| {
-                    boot.homing.get(&who).is_none_or(|to| {
-                        (0..2).map(|c| (to[c] - at[c]).powi(2)).sum::<f64>().sqrt() < 1.0
-                    })
-                };
                 match state {
-                    // running and walking are the same two lines at two gaits
-                    0x0b | 0x11 if cool > 0.0 && !arrived(&boot) => {
-                        if let Some(to) = boot.homing.get(&who).copied() {
-                            boot.heading.insert(
-                                who.clone(),
-                                crate::game::body::bearing(to[0] - at[0], to[1] - at[1]),
-                            );
+                    // running and walking are the same call at two gaits
+                    // and two wobbles: 0x434903 hands the goto core pi/4 for
+                    // the wander and 0x4348c1 hands it pi/2 for the run
+                    0x0b | 0x11 if cool > 0.0 => {
+                        let to = boot.homing.get(&who).copied().unwrap_or(at);
+                        let run = state == 0x0b;
+                        let wobble = if run {
+                            std::f64::consts::FRAC_PI_2
+                        } else {
+                            std::f64::consts::FRAC_PI_4
+                        };
+                        let kind = with_gob(lua, args.first(), |g| g.kind).unwrap_or(0.0);
+                        if goto_core(&mut boot, &who, kind, at, yaw, to, run, false, wobble, false, 4.0)
+                        {
+                            boot.gait.insert(who.clone(), 0);
+                            boot.homing.remove(&who);
+                            boot.state.insert(who, 3);
+                            return Ok(0.0);
                         }
-                        boot.gait.insert(who.clone(), if state == 0x0b { 2 } else { 1 });
                     }
                     0x10 if cool > 0.0 => {
                         boot.gait.insert(who.clone(), 0);
@@ -3686,6 +3727,93 @@ fn stream(lua: &Lua, checkpoint: f64) -> mlua::Result<()> {
 /// reaches Lua as the **name** of a model slot, or `nil` for -1 (0x40e7d8),
 /// not as a number: `level7.lua` compares it against `"SHWANG_PALML"`.
 /// Every one of the 48 call sites in the shipped scripts passes -1.
+/// **The goto core**, 0x431b80 -- the one movement primitive the machines
+/// share. `mdkWalkerGotoPoint` wraps it, `mdkWalkerGotoPointDirectly` wraps
+/// it, the conehead civilian's wander is it and the birdbrain's go-home and
+/// chase are it. Returns true the frame the walker has arrived.
+///
+/// What it does, in the order it does it:
+///
+/// * arrival is **two-dimensional** -- the third component of its own
+///   distance is the walker's z, not the destination's -- inside `radius`,
+///   and a **flier** must also be within **0.5** of the destination's height
+///   before it counts. `def + 0x14` bit 2 is what makes that test apply.
+/// * with the re-aim clock at `walker + 0x98` spent, it points at the
+///   destination -- and **past ten units** it points off it by
+///   `(chRand() * 2 - 1) * wobble`. So a walker crossing a room wanders and
+///   only straightens up over the last ten.
+/// * with time left on the clock it keeps the heading, walks or runs, and
+///   stands still while it is still turning if `mustFace` is set. With
+///   `avoid` it probes `def + 0x80` ahead **with the cliff leg on**, and a
+///   block turns it a right angle to its own side.
+/// * either way, a flier climbs or dives at `def + 0x30` toward the
+///   destination's height.
+///
+/// The clock is re-armed at `chRand() * 3 + 1` (0x48f2f0 and 0x48f2f4).
+pub(crate) fn goto_core(
+    boot: &mut Boot,
+    who: &str,
+    kind: f64,
+    at: [f64; 3],
+    yaw: f64,
+    dest: [f64; 3],
+    run: bool,
+    must_face: bool,
+    wobble: f64,
+    avoid: bool,
+    radius: f64,
+) -> bool {
+    /// How far off before the wobble is applied at all: the 10 at 0x48f384.
+    const WANDER_PAST: f64 = 10.0;
+    /// The height a flier has to be inside before it has arrived, and the
+    /// band it holds: the 0.5 at 0x48f2fc.
+    const LEVEL: f64 = 0.5;
+    /// And how long a heading is kept: `chRand() * 3 + 1`.
+    const KEEP: (f64, f64) = (3.0, 1.0);
+    let flies = crate::game::world::climb(kind).is_some();
+    let flat = ((dest[0] - at[0]).powi(2) + (dest[1] - at[1]).powi(2)).sqrt();
+    let dz = if flies { (dest[2] - at[2]).abs() } else { 0.0 };
+    if flies {
+        boot.altitude.insert(who.to_string(), dest[2]);
+    }
+    if flat < radius {
+        if dz < LEVEL {
+            boot.reaim.remove(who);
+            return true;
+        }
+        boot.gait.insert(who.to_string(), 0);
+        return false;
+    }
+    let bearing = crate::game::body::bearing(dest[0] - at[0], dest[1] - at[1]);
+    if boot.reaim.get(who).copied().unwrap_or(0.0) <= 0.0 {
+        let want = if flat > WANDER_PAST {
+            bearing + (boot.random.next() * 2.0 - 1.0) * wobble
+        } else {
+            bearing
+        };
+        boot.heading.insert(who.to_string(), want);
+        let keep = boot.random.next() * KEEP.0 + KEEP.1;
+        boot.reaim.insert(who.to_string(), keep);
+        // and **the gait is not touched here**: 0x431bfe aims, arms the
+        // clock and falls straight through to the climb. Only the branch
+        // with time left on it decides whether the legs move, which is why a
+        // walker given a new heading spends one frame on whatever it was
+        // already doing.
+        return false;
+    }
+    let heading = boot.heading.get(who).copied().unwrap_or(yaw);
+    let square = facing(yaw, heading);
+    if avoid {
+        boot.avoiding.insert(who.to_string());
+        boot.cliffs.insert(who.to_string());
+    }
+    boot.gait.insert(
+        who.to_string(),
+        if must_face && !square { 0 } else if run { 2 } else { 1 },
+    );
+    false
+}
+
 /// **What every live task list is waiting on.** `ScriptUpdate` in
 /// `script.lua` reads a task's return value as a *step*: `nexttask += res`,
 /// with `nil` counting as 1, so a task that returns **0** holds its list at
@@ -5318,6 +5446,11 @@ pub fn tick_touching(
         for left in boot.cooldown.values_mut() {
             *left -= dt;
         }
+        // and `walker + 0x98`, which is the goto core's own -- how long
+        // before it looks up from its heading and aims again
+        for left in boot.reaim.values_mut() {
+            *left -= dt;
+        }
     }
 
     // the animation clock, and the keys it passes.
@@ -5660,7 +5793,9 @@ mod tests {
             travelled += d;
             // the first tick is a half turn away from the waypoint, so it
             // must not already be closing on it
-            if i == 0 {
+            // ...on the tick after the aim frame, which is the first one
+            // the core lets the legs run on
+            if i == 1 {
                 turned_before_moving = Some(after[1] - before[1] > 0.0);
             }
         }
@@ -5916,10 +6051,15 @@ mod tests {
         scripts
             .lua
             .load(
-                // due +y, a hundred out, and the walker already faces it
+                // due +y, a hundred out, and the walker already faces it.
+                // **Twice**, because the goto core's first call is an aim
+                // frame: 0x431bfe points the walker and arms the clock at
+                // `walker + 0x98` without touching the gait, and only the
+                // call after that decides whether the legs move.
                 "points.wp = {x = 0, y = 100, z = 0, f = 0}\n\
                  mdkRegisterObject('d', 207, scene, nil, -1, 0,0,0, \
                  1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkWalkerGotoPoint(d, 'wp', 0, 0, 0, 0)\n\
                  mdkWalkerGotoPoint(d, 'wp', 0, 0, 0, 0)\n\
                  hp = mdkGetHitpoints(d)",
             )
