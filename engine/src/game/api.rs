@@ -372,6 +372,11 @@ pub struct Boot {
     /// Objects that have been told to fight at least once. `mdkDoganboyAttack`
     /// is a *task*, so this counts the enemies whose script got that far.
     pub fighting: BTreeSet<String>,
+    /// Walkers in **state 11**, running away from what they were fighting.
+    /// The state is held by the cooldown, and it has to be remembered because
+    /// the heading is rewritten towards the target on every call -- a
+    /// retreating walker that forgot would turn round and charge.
+    pub fleeing: BTreeSet<String>,
     /// **The animation keys**, by model name: `(animation, time, code)`.
     /// A channel whose target kind is 23 carries no geometry — its values are
     /// key codes, and 0x42bf80 splits them four ways:
@@ -1056,7 +1061,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         "mdkDoganboyAttack",
         lua.create_function(|lua, args: Variadic<Value>| {
             let Some(who) = args.first().and_then(gob_name) else { return Ok(0.0) };
-            let Some((at, _)) = stance(lua, &who) else { return Ok(0.0) };
+            let Some((at, yaw)) = stance(lua, &who) else { return Ok(0.0) };
             boot_mut(lua)?.fighting.insert(who.clone());
             let kind = {
                 let Some(w) = world::world(lua) else { return Ok(0.0) };
@@ -1094,8 +1099,19 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 Some(v) if lead => [0, 1, 2].map(|c| d[c] + v[c] * dist * LEAD),
                 _ => d,
             };
-            boot.heading.insert(who.clone(), crate::game::body::bearing(d[0], d[1]));
             let cool = boot.cooldown.get(&who).copied().unwrap_or(0.0);
+            // a walker in **state 11** is running away, and its heading is
+            // the one thing about it that is not the bearing to the target
+            let away = cool > 0.0 && boot.fleeing.contains(&who);
+            if !away {
+                boot.fleeing.remove(&who);
+            }
+            let look = if away {
+                crate::game::body::bearing(at[0] - to[0], at[1] - to[1])
+            } else {
+                crate::game::body::bearing(d[0], d[1])
+            };
+            boot.heading.insert(who.clone(), look);
             // too close and off cooldown: give ground, still facing
             // **the burst**, states 4 and 0. State 4 loads `record[+0x00]`
             // into `walker + 0x9c` (0x4328e6) and state 0 counts it down one
@@ -1137,6 +1153,82 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             // it: the same level gave 177 units headless and 8 in a window.
             if cool > 0.0 && boot.gait.get(&who) == Some(&2) {
                 return Ok(0.0);
+            }
+
+            // **State 7, the leap, and the health split above it.** 0x432940
+            // divides the whole tree before anything else: over `def + 0x40`
+            // hitpoints a walker may leap, at or below it it is limping and
+            // rolls `act` for the retreat instead. Only the doganboy has that
+            // threshold set, at 20 of its 100 — see [`world::LIMP_AT`].
+            //
+            // The leap has four gates and three of them were unread. The type
+            // must carry `def + 0x14 & 2` ([`world::MAY_LEAP`]) — which is a
+            // flags word and **not part of the inline name**, as the record's
+            // first reading had it, so a hoser never leaps however its own
+            // chance is set and a poopsy on the same behaviour record always
+            // may. Then `chRand()` against **`payload[1]`**: 0x4329c1 rolls it
+            // against `mdkGob + 0xa4`, and 0x42ad30 fills that from the second
+            // number after the model name. The levels set it to 0.15 on most
+            // and 0.6 on two doganboys. Then the distance, against the
+            // record's own `leap`.
+            //
+            // Where it lands is `target + normalize(target - self) * h` with
+            // `h = (chRand() + 1) * 0.5 * record.leap` — it goes **past** you,
+            // by half to all of that distance. The apex is 0.75 of the way it
+            // has to travel (0x48f5cc), **capped by `payload[2]`** when that
+            // is set, which the levels set to 50. The launch is 0x4301f0, the
+            // arc `mdkWalkerJumpToPoint` already flies.
+            //
+            // It turns first: 0x433624 leaves the whole state alone until the
+            // gob is inside [`FACING`] of the bearing, and the heading written
+            // above is what walks it there.
+            //
+            // Not built: the original refuses a leap whose landing is outside
+            // its leash (`walker + 0x6c` against `+0x78`), and the engine
+            // keeps neither a home nor a leash.
+            let (hitpoints, payload) =
+                with_gob(lua, args.first(), |g| (g.hitpoints, g.payload)).unwrap_or((0, [0.0; 4]));
+            let choosing = cool <= 0.0 && left <= 0.0;
+            if let Some(rec) = crate::game::world::ai(kind) {
+                if choosing && crate::game::world::limping(kind, hitpoints) {
+                    if boot.random.next() <= rec.act {
+                        retreat(&mut boot, &who, at, to);
+                        return Ok(0.0);
+                    }
+                } else if choosing
+                    && crate::game::world::may_leap(kind)
+                    && boot.random.next() < payload[1]
+                    && dist < rec.leap
+                {
+                    let to_target = crate::game::body::bearing(to[0] - at[0], to[1] - at[1]);
+                    if !facing(yaw, to_target) {
+                        // still turning; the heading above is doing that
+                        return Ok(0.0);
+                    }
+                    /// How far past the target it lands, as a share of the
+                    /// record's `leap`: `(chRand() + 1) * 0.5` at 0x433674.
+                    const HALF: f64 = 0.5;
+                    /// And how high, as a share of the way it has to go —
+                    /// the float at 0x48f5cc.
+                    const APEX: f64 = 0.75;
+                    let h = (boot.random.next() + 1.0) * HALF * rec.leap;
+                    let step = h / dist.max(1e-9);
+                    let land = [0, 1, 2].map(|c| to[c] + (to[c] - at[c]) * step);
+                    let far = (0..3).map(|c| (land[c] - at[c]).powi(2)).sum::<f64>().sqrt();
+                    let apex = if payload[2] > 0.0 {
+                        (far * APEX).min(payload[2])
+                    } else {
+                        far * APEX
+                    };
+                    let arc = launch(at, land, apex);
+                    if arc.time.is_finite() && arc.time > 0.0 {
+                        boot.heading.insert(who.clone(), arc.heading);
+                        boot.gait.insert(who.clone(), 0);
+                        boot.jumps.insert(who.clone(), Jump { from: at, arc, elapsed: 0.0 });
+                        boot.jumped += 1;
+                        return Ok(0.0);
+                    }
+                }
             }
             if let Some(rec) = crate::game::world::ai(kind) {
                 let choosing = cool <= 0.0 && left <= 0.0 && dist >= near;
@@ -1183,7 +1275,15 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                             && (g.hitpoints as f64) < g.max_hitpoints as f64 * rec.hurt
                     })
                     .unwrap_or(false);
-                    let show = if hurt && boot.random.next() < rec.scared {
+                    let scared = hurt && boot.random.next() < rec.scared;
+                    // and a **conehead** that is scared runs instead, half the
+                    // time: 0x432a4f tests the def's type for 0xcb and only
+                    // then chooses between state 11 and the animation
+                    if scared && kind == CONEHEAD && boot.random.next() < 0.5 {
+                        retreat(&mut boot, &who, at, to);
+                        return Ok(0.0);
+                    }
+                    let show = if scared {
                         Some(ANIM_SCARED)
                     } else if boot.random.next() < rec.taunt {
                         Some(if kind == GRUNT || kind == INVISOGRUNT {
@@ -1249,6 +1349,22 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 } else if dist < reach && rounds > 0.0 {
                     boot.burst.insert(who.clone(), rounds);
                     boot.cooldown.insert(who.clone(), interval);
+                }
+            }
+            // **And inside `near` there are two ways to give ground.**
+            // 0x432aa9 rolls `act`; over it the walker just fights. Under it,
+            // an invisogrunt fights anyway (0x432ac9), and everything else
+            // rolls `scared`: under that it **runs** — state 11 — and over it
+            // it backs away on its feet, state 2.
+            if dist < near && cool <= 0.0 {
+                if let Some(rec) = crate::game::world::ai(kind) {
+                    if boot.random.next() <= rec.act
+                        && kind != INVISOGRUNT
+                        && boot.random.next() <= rec.scared
+                    {
+                        retreat(&mut boot, &who, at, to);
+                        return Ok(0.0);
+                    }
                 }
             }
             let gait = if dist < near && cool <= 0.0 { 3 } else { 0 };
@@ -2943,6 +3059,9 @@ const DOGANBOY: f64 = 207.0;
 const INVISOGRUNT: f64 = 219.0;
 /// `OBJ_GRUNT`, which taunts out of the three rather than the two.
 const GRUNT: f64 = 202.0;
+/// `OBJ_CONEHEAD`, the one type that runs when it is scared rather than
+/// playing `ANIM_SCARED` — 0x432a49 compares the def's type with 0xcb.
+const CONEHEAD: f64 = 203.0;
 const DBGRENADE: f64 = 417.0;
 
 /// `ANIM_SHOOT` and `ANIM_THROW`. 0x4331f8 plays the first for every round of
@@ -2950,6 +3069,37 @@ const DBGRENADE: f64 = 417.0;
 /// cases comes off the animation's key channel.
 const ANIM_SHOOT: f64 = 56.0;
 const ANIM_THROW: f64 = 57.0;
+
+/// **State 11, which is a retreat and not a charge.** 0x433791 puts the
+/// destination at `self + normalize(self - target) * 10` — ten units the
+/// *other* way, `[0x5d2758]` being `a -= b` and `[0x5d271c]` `a += b` — and
+/// hands it to the goto core with run set and `mustFace` clear, so the walker
+/// turns its back and runs. It rebuilds that destination on every call, so
+/// the ten units are always ten units ahead of wherever it has got to, and
+/// what ends the state is the cooldown: **`chRand() * 3 + 2` seconds**, from
+/// 0x432b16 with the 3.0 at 0x48f2f0 and the 2.0 at 0x48f598.
+///
+/// Three branches reach it and all three are a flinch: a walker limping below
+/// `def + 0x40` that rolls under `act`, a **scared conehead** on a coin toss
+/// (0x432a4f tests the type for 0xcb), and anything inside the record's
+/// `near` that rolls under `act` and then under `scared`.
+///
+/// A destination ten units ahead of something already running is the same
+/// thing as a heading, so the engine keeps the heading and holds the state
+/// with the cooldown and [`Boot::fleeing`].
+///
+/// Not built: 0x433826 gives the retreat up early when the target has got
+/// further away than three times the record's `reach`, and goes home.
+fn retreat(boot: &mut Boot, who: &str, at: [f64; 3], from: [f64; 3]) {
+    /// How long it runs for: `chRand() * 3 + 2`.
+    const HELD: (f64, f64) = (3.0, 2.0);
+    let away = crate::game::body::bearing(at[0] - from[0], at[1] - from[1]);
+    boot.heading.insert(who.to_string(), away);
+    boot.gait.insert(who.to_string(), 2);
+    let held = boot.random.next() * HELD.0 + HELD.1;
+    boot.cooldown.insert(who.to_string(), held);
+    boot.fleeing.insert(who.to_string());
+}
 
 /// How near a heading counts as facing it, from the double at 0x490198.
 /// Three walker functions share the constant and the angle-wrap idiom around
@@ -4457,6 +4607,37 @@ mod tests {
         assert!(boot.fired > 0, "and it is a real shot, with the table's numbers");
     }
 
+    /// **An enemy leaps at you**, and past you: the destination is
+    /// `target + normalize(target - self) * h` with `h` half to all of the
+    /// record's `leap`, so a doganboy 15 units away lands 15 to 30 units
+    /// beyond where you stand. The chance is the object's own `payload[1]`,
+    /// which this one sets to 1 so the roll always passes.
+    #[test]
+    fn an_enemy_leaps_past_you_when_its_own_chance_says_so() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('d', 207, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,1,0,0, nil, nil, 0)\n\
+                 mdkRegisterObject('kurt', 100, scene, nil, -1, 0,15,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkSetPlayModeGobs(0, kurt)\n\
+                 mdkDoganboyAttack(d)",
+            )
+            .exec()
+            .unwrap();
+        let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
+        let jump = boot.jumps.get("d").expect("a doganboy whose chance is 1 leaps");
+        let land = jump.at(jump.arc.time);
+        assert!(land[1] > 15.0, "it lands past you, not on you: {land:?}");
+        assert!(
+            (land[1] - 15.0) >= 15.0 && (land[1] - 15.0) <= 30.0,
+            "half to all of the record's 30-unit leap beyond: {land:?}"
+        );
+    }
+
     /// Giving ground is not something a crowded walker does every frame:
     /// entering state 2 sets the cooldown to **3** (0x432af4), and the state
     /// refuses to run again until that has expired.
@@ -4480,6 +4661,21 @@ mod tests {
             let b = s.lua.app_data_ref::<Boot>().unwrap();
             (b.gait["d"], b.cooldown["d"])
         };
+        // inside `near` a walker either backs away on its feet (state 2) or
+        // turns and runs (state 11), and which one is two rolls; drive it
+        // until it takes the one this test is about
+        for tries in 0.. {
+            if state(&scripts).0 == 3 {
+                break;
+            }
+            assert!(tries < 100, "a doganboy inside `near` should give ground");
+            {
+                let mut b = scripts.lua.app_data_mut::<Boot>().unwrap();
+                b.cooldown.insert("d".into(), 0.0);
+                b.fleeing.clear();
+            }
+            scripts.lua.load("mdkDoganboyAttack(d)").exec().unwrap();
+        }
         assert_eq!(state(&scripts), (3, 3.0), "give ground, then wait");
         scripts.lua.load("mdkDoganboyAttack(d)").exec().unwrap();
         assert_eq!(state(&scripts).0, 0, "still waiting, so it stands");
@@ -4490,7 +4686,10 @@ mod tests {
             tick(&scripts, &rooms, [0.0, 0.0, 0.0], 0.0, 1.0 / 30.0, &mut ticking).unwrap();
         }
         scripts.lua.load("mdkDoganboyAttack(d)").exec().unwrap();
-        assert_eq!(state(&scripts).0, 3, "three seconds later it may again");
+        assert!(
+            matches!(state(&scripts).0, 2 | 3),
+            "three seconds later it gives ground again -- on its feet or at a run"
+        );
     }
 
     /// A stop is not an order to face forwards: 0x431870 writes the heading

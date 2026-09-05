@@ -684,6 +684,32 @@ pub const GAIT_ANIM_HURT: [f64; 4] = [
 /// visibly slows down when you have nearly killed it.
 pub const LIMP_AT: [(f64, i16); 1] = [(207.0, 20)];
 
+/// **Which types may leap at all**, out of `def + 0x14` bit 1 -- a flags word
+/// and not part of the inline name, which the earlier reading of the record
+/// had it inside. 0x43299e tests it before anything else about a leap, so a
+/// hoser never jumps however high its own chance is set, and a poopsy on the
+/// very same behaviour record always may.
+///
+/// The eleven are the bit's own list, read straight out of the table.
+pub const MAY_LEAP: [f64; 11] = [
+    203.0,       // conehead
+    250.0,       // coneciv
+    204.0,       // hans
+    202.0,       // grunt
+    219.0,       // invisogrunt
+    207.0,       // doganboy
+    214.0,       // ultradogan
+    211.0,       // bfb
+    220.0,       // shwang
+    210.0,       // badmax
+    217.0,       // poopsy
+];
+
+/// Whether a walker of this type is one the leap flag is set on.
+pub fn may_leap(kind: f64) -> bool {
+    MAY_LEAP.contains(&kind)
+}
+
 /// Whether a walker of this type is hurt enough to limp.
 pub fn limping(kind: f64, hitpoints: i16) -> bool {
     LIMP_AT
