@@ -705,6 +705,21 @@ pub const MAY_LEAP: [f64; 11] = [
     217.0,       // poopsy
 ];
 
+/// **How far ahead a walker looks**, `def + 0x80` — 4 to 15 units by type and
+/// the last column of the record with no reader. 0x431ccd hands it to the
+/// path probe as the length of the ray.
+pub const LOOK_AHEAD: [(f64, f64); 19] = [
+    (201.0, 4.0), (215.0, 4.0), (216.0, 4.0), (203.0, 5.0), (250.0, 7.0),
+    (200.0, 12.0), (204.0, 15.0), (205.0, 5.0), (202.0, 10.0), (219.0, 10.0),
+    (207.0, 10.0), (214.0, 14.0), (211.0, 8.0), (220.0, 10.0), (210.0, 10.0),
+    (217.0, 8.0), (206.0, 10.0), (208.0, 10.0), (260.0, 10.0),
+];
+
+/// How far ahead this type looks, if the table names it.
+pub fn look_ahead(kind: f64) -> Option<f64> {
+    LOOK_AHEAD.iter().find(|(k, _)| *k == kind).map(|(_, d)| *d)
+}
+
 /// Whether a walker of this type is one the leap flag is set on.
 pub fn may_leap(kind: f64) -> bool {
     MAY_LEAP.contains(&kind)

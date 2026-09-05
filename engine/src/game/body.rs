@@ -159,6 +159,28 @@ pub struct Collision {
 }
 
 impl Collision {
+    /// One plane, boxed generously — solid on the side the normal points
+    /// away from. The only way to build a world for a test without an
+    /// install to read one out of.
+    #[cfg(test)]
+    pub(crate) fn one_plane(normal: [f32; 3], dist: f32, gob: &str) -> Collision {
+        let mut d = Vec::new();
+        for v in [normal[0], normal[1], normal[2], dist] {
+            d.extend_from_slice(&v.to_le_bytes());
+        }
+        d.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        d.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        Collision {
+            nodes: 1,
+            trees: vec![Tree {
+                bsp: crate::formats::bsp::Bsp::parse(&d).unwrap(),
+                lo: [-100.0; 3],
+                hi: [100.0; 3],
+                gob: gob.into(),
+            }],
+        }
+    }
+
     /// Every `.bsp` the objects of a run world name, once each.
     pub fn load(install: &mut Install, world: &World) -> Collision {
         let mut out = Collision::default();
@@ -742,40 +764,12 @@ mod tests {
     /// One plane at z = 0 with solid below it, in the mirrored frame the
     /// trees are authored in, boxed generously.
     fn floor() -> Collision {
-        let mut d = Vec::new();
-        for v in [0.0f32, 0.0, 1.0, 0.0] {
-            d.extend_from_slice(&v.to_le_bytes());
-        }
-        d.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
-        d.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
-        Collision {
-            nodes: 1,
-            trees: vec![Tree {
-                bsp: Bsp::parse(&d).unwrap(),
-                lo: [-100.0; 3],
-                hi: [100.0; 3],
-                gob: "the floor".into(),
-            }],
-        }
+        Collision::one_plane([0.0, 0.0, 1.0], 0.0, "the floor")
     }
 
     /// The same one plane stood on end: solid everywhere below x = 0.
     fn wall() -> Collision {
-        let mut d = Vec::new();
-        for v in [1.0f32, 0.0, 0.0, 0.0] {
-            d.extend_from_slice(&v.to_le_bytes());
-        }
-        d.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
-        d.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
-        Collision {
-            nodes: 1,
-            trees: vec![Tree {
-                bsp: Bsp::parse(&d).unwrap(),
-                lo: [-100.0; 3],
-                hi: [100.0; 3],
-                gob: "the wall".into(),
-            }],
-        }
+        Collision::one_plane([1.0, 0.0, 0.0], 0.0, "the wall")
     }
 
     /// **A wide body does not fit where a narrow one does.** `def + 0x7c` is

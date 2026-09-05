@@ -372,6 +372,22 @@ pub struct Boot {
     /// Objects that have been told to fight at least once. `mdkDoganboyAttack`
     /// is a *task*, so this counts the enemies whose script got that far.
     pub fighting: BTreeSet<String>,
+    /// Walkers the AI is steering, which is where the original passes
+    /// **`avoid`** to the goto core: states 1, 5 and 11 all set it and none
+    /// of the 52 `mdkWalkerGotoPoint` calls in the shipped scripts does.
+    pub avoiding: BTreeSet<String>,
+    /// When each walker may look at its path again. The probe is throttled to
+    /// **0.4 seconds** (0x48fa20) on `walker + 0xb4`, and one that found
+    /// something in the way waits `chRand() * 3 + 1` before looking again.
+    pub probe_at: BTreeMap<String, f64>,
+    /// Which way a walker goes round things: `walker + 0x94` is **±1**,
+    /// tossed once in the constructor at 0x42f430 against the 0.5 at
+    /// 0x48f2fc, so a walker always turns the same way.
+    pub side: BTreeMap<String, f64>,
+    /// Walkers `mdkWalkerCheckCliffs` has told to watch the floor as well as
+    /// the wall — `walker + 0x5c`. Two live calls in the shipped scripts,
+    /// both level 7's pilots.
+    pub cliffs: BTreeSet<String>,
     /// How solid each object is, from `omGobGMSetTransparency` — 1 opaque,
     /// 0 invisible, and absent means 1. `level6.lua` warps an enemy in over
     /// half a second with `warptime * 2` and finishes by setting it to 1,
@@ -1042,6 +1058,9 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 let moving = !must_face || facing(yaw, heading);
                 let mut boot = boot_mut(lua)?;
                 boot.heading.insert(who.clone(), heading);
+                // every one of the 52 shipped calls passes `avoid` 0, so a
+                // script's goto is the one movement that does not probe
+                boot.avoiding.remove(&who);
                 boot.gait.insert(who, if !moving { 0 } else if run { 2 } else { 1 });
                 Ok(0.0)
             })?,
@@ -1064,6 +1083,18 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             let leash = args.get(2).map(number).unwrap_or(0.0);
             boot_mut(lua)?.pen.insert(who, (home, leash));
             Ok(1.0)
+        })?,
+    )?;
+    // `mdkWalkerCheckCliffs(gob)` sets `walker + 0x5c`, and all that field
+    // does is add the **second** ray to the path probe: from the far end of
+    // the look-ahead, five units down, and hitting nothing is a cliff. Two
+    // live calls in the shipped scripts, both level 7's pilots.
+    globals.set(
+        "mdkWalkerCheckCliffs",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(who) = args.first().and_then(gob_name) else { return Ok(()) };
+            boot_mut(lua)?.cliffs.insert(who);
+            Ok(())
         })?,
     )?;
     // `omGobGMSetTransparency(gob, alpha)` — 0x41f780 into **0x462920**,
@@ -1163,6 +1194,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             let Some((_, yaw)) = stance(lua, &who) else { return Ok(0.0) };
             let mut boot = boot_mut(lua)?;
             boot.heading.insert(who.clone(), yaw);
+            boot.avoiding.remove(&who);
             boot.gait.insert(who, 0);
             Ok(1.0)
         })?,
@@ -1329,6 +1361,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                     boot.homing.insert(who.clone(), home);
                     boot.heading
                         .insert(who.clone(), crate::game::body::bearing(home[0] - at[0], home[1] - at[1]));
+                    boot.avoiding.insert(who.clone());
                     boot.gait.insert(who.clone(), 2);
                     boot.cooldown.insert(who.clone(), WALK_BACK);
                     return Ok(0.0);
@@ -1427,6 +1460,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 };
                 if advance {
                     boot.cooldown.insert(who.clone(), ADVANCING);
+                    boot.avoiding.insert(who.clone());
                     boot.gait.insert(who, 2);
                     return Ok(0.0);
                 }
@@ -3344,11 +3378,15 @@ fn retreat(boot: &mut Boot, who: &str, at: [f64; 3], from: [f64; 3]) {
     const HELD: (f64, f64) = (3.0, 2.0);
     let away = crate::game::body::bearing(at[0] - from[0], at[1] - from[1]);
     boot.heading.insert(who.to_string(), away);
+    boot.avoiding.insert(who.to_string());
     boot.gait.insert(who.to_string(), 2);
     let held = boot.random.next() * HELD.0 + HELD.1;
     boot.cooldown.insert(who.to_string(), held);
     boot.fleeing.insert(who.to_string());
 }
+
+/// How often a walker may look at its path, from the float at 0x48fa20.
+const PROBE_EVERY: f64 = 0.4;
 
 /// How near a heading counts as facing it, from the double at 0x490198.
 /// Three walker functions share the constant and the angle-wrap idiom around
@@ -3938,6 +3976,85 @@ pub fn tick_touching(
     // sequence, it is *already* inside the geometry when it appears, so all
     // three slide candidates are refused too, and every sequence behind it
     // waits. A body that is already buried now moves anyway.
+    // **The path probe, which is what keeps a walker out of a wall and off a
+    // ledge.** 0x431490, throttled on `walker + 0xb4` to the **0.4 seconds**
+    // at 0x48fa20: a ray from the gob along its heading for `def + 0x80` —
+    // 4 to 15 units by type, and the last unread column of the walker record
+    // — with both ends **raised by 1** (0x48f2f4). If that hits, the path is
+    // blocked. If it does not and `walker + 0x5c` is set, a second ray goes
+    // **five down** (0x48f7d8) from the far end and hitting nothing is a
+    // cliff, which counts the same.
+    //
+    // The goto core reads it only when `avoid` is set and no shipped script
+    // sets it; what does is the AI, in states 1, 5 and 11 — see
+    // [`Boot::avoiding`]. When it answers, 0x431d03 puts the gait to **0**
+    // and 0x431d1d turns the heading by `walker[0x94] * PI/2`, a right angle
+    // to the walker's own side, and waits `chRand() * 3 + 1` to look again.
+    {
+        /// Both ends of the look-ahead ray, off the ground.
+        const OFF_THE_FLOOR: f64 = 1.0;
+        /// How far down a cliff check looks before it counts as a drop.
+        const CLIFF: f64 = 5.0;
+        /// The turn a blocked walker makes, `walker[0x94]` times this.
+        const AWAY: f64 = std::f64::consts::FRAC_PI_2;
+        /// And how long it walks before looking again: `chRand() * 3 + 1`.
+        const AGAIN: (f64, f64) = (3.0, 1.0);
+        let solid = scripts
+            .lua
+            .app_data_ref::<std::rc::Rc<crate::game::body::Collision>>()
+            .map(|c| c.clone());
+        if let Some(solid) = solid {
+            let due: Vec<(String, [f64; 3], f64, f64, bool)> = {
+                let boot = boot_ref(&scripts.lua)?;
+                let Some(w) = crate::game::world::world(&scripts.lua) else {
+                    return Err(Error::Pragma("no world".into()));
+                };
+                boot.avoiding
+                    .iter()
+                    .filter(|n| boot.gait.get(*n).is_some_and(|&g| g > 0))
+                    .filter(|n| boot.probe_at.get(*n).is_none_or(|&t| state.clock >= t))
+                    .filter_map(|n| {
+                        let g = w.get(w.find(n)?)?;
+                        let reach = crate::game::world::look_ahead(g.kind)?;
+                        let heading = *boot.heading.get(n)?;
+                        Some((n.clone(), g.position, heading, reach, boot.cliffs.contains(n)))
+                    })
+                    .collect()
+            };
+            for (name, at, heading, reach, cliff) in due {
+                let ahead = crate::game::body::facing(heading).0;
+                let from = [at[0], at[1], at[2] + OFF_THE_FLOOR];
+                let to = [
+                    from[0] + ahead[0] * reach,
+                    from[1] + ahead[1] * reach,
+                    from[2],
+                ];
+                let wall = !solid.sees(from, to);
+                let drop = cliff && solid.sees(to, [to[0], to[1], to[2] - CLIFF]);
+                if !(wall || drop) {
+                    let mut boot = boot_mut(&scripts.lua)?;
+                    boot.probe_at.insert(name, state.clock + PROBE_EVERY);
+                    continue;
+                }
+                let mut boot = boot_mut(&scripts.lua)?;
+                let side = match boot.side.get(&name) {
+                    Some(&s) => s,
+                    None => {
+                        let s = if boot.random.next() < 0.5 { 1.0 } else { -1.0 };
+                        boot.side.insert(name.clone(), s);
+                        s
+                    }
+                };
+                boot.gait.insert(name.clone(), 0);
+                if let Some(h) = boot.heading.get_mut(&name) {
+                    *h += side * AWAY;
+                }
+                let wait = boot.random.next() * AGAIN.0 + AGAIN.1;
+                boot.probe_at.insert(name, state.clock + wait);
+            }
+        }
+    }
+
     let steps: Vec<(world::Id, String, [f64; 3], f64, f64, f64, f64, bool)> = {
         let boot = boot_ref(&scripts.lua)?;
         let Some(w) = crate::game::world::world(&scripts.lua) else {
@@ -4889,6 +5006,45 @@ mod tests {
         assert!(thrown > 0, "the last round of the burst should be a grenade");
         let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
         assert!(boot.fired > 0, "and it is a real shot, with the table's numbers");
+    }
+
+    /// **A walker that looks into a wall stops.** The path probe is what the
+    /// AI passes `avoid` for, and a doganboy advancing at the player with a
+    /// wall ten units in front of it -- its own `def + 0x80` -- gives up the
+    /// gait rather than walking through. Without it eleven bodies left the
+    /// world across the ten levels; with it, six.
+    #[test]
+    fn a_walker_stops_at_the_wall_its_probe_finds() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        // solid everywhere past x = 5, and the walker faces +x
+        scripts.lua.set_app_data(std::rc::Rc::new(
+            crate::game::body::Collision::one_plane([-1.0, 0.0, 0.0], 5.0, "a wall"),
+        ));
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('d', 207, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)",
+            )
+            .exec()
+            .unwrap();
+        {
+            let mut boot = scripts.lua.app_data_mut::<Boot>().unwrap();
+            boot.avoiding.insert("d".into());
+            boot.gait.insert("d".into(), 2);
+            // straight at the wall: `bearing(dx, dy)` is `atan2(-dx, dy)`
+            boot.heading.insert("d".into(), crate::game::body::bearing(1.0, 0.0));
+        }
+        let rooms = Visibility::default();
+        let mut ticking = Ticking::default();
+        tick(&scripts, &rooms, [0.0, 0.0, 0.0], 0.0, 1.0 / 30.0, &mut ticking).unwrap();
+        let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
+        assert_eq!(boot.gait["d"], 0, "the probe found the wall, so it stops");
+        assert!(
+            boot.probe_at["d"] > 1.0,
+            "and waits a second or more before looking again"
+        );
     }
 
     /// **An animation is a loop**, so its keys come round again. Before the

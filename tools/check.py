@@ -228,7 +228,7 @@ ENGINE = [
       # the mover: 0x40ee00, the move a walker's gait goes through, has no
       # ground check at all, so the original walks off ledges too and it is
       # the AI that does not send it there.
-      "--expect-lost", "5",
+      "--expect-lost", "4",
       # And **the leap and the retreat moved every one of these.** With
       # states 7 and 11 built a walker inside `near` runs instead of backing
       # away a third of the time and a doganboy leaps when its own
@@ -236,9 +236,17 @@ ENGINE = [
       # walls (5952 -> 5627), spend fewer frames buried (1477 -> 1123) and
       # strike fewer animation keys (13 -> 8), because a walker that is
       # running away is not firing.
-      "--expect-walled", "5627", "--expect-buried", "1123",
-      "--expect-keys", "9", "--expect-fighting", "12",
-      "--expect-moves", "7867",
+      # **And the path probe moved all of them the right way.** 0x431490 is
+      # read now and states 1, 5 and 11 pass `avoid`, so a walker that looks
+      # into a wall stops instead of walking through it: 38293 units of
+      # walking became 18893, 5627 wall frames 634, 1123 buried 418, and one
+      # of the five bodies that used to leave the world stays in it. What is
+      # left of level 7's four is what the file already says: two placed at
+      # z=165 over nothing, waiting for the task list that jumps pilots onto
+      # perches.
+      "--expect-walled", "634", "--expect-buried", "418",
+      "--expect-keys", "36", "--expect-fighting", "12",
+      "--expect-moves", "5119",
       "--expect-events", "18004", "--expect-survived", "18004"], None),
     # and the driver that reaches more than the first room. Held forwards
     # jams on the first corner -- level 6 spends 1162 of 1200 frames against a
@@ -290,8 +298,10 @@ ENGINE = [
       "--run", "9", "1", "30", "--expect-walkers", "18",
       # 8994 -> 8781 walled with the retreat built: a walker that turns and
       # runs leaves the wall it was pressed against.
-      "--expect-walled", "8781", "--expect-buried", "0", "--expect-keys", "9",
-      "--expect-lost", "1",
+      # 8781 wall frames -> 964 and **nothing leaves level 9 any more**,
+      # both the path probe.
+      "--expect-walled", "964", "--expect-buried", "0", "--expect-keys", "9",
+      "--expect-lost", "0",
       "--expect-events", "46070", "--expect-survived", "46070"], None),
     # level 10's zizzy turrets shoot: nine bullets in thirty seconds, each one
     # carrying its damage, damage type, lifetime and speed out of the shot
@@ -325,7 +335,7 @@ ENGINE = [
       # the enemies sooner, and is killed at 49s of the 120 -- so the run is
       # shorter and every count with it. It reaches four rooms on the way,
       # against the one it used to.
-      "--run", "4", "1", "120", "--roam", "--expect-shots", "44",
+      "--run", "4", "1", "120", "--roam", "--expect-shots", "46",
       "--expect-hits", "20", "--expect-health", "0", "--expect-rooms", "6",
       # 40 shots -> 39 and 29206 handler calls -> 28246: the player dies at
       # 47 seconds instead of 49 now that the exact collision test moves the
@@ -334,7 +344,7 @@ ENGINE = [
       # And back to 40 shots at 30026 calls with the leap and the retreat in:
       # he lives three seconds longer because a walker that runs away is not
       # shooting, and dies of the same fire at 50s.
-      "--expect-events", "34986", "--expect-survived", "34986"], None),
+      "--expect-events", "34866", "--expect-survived", "34866"], None),
     # and the loop closes: the player walks at an enemy, shoots it with the
     # hitscan the original uses, and it dies.
     # and what it kills falls over: the walker's own OnDamage (0x430a60) plays
@@ -359,7 +369,7 @@ ENGINE = [
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--run", "9", "1", "120", "--hunt", "--roam",
       "--expect-shot-at", "106", "--expect-killed", "4",
-      "--expect-deleted", "16", "--expect-keys", "42"], None),
+      "--expect-deleted", "16", "--expect-keys", "56"], None),
     ("walking drives the player's own animation, and reaches the scripts",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
@@ -369,7 +379,7 @@ ENGINE = [
       # about the level, not the body -- the demo, which is the game's own
       # input, walks 338 units through the same controller.
       "--run", "6", "1", "40", "--expect-playing", "6",
-      "--expect-moves", "838", "--expect-touched", "1"], None),
+      "--expect-moves", "943", "--expect-touched", "1"], None),
     ("the room graph culls what the engine draws",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
