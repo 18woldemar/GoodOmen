@@ -378,6 +378,27 @@ ENGINE = [
       "--run", "9", "1", "120", "--hunt", "--roam",
       "--expect-shot-at", "106", "--expect-killed", "4",
       "--expect-deleted", "16", "--expect-keys", "56"], None),
+    # **The path a person actually plays**, which had never been checked
+    # because it could only be watched. Two bugs lived in it this session --
+    # a window that loaded no animation keys, so nothing ever shot at the
+    # player, and a summary that reported none of the things just built --
+    # and both were invisible until `--for` made the session end by itself.
+    #
+    # `--for` also fixes the frame time at the run's own thirtieth, because a
+    # session at the wall clock's rate came out 43521, 43801 and 44221 handler
+    # calls on three tries. Everything else is the window path: the same tick,
+    # the same camera, the same load.
+    #
+    # And what it pins is the game working: **stand still where level 4 starts
+    # and twelve enemies kill you in thirty seconds**, 21 shots, 20 of them
+    # hits.
+    ("a played session is the same game a run is",
+     ["cargo", "run", "--quiet", "--release",
+      "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
+      "--play", "4", "1", "--window", "--for", "30",
+      "--expect-events", "18001", "--expect-fighting", "12",
+      "--expect-keys", "39", "--expect-shots", "21",
+      "--expect-health", "0"], None),
     ("walking drives the player's own animation, and reaches the scripts",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
@@ -475,12 +496,32 @@ def _env() -> dict:
     return env
 
 
+def _headless() -> list[str]:
+    """`xvfb-run`, when there is no display and it is installed.
+
+    Three of the checks ask SDL for a video device and used to report
+    themselves skipped over SSH, which is the failure mode this file exists to
+    guard against: a green run that checked nothing. The Windows build has
+    always drawn without a display -- SDL's win32 backend does not need one --
+    so it was only ever the native one that could not be seen.
+    """
+    import os
+    import shutil
+    if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        return []
+    run = shutil.which("xvfb-run")
+    return [run, "-a", "-s", "-screen 0 1024x768x24"] if run else []
+
+
+HEADLESS = _headless()
+
+
 def _run(argv: list[str]) -> tuple[bool, str]:
     # a `.py` name is one of our tools; anything else is a command, which is
     # how the Rust engine gets checked against the Python that defines it
     cmd = ([PYTHON, str(ROOT / "tools" / argv[0])] + argv[1:]
            if argv[0].endswith(".py") else argv)
-    p = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
+    p = subprocess.run(HEADLESS + cmd, cwd=ROOT, capture_output=True, text=True,
                        env=_env())
     out = (p.stderr or "") + (p.stdout or "")
     lines = [l for l in out.strip().splitlines() if l.strip()]

@@ -1697,8 +1697,21 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         // the same two the headless run counts, so a session says whether a
         // blower ever lifted you and what the floor cost you
         let (mut blown, mut fell) = (0usize, 0usize);
+        // **`--for N` quits after N seconds of play**, which is what makes the
+        // played path measurable at all. The two bugs this session found in it
+        // -- a window that loaded no animation keys, so nothing shot at the
+        // player, and a summary that reported none of the things that had just
+        // been built -- both survived because `--play` could only be watched
+        // and never counted. On a machine with no screen it is the only way in.
+        let quit_after = std::env::args()
+            .position(|a| a == "--for")
+            .and_then(|i| std::env::args().nth(i + 1))
+            .and_then(|v| v.parse::<f64>().ok());
         loop {
-            for event in video.events.poll_iter() {
+            let expired = quit_after.is_some_and(|n| ticking.clock >= n);
+            for event in video.events.poll_iter().chain(
+                expired.then_some(Event::Quit { timestamp: 0 }),
+            ) {
                 match event {
                     Event::Quit { .. }
                     | Event::KeyDown { keycode: Some(Keycode::Escape), .. } => {
@@ -1729,6 +1742,19 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                                 )
                             })
                             .unwrap_or_default();
+                        // and the same expectations a run takes, so that
+                        // what a person actually plays can be pinned too
+                        for (what, got, want) in [
+                            ("handler calls", fired, expect_flag("--expect-events")),
+                            ("enemies fighting", fighting, expect_flag("--expect-fighting")),
+                            ("animation keys", struck, expect_flag("--expect-keys")),
+                            ("shots fired at you", shots, expect_flag("--expect-shots")),
+                            ("hitpoints", health.0 as usize, expect_flag("--expect-health")),
+                        ] {
+                            if want.is_some_and(|want| want != got) {
+                                return Err(format!("{got} {what}, expected {}", want.unwrap()));
+                            }
+                        }
                         return Ok(format!(
                             "{summary}, ran {:.0}s: {} rooms entered, \
                              {survived} of {fired} handler calls ran to the end, \
@@ -1789,7 +1815,16 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                     _ => {}
                 }
             }
-            let dt = last.elapsed().as_secs_f64().min(0.1);
+            // **a fixed step when `--for` is set**, because a session that
+            // is going to be pinned has to be the same session twice: the
+            // same thirty seconds at the wall clock's own rate came out
+            // 43521, 43801 and 44221 handler calls. This is still the window
+            // path -- the same tick, the same camera, the same everything but
+            // where the frame time comes from.
+            let dt = match quit_after {
+                Some(_) => 1.0 / 30.0,
+                None => last.elapsed().as_secs_f64().min(0.1),
+            };
             last = std::time::Instant::now();
             let keys: std::collections::HashSet<Scancode> =
                 video.events.keyboard_state().pressed_scancodes().collect();
