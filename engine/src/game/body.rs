@@ -801,6 +801,52 @@ mod tests {
         Collision::one_plane([1.0, 0.0, 0.0], 0.0, "the wall")
     }
 
+    /// **A flying body has no floor.** Stood on one and told to climb, it
+    /// leaves; told to fall, it goes straight through. Neither is true of the
+    /// same body with the flag clear -- which is the point, because it is the
+    /// same body.
+    #[test]
+    fn a_flying_body_leaves_the_ground() {
+        let world = floor();
+        let mut bird = Body::new([0.0, 0.0, EYE], 0.0);
+        bird.flying = true;
+        for _ in 0..30 {
+            bird.velocity_z = 6.5; // `def + 0x30` for a birdbrain
+            bird.step(&world, [0.0, 0.0], false, 0.0, 1.0 / 30.0);
+        }
+        assert!(bird.position[2] > EYE + 6.0, "it climbed: {:?}", bird.position);
+        assert!(!bird.on_ground, "and it is not standing on anything");
+        assert_eq!(bird.inside, 0);
+        // **and it hovers**: the same body, ten up, asked for nothing. A
+        // flier stays where it is and a walker falls the whole way.
+        let mut hover = Body::new([0.0, 0.0, EYE + 10.0], 0.0);
+        hover.flying = true;
+        let mut falls = Body::new([0.0, 0.0, EYE + 10.0], 0.0);
+        for _ in 0..90 {
+            hover.velocity_z = 0.0;
+            hover.step(&world, [0.0, 0.0], false, 0.0, 1.0 / 30.0);
+            falls.step(&world, [0.0, 0.0], false, 0.0, 1.0 / 30.0);
+        }
+        assert_eq!(hover.position[2], EYE + 10.0, "it hangs there");
+        assert!((falls.position[2] - EYE).abs() < 0.1, "and the walker is down");
+        // the floor is still geometry, though: a flier driven into it stops
+        let mut diving = Body::new([0.0, 0.0, EYE + 10.0], 0.0);
+        diving.flying = true;
+        for _ in 0..90 {
+            diving.velocity_z = -6.5;
+            diving.step(&world, [0.0, 0.0], false, 0.0, 1.0 / 30.0);
+        }
+        // it stops **on** the floor rather than through it, and a little
+        // lower than a walker rests: a flier is refused by `blocked`, which
+        // is the body's own box, where a walker is placed by `settle`, which
+        // puts the head an EYE above the ground.
+        assert!(
+            diving.position[2] > 0.5 && diving.position[2] < falls.position[2],
+            "on it, not through it: {:?}",
+            diving.position
+        );
+    }
+
     /// **A wide body does not fit where a narrow one does.** `def + 0x7c` is
     /// the full width and omCollision halves it, so half of it is how far the
     /// probe reaches sideways: a grunt is 3.8 wide and stops 1.9 short of a
