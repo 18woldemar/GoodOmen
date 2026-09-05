@@ -472,6 +472,13 @@ pub struct Boot {
     /// the shoot-or-taunt leaf is left. That is what a turret is -- a walker
     /// that turns and fires from where it stands.
     pub turret: BTreeSet<String>,
+    /// **What a conehead civilian is doing.** `mdkConeheadCivUpdate`
+    /// (0x440440 into **0x4347e0**) is a four-state machine on the same
+    /// `walker + 0x7c` the doganboy uses, and unlike the fight it cannot be
+    /// re-decided from scratch every call: a civilian standing still and one
+    /// walking to a corner of its pen look identical from the outside.
+    /// 3 chooses, 0x10 looks at you, 0x11 wanders, 0x14 stands, 0x0b runs.
+    pub civ: BTreeMap<String, i64>,
     /// **The play mode the level last asked for.** 0x42b940 parks
     /// `mdkSwitchPlayMode`'s argument in a pending slot and raises a flag;
     /// 0x42b9d0, which is what `mdkGetPlayMode` calls, answers with the
@@ -1409,6 +1416,193 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         })?,
     )?;
 
+    // **The conehead civilian**, which is the crowd rather than the fight.
+    // `mdkConeheadCivUpdate(gob)` is 0x440440 into **0x4347e0**, and
+    // `script.lua` hangs it on `OBJ_CONEHEADCIV1` in the default table, so
+    // every one of the 23 the levels place gets it. Four states on the same
+    // `walker + 0x7c` the fight uses:
+    //
+    // - **3, choose.** Gait 0, then one roll decides everything. It ignores
+    //   you when there is no target, when the target is **`OBJ_DOC`**
+    //   (0x4347fd compares the type with 0x66), when you are **20** units off
+    //   (0x48f388) or when the roll comes up under **0.2** (0x48f5b0) -- so
+    //   even a civilian looking straight at you shrugs one time in five. Then
+    //   over 0.5 it stands for `chRand() * 5 + 1` seconds, and under it picks
+    //   a point in its pen and walks there.
+    // - **0x10, look.** It plays `ANIM_SCARED` or the one after it -- a coin
+    //   toss stored in `walker + 0x9c` -- and holds for **2** seconds.
+    // - **0x11, wander.** The goto core at walking pace, up to **20**
+    //   seconds, and it goes back to choosing the moment it arrives.
+    // - **0x14, stand.** Still, until the clock runs out or you come inside
+    //   the twenty.
+    // - **0x0b, run.** Only `OnHear` sets it, and it runs at the pen point it
+    //   just picked rather than away from anything.
+    //
+    // The point in the pen is `home + (sin a, cos a) * chRand() * leash` with
+    // `a = chRand() * 2pi - pi`, and 0x402a60 decides whether it is worth
+    // walking to. There is no navigation mesh here, so that becomes
+    // [`Collision::sees`] between the two -- the same segment test the
+    // shooting uses, which is the nearest honest thing the engine has.
+    for name in ["mdkConeheadCivUpdate", "mdkConeheadCivOnHear"] {
+        let hearing = name == "mdkConeheadCivOnHear";
+        globals.set(
+            name,
+            lua.create_function(move |lua, args: Variadic<Value>| {
+                let Some(who) = args.first().and_then(gob_name) else { return Ok(0.0) };
+                let Some((at, _)) = stance(lua, &who) else { return Ok(0.0) };
+                /// How near you have to be before a civilian reacts at all --
+                /// the 20 at 0x48f388.
+                const NOTICE: f64 = 20.0;
+                /// And how often it shrugs anyway, the 0.2 at 0x48f5b0.
+                const SHRUG: f64 = 0.2;
+                /// How long it looks at you, and how long it will walk.
+                const LOOKING: f64 = 2.0;
+                const WANDERING: f64 = 20.0;
+                /// `ANIM_SCARED`, and the one after it.
+                const SCARED: f64 = 0x12 as f64;
+                /// `OBJ_DOC`, whom a civilian does not mind at all.
+                const DOC: f64 = 102.0;
+                let hero = lua
+                    .named_registry_value::<mlua::Table>("player")
+                    .ok()
+                    .and_then(|p| p.get::<String>("name").ok());
+                let seen = hero.as_deref().and_then(|n| {
+                    let w = world::world(lua)?;
+                    let g = w.get(w.find(n)?)?;
+                    Some((g.position, g.kind))
+                });
+                let near = seen
+                    .filter(|&(_, kind)| kind != DOC)
+                    .map(|(p, _)| {
+                        (0..3).map(|c| (p[c] - at[c]).powi(2)).sum::<f64>().sqrt()
+                    })
+                    .filter(|d| *d < NOTICE)
+                    .is_some();
+                // a point in the pen, and whether anything is in the way
+                let spot = |boot: &mut Boot, at: [f64; 3]| -> Option<[f64; 3]> {
+                    // **and it wanders whether or not it has been penned.**
+                    // 0x434841 reads `walker + 0x6c` and `+0x78` without ever
+                    // looking at the flag at `+0x68`, and the constructor
+                    // fills both -- the home where the walker was placed
+                    // (0x42f3e5) and the leash at **25** (0x42f400). Only the
+                    // fight asks about the flag. So a civilian with no pen
+                    // gets the constructor's, recorded the first time it is
+                    // asked, which is the frame it starts on.
+                    const LEASH: f64 = 25.0;
+                    let (home, leash) = *boot.pen.entry(who.clone()).or_insert((at, LEASH));
+                    let far = boot.random.next() * leash;
+                    let angle = boot.random.next() * std::f64::consts::TAU
+                        - std::f64::consts::PI;
+                    Some([home[0] + angle.sin() * far, home[1] + angle.cos() * far, home[2]])
+                };
+                let reachable = |to: [f64; 3]| {
+                    let eye = crate::game::body::EYE;
+                    lua.app_data_ref::<std::rc::Rc<crate::game::body::Collision>>()
+                        .is_none_or(|c| {
+                            c.sees(
+                                [at[0], at[1], at[2] + eye],
+                                [to[0], to[1], to[2] + eye],
+                            )
+                        })
+                };
+                let mut boot = boot_mut(lua)?;
+                let state = boot.civ.get(&who).copied().unwrap_or(3);
+                let cool = boot.cooldown.get(&who).copied().unwrap_or(0.0);
+                // `OnHear`: 0x434b00 is two branches and neither of them
+                // looks at the noise. Standing, it looks up; walking or
+                // looking, it picks a new point and **runs** to it.
+                if hearing {
+                    match state {
+                        0x14 => {
+                            let coin = boot.random.next() <= 0.5;
+                            boot.playing.insert(who.clone(), SCARED + coin as i64 as f64);
+                            boot.since.insert(who.clone(), 0.0);
+                            boot.civ.insert(who.clone(), 0x10);
+                            boot.cooldown.insert(who, LOOKING);
+                        }
+                        0x10 | 0x11 => {
+                            if let Some(to) = spot(&mut boot, at) {
+                                if reachable(to) {
+                                    boot.homing.insert(who.clone(), to);
+                                    boot.civ.insert(who.clone(), 0x0b);
+                                    boot.cooldown.insert(who, WANDERING);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    return Ok(0.0);
+                }
+                let mut state = state;
+                if state == 3 {
+                    boot.gait.insert(who.clone(), 0);
+                    let roll = boot.random.next();
+                    if !near || roll <= SHRUG {
+                        if roll >= 0.5 {
+                            state = 0x14;
+                            let wait = boot.random.next() * 5.0 + 1.0;
+                            boot.cooldown.insert(who.clone(), wait);
+                        } else {
+                            let to = spot(&mut boot, at);
+                            match to.filter(|&t| reachable(t)) {
+                                Some(to) => {
+                                    boot.homing.insert(who.clone(), to);
+                                    state = 0x11;
+                                    boot.cooldown.insert(who.clone(), WANDERING);
+                                }
+                                None => {
+                                    state = 0x14;
+                                    let wait = boot.random.next() * 5.0 + 1.0;
+                                    boot.cooldown.insert(who.clone(), wait);
+                                }
+                            }
+                        }
+                    } else {
+                        let coin = boot.random.next() <= 0.5;
+                        boot.playing.insert(who.clone(), SCARED + coin as i64 as f64);
+                        boot.since.insert(who.clone(), 0.0);
+                        state = 0x10;
+                        boot.cooldown.insert(who.clone(), LOOKING);
+                    }
+                }
+                // and the switch reads the clock the chooser has just set,
+                // not the one it walked in with: state 3 falls **into** the
+                // switch in the original and every state below asks
+                // `walker + 0x64` for itself
+                let cool = boot.cooldown.get(&who).copied().unwrap_or(cool);
+                let arrived = |boot: &Boot| {
+                    boot.homing.get(&who).is_none_or(|to| {
+                        (0..2).map(|c| (to[c] - at[c]).powi(2)).sum::<f64>().sqrt() < 1.0
+                    })
+                };
+                match state {
+                    // running and walking are the same two lines at two gaits
+                    0x0b | 0x11 if cool > 0.0 && !arrived(&boot) => {
+                        if let Some(to) = boot.homing.get(&who).copied() {
+                            boot.heading.insert(
+                                who.clone(),
+                                crate::game::body::bearing(to[0] - at[0], to[1] - at[1]),
+                            );
+                        }
+                        boot.gait.insert(who.clone(), if state == 0x0b { 2 } else { 1 });
+                    }
+                    0x10 if cool > 0.0 => {
+                        boot.gait.insert(who.clone(), 0);
+                    }
+                    0x14 if cool > 0.0 && !near => {
+                        boot.gait.insert(who.clone(), 0);
+                    }
+                    _ => {
+                        boot.gait.insert(who.clone(), 0);
+                        boot.homing.remove(&who);
+                        state = 3;
+                    }
+                }
+                boot.civ.insert(who, state);
+                Ok(0.0)
+            })?,
+        )?;
+    }
     // `mdkDoganboyAttack(gob)` — 0x440380 into **0x4324f0**, class 4's slot
     // +0x2c and the enemy AI: a twelve-state machine on `walker + 0x7c` whose
     // jump table is at 0x433a38. Every one of the 41 script sites has it as
@@ -5598,6 +5792,65 @@ mod tests {
             (land[1] - 15.0) >= 15.0 && (land[1] - 15.0) <= 30.0,
             "half to all of the record's 30-unit leap beyond: {land:?}"
         );
+    }
+
+    /// A conehead civilian mills about and reacts to you, and does neither
+    /// when the player is Doc -- 0x4347fd compares the target's type with
+    /// 0x66 and shrugs. The states are reached by driving the clock, because
+    /// each of them is held by a cooldown.
+    #[test]
+    fn a_civilian_looks_at_kurt_and_ignores_doc() {
+        let civilian = |player: f64| {
+            let scripts = Scripts::new().unwrap();
+            install(&scripts.lua, Default::default()).unwrap();
+            scripts
+                .lua
+                .load(&format!(
+                    "mdkRegisterObject('cc', 250, scene, nil, -1, 0,0,0, \
+                     1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                     mdkRegisterObject('hero', {player}, scene, nil, -1, 5,0,0, \
+                     1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                     mdkSetPlayModeGobs(0, hero)\n\
+                     mdkSwitchPlayMode(0)"
+                ))
+                .exec()
+                .unwrap();
+            // five units away is well inside the twenty; drive it until it
+            // either looks or has plainly settled on ignoring
+            let mut looked = false;
+            for _ in 0..200 {
+                scripts.lua.app_data_mut::<Boot>().unwrap().cooldown.insert("cc".into(), 0.0);
+                scripts.lua.load("mdkConeheadCivUpdate(cc)").exec().unwrap();
+                let b = scripts.lua.app_data_ref::<Boot>().unwrap();
+                looked |= b.civ.get("cc") == Some(&0x10);
+            }
+            looked
+        };
+        assert!(civilian(100.0), "OBJ_KURT is worth looking at");
+        assert!(!civilian(102.0), "OBJ_DOC is not");
+    }
+
+    /// And a noise sends a standing one into a look and a walking one into a
+    /// run -- 0x434b00, which never reads the noise itself.
+    #[test]
+    fn a_noise_moves_a_civilian_on() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('cc', 250, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)",
+            )
+            .exec()
+            .unwrap();
+        let state = |s: &Scripts| s.lua.app_data_ref::<Boot>().unwrap().civ.get("cc").copied();
+        scripts.lua.app_data_mut::<Boot>().unwrap().civ.insert("cc".into(), 0x14);
+        scripts.lua.load("mdkConeheadCivOnHear(cc, 0, 0, 0, 0)").exec().unwrap();
+        assert_eq!(state(&scripts), Some(0x10), "standing, it looks up");
+        scripts.lua.app_data_mut::<Boot>().unwrap().civ.insert("cc".into(), 0x11);
+        scripts.lua.load("mdkConeheadCivOnHear(cc, 0, 0, 0, 0)").exec().unwrap();
+        assert_eq!(state(&scripts), Some(0x0b), "walking, it runs");
     }
 
     /// `OnModeSwitch` lands on the **room**, not on the player, and only on

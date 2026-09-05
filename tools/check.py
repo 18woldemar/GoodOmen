@@ -303,14 +303,21 @@ ENGINE = [
       # buried was 184 and is now 0: no walker in level 9 ends a frame inside
       # the world any more, which is the quarter turn again -- they were
       # walking across the geometry rather than along it.
-      "--run", "9", "1", "30", "--expect-walkers", "18",
+      # 18 -> 20: two of level 9's three `OBJ_CONEHEADCIV1` are out of
+      # stasis in the first thirty seconds and now have legs
+      "--run", "9", "1", "30", "--expect-walkers", "20",
       # 8994 -> 8781 walled with the retreat built: a walker that turns and
       # runs leaves the wall it was pressed against.
       # 8781 wall frames -> 964 and **nothing leaves level 9 any more**,
       # both the path probe.
-      "--expect-walled", "964", "--expect-buried", "0", "--expect-keys", "9",
+      # 964 -> 885 with the civilians alive: a conehead that walks somewhere
+      # is a conehead not leaning on the wall it was left facing.
+      "--expect-walled", "885", "--expect-buried", "0", "--expect-keys", "9",
       "--expect-lost", "0",
-      "--expect-events", "46070", "--expect-survived", "46070"], None),
+      # 46070 -> 47868 with the conehead civilians alive: level 9 places
+      # fourteen of them and each one now takes a task list to the end
+      # instead of falling off `mdkConeheadCivUpdate` as a recorder.
+      "--expect-events", "47868", "--expect-survived", "47868"], None),
     # level 10's zizzy turrets shoot: nine bullets in thirty seconds, each one
     # carrying its damage, damage type, lifetime and speed out of the shot
     # table at 0x497388 rather than out of the call.
@@ -377,7 +384,10 @@ ENGINE = [
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--run", "9", "1", "120", "--hunt", "--roam",
       "--expect-shot-at", "106", "--expect-killed", "4",
-      "--expect-deleted", "16", "--expect-keys", "56"], None),
+      # 56 -> 48 keys with the civilians alive: they hold their walk and look
+      # animations, which are the two clips in the corpus with no key on them,
+      # in place of the ready pose that has one.
+      "--expect-deleted", "16", "--expect-keys", "48"], None),
     # **The path a person actually plays**, which had never been checked
     # because it could only be watched. Two bugs lived in it this session --
     # a window that loaded no animation keys, so nothing ever shot at the
