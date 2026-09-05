@@ -1075,7 +1075,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     let stalls = std::env::args().any(|a| a == "--stalls");
     // `object -> (the function it is waiting on, whether its index ever moved)`
     let mut watched: std::collections::BTreeMap<String, (String, bool)> = Default::default();
-    let mut seen: std::collections::BTreeMap<String, i64> = Default::default();
+    let mut seen: std::collections::BTreeMap<String, (i64, [f64; 3])> = Default::default();
     const TURN: f64 = 0.35;
     /// Frames of wall following after a jam before the hunt may steer again.
     /// A second and a half: less and the driver turns back into the same
@@ -1330,8 +1330,12 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         // once a second, which is often enough to catch a list that moves
         // and cheap enough to leave on for the whole run
         if stalls && step % 30 == 0 {
-            for (who, what, at) in api::stalls(&scripts.lua) {
-                let moved = seen.insert(who.clone(), at).is_some_and(|was| was != at);
+            for (who, what, at, where_) in api::stalls(&scripts.lua) {
+                // a list whose index moved is alive, and so is an object that
+                // walked -- level 9's `ch1` runs 89 units, arrives, deletes
+                // itself and is made again, and its index is 1 every time
+                let mark = (at, where_.map(|c| (c * 4.0).round()));
+                let moved = seen.insert(who.clone(), mark).is_some_and(|was| was != mark);
                 let entry = watched.entry(who).or_insert((what.clone(), false));
                 entry.0 = what;
                 entry.1 |= moved;

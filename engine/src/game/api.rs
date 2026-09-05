@@ -3845,8 +3845,10 @@ pub(crate) fn goto_core(
 /// and it is perfectly healthy: the animation is 0.2 seconds long, so five
 /// ticks in six the answer is 0 and the sixth it is 1 and the list loops. So
 /// the driver samples this every second and reports only the objects whose
-/// index **never moved**.
-pub fn stalls(lua: &Lua) -> Vec<(String, String, i64)> {
+/// index **and position** both never moved -- level 9's `ch1` runs 89 units,
+/// arrives, deletes itself and is made again, and its index is 1 whenever you
+/// look. The position is what tells the two apart.
+pub fn stalls(lua: &Lua) -> Vec<(String, String, i64, [f64; 3])> {
     let globals = lua.globals();
     let mut named: Vec<(String, mlua::Function)> = Vec::new();
     if let Ok(pairs) = globals.clone().pairs::<String, Value>().collect::<mlua::Result<Vec<_>>>() {
@@ -3856,7 +3858,7 @@ pub fn stalls(lua: &Lua) -> Vec<(String, String, i64)> {
             }
         }
     }
-    let mut out: Vec<(String, String, i64)> = Vec::new();
+    let mut out: Vec<(String, String, i64, [f64; 3])> = Vec::new();
     let Some(w) = world::world(lua) else { return Vec::new() };
     let frozen_now: BTreeSet<String> = match boot_ref(lua) {
         Ok(b) => b.stasis.clone(),
@@ -3880,7 +3882,7 @@ pub fn stalls(lua: &Lua) -> Vec<(String, String, i64)> {
             .find(|(_, other)| *other == f)
             .map(|(n, _)| n.clone())
             .unwrap_or_else(|| "an anonymous function".into());
-        out.push((g.name.clone(), name, next));
+        out.push((g.name.clone(), name, next, g.position));
     }
     out
 }
