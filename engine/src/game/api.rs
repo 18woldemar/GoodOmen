@@ -479,6 +479,12 @@ pub struct Boot {
     /// **same gob**, `bob`, so the derivation could never answer 4 and every
     /// `mdkGetPlayMode() == PLAYMODE_SNIPER` in the scripts was false.
     pub mode: i64,
+    /// The room the player is in, by name -- the same one `OnEnterRoom` last
+    /// fired on. It is kept here because `OnModeSwitch` lands on **the room**
+    /// and not on the player: 0x42b940 fires event 0x11 on `FUN_0042ecd0()`,
+    /// which reads the room stack at 0x4bb750, and `level1.lua` duly hangs
+    /// its handler on `l1_r1`, an `OBJ_ROOM`.
+    pub room: Option<String>,
     /// **The pen**: where a walker is allowed to be. `mdkWalkerSetPen(gob,
     /// point, radius)` -- 0x43f4e0 into 0x431810, three stores -- puts the
     /// point in `walker + 0x6c`, the radius in `walker + 0x78` and sets the
@@ -3240,7 +3246,21 @@ pub fn zoom(fov: f64, direction: f64, dt: f64) -> f64 {
 }
 
 pub fn switch_play_mode(lua: &Lua, mode: i64) -> mlua::Result<()> {
+    let was = boot_ref(lua)?.mode;
     boot_mut(lua)?.mode = mode;
+    // **`OnModeSwitch` (event 0x11) fires on the room**, which is how level
+    // 1's tutorial knows you have found the scope: `l1_r1.OnModeSwitch`
+    // advances its task list to state 16 and then unhooks itself. The whole
+    // event table is 19 names at 0x49bb20, sixteen bytes each, indexed by the
+    // number 0x40e010 is handed -- 0 is `OnUpdate` and 17 is this one.
+    if mode != was {
+        let here = boot_ref(lua)?.room.clone();
+        if let Some(gob) = here.and_then(|n| lua.globals().get::<mlua::Table>(n).ok()) {
+            if let Ok(handler) = gob.get::<mlua::Function>("OnModeSwitch") {
+                handler.call::<()>((gob, mode as f64))?;
+            }
+        }
+    }
     let who = boot_ref(lua)?.play_modes.get(&mode).cloned();
     let Some(who) = who else { return Ok(()) };
     if let Ok(gob) = lua.globals().get::<mlua::Table>(who.as_str()) {
@@ -4089,6 +4109,7 @@ pub fn tick_touching(
     let here = rooms.at(at).first().copied();
     if here != state.room {
         state.room = here;
+        boot_mut(&scripts.lua)?.room = here.map(|i| rooms.names[i].clone());
         if let Some(i) = here {
             state.rooms_entered += 1;
             if let Ok(gob) = globals.get::<mlua::Table>(rooms.names[i].as_str()) {
@@ -5573,6 +5594,34 @@ mod tests {
             (land[1] - 15.0) >= 15.0 && (land[1] - 15.0) <= 30.0,
             "half to all of the record's 30-unit leap beyond: {land:?}"
         );
+    }
+
+    /// `OnModeSwitch` lands on the **room**, not on the player, and only on
+    /// a change. That is where `level1.lua` hangs it -- `l1_r1` is an
+    /// `OBJ_ROOM` -- and it is how the tutorial knows you found the scope.
+    #[test]
+    fn the_mode_switch_reaches_the_room() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('l1_r1', 803, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, 'l1_r1',0,0,0,0, nil, nil, 0)\n\
+                 heard = 0\n\
+                 mdkSetLuaEvent(l1_r1, 'OnModeSwitch', function(g, m) heard = heard + m end)",
+            )
+            .exec()
+            .unwrap();
+        scripts.lua.app_data_mut::<Boot>().unwrap().room = Some("l1_r1".into());
+        let heard = || scripts.lua.globals().get::<f64>("heard").unwrap();
+        switch_play_mode(&scripts.lua, 4).unwrap();
+        assert_eq!(heard(), 4.0, "the scope reaches the room that asked");
+        switch_play_mode(&scripts.lua, 4).unwrap();
+        assert_eq!(heard(), 4.0, "and only on a change");
+        switch_play_mode(&scripts.lua, 1).unwrap();
+        assert_eq!(heard(), 5.0, "coming back out is a switch too");
+        assert_eq!(scripts.lua.app_data_ref::<Boot>().unwrap().mode, 1);
     }
 
     /// The scope's zoom is proportional, and both ends are hard stops.
