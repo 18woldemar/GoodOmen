@@ -218,11 +218,15 @@ def items(args) -> int:
         want.append([str(key), r[4:0x14].split(b"\0")[0].decode("latin1"),
                      str(struct.unpack_from("<i", r, 0x14)[0]),
                      _f32(struct.unpack_from("<f", r, 0x2c)[0]),
-                     str(struct.unpack_from("<i", r, 0x30)[0])])
+                     str(struct.unpack_from("<i", r, 0x30)[0]),
+                     # +0x24 picks one of the character's two banks, which is
+                     # Doc's two hands -- 0x40ce40 shifts it by five onto
+                     # `character + 0x6c`
+                     str(struct.unpack_from("<i", r, 0x24)[0])])
         i += 1
 
     if not args.engine:
-        print("type model string interval give")
+        print("type model string interval give bank")
         for row in want:
             print(" ".join(row))
         return 0

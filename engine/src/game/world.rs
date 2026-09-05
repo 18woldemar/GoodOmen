@@ -422,56 +422,56 @@ pub fn bullet(kind: f64) -> Option<(&'static str, i16, i16, f64, f64, f64, i32)>
 ///
 /// +0x1c and +0x20 are still out: 1/2/3/10 and 0/1/2/3, which look like a
 /// category and an owner and are read by nothing this has found.
-pub const ITEM: [(f64, &str, i32, f64, i32); 49] = [
-    (300.0, "magnum", 18, 0.2, 50),
-    (301.0, "uzi", 21, 0.0, 200),
-    (304.0, "magnum", -1, 0.2, 0),
-    (305.0, "gatgun", 16, 0.0, 200),
-    (306.0, "shotgun", 20, 0.6, 50),
-    (307.0, "lasergatgun", 567, 0.2, 200),
-    (309.0, "guidedrocket", 17, 1.5, 15),
-    (311.0, "doublea", 23, 0.0, 1),
-    (312.0, "carbattery", 22, 0.0, 1),
-    (318.0, "jetpack", 24, 0.0, 1),
-    (352.0, "jetpackatm", 212, 0.0, 1),
-    (313.0, "apple", 2, 0.0, 1),
-    (314.0, "ham", 7, 0.0, 1),
-    (316.0, "blackhole", 3, 0.0, 1),
-    (317.0, "grenade", 6, 0.0, 5),
-    (319.0, "decoygrenade", 5, 0.0, 1),
-    (320.0, "cloak", 4, 0.0, 1),
-    (347.0, "snipershield", 14, 0.5, 1),
-    (321.0, "sniperbullet", 189, 0.5, -1),
-    (322.0, "snipergrenade", 12, 1.0, 5),
-    (323.0, "sniperhoming", 11, 0.5, 5),
-    (325.0, "snipermortar", 10, 1.0, 5),
-    (326.0, "sniperbounce", 13, 0.5, 5),
-    (327.0, "lighter", 33, 0.0, 1),
-    (328.0, "loaf", 34, 0.0, -1),
-    (329.0, "toaster", 41, 0.0, 1),
-    (330.0, "booze", 25, 0.0, 1),
-    (332.0, "ducttape", 27, 0.0, 1),
-    (333.0, "fishbowl", 30, 0.0, 1),
-    (336.0, "plutonium", 37, 0.0, 1),
-    (340.0, "magnet", 35, 0.0, 1),
-    (341.0, "pop", 38, 0.0, 1),
-    (343.0, "leafer", 42, 0.0, 1),
-    (344.0, "atomictoaster", 43, 0.0, 1),
-    (345.0, "moltov", 44, 0.0, 1),
-    (346.0, "towels", 45, 0.0, 1),
-    (349.0, "ladder", 174, 0.0, 1),
-    (351.0, "pipes", 178, 0.0, 1),
-    (350.0, "cord", 177, 0.0, 1),
-    (353.0, "dimdes", 213, 0.0, 1),
-    (354.0, "kurtcoord", 214, 0.0, 1),
-    (355.0, "posdoo", 215, 0.0, 1),
-    (356.0, "schaingun", 225, 0.0, 1),
-    (357.0, "fballgun", 226, 0.0, 1),
-    (358.0, "toast", 227, 0.0, 1),
-    (359.0, "handdryer", 239, 0.0, 1),
-    (360.0, "loafbaguette", 324, 0.0, 5),
-    (361.0, "loafpumper", 374, 0.0, 3),
-    (362.0, "fishbowle", 29, 0.0, 1),
+pub const ITEM: [(f64, &str, i32, f64, i32, i64); 49] = [
+    (300.0, "magnum", 18, 0.2, 50, 0),
+    (301.0, "uzi", 21, 0.0, 200, 0),
+    (304.0, "magnum", -1, 0.2, 0, 0),
+    (305.0, "gatgun", 16, 0.0, 200, 0),
+    (306.0, "shotgun", 20, 0.6, 50, 0),
+    (307.0, "lasergatgun", 567, 0.2, 200, 0),
+    (309.0, "guidedrocket", 17, 1.5, 15, 0),
+    (311.0, "doublea", 23, 0.0, 1, 0),
+    (312.0, "carbattery", 22, 0.0, 1, 0),
+    (318.0, "jetpack", 24, 0.0, 1, 0),
+    (352.0, "jetpackatm", 212, 0.0, 1, 0),
+    (313.0, "apple", 2, 0.0, 1, 0),
+    (314.0, "ham", 7, 0.0, 1, 0),
+    (316.0, "blackhole", 3, 0.0, 1, 0),
+    (317.0, "grenade", 6, 0.0, 5, 0),
+    (319.0, "decoygrenade", 5, 0.0, 1, 0),
+    (320.0, "cloak", 4, 0.0, 1, 0),
+    (347.0, "snipershield", 14, 0.5, 1, 0),
+    (321.0, "sniperbullet", 189, 0.5, -1, 0),
+    (322.0, "snipergrenade", 12, 1.0, 5, 0),
+    (323.0, "sniperhoming", 11, 0.5, 5, 0),
+    (325.0, "snipermortar", 10, 1.0, 5, 0),
+    (326.0, "sniperbounce", 13, 0.5, 5, 0),
+    (327.0, "lighter", 33, 0.0, 1, 1),
+    (328.0, "loaf", 34, 0.0, -1, 1),
+    (329.0, "toaster", 41, 0.0, 1, 0),
+    (330.0, "booze", 25, 0.0, 1, 0),
+    (332.0, "ducttape", 27, 0.0, 1, 0),
+    (333.0, "fishbowl", 30, 0.0, 1, 0),
+    (336.0, "plutonium", 37, 0.0, 1, 1),
+    (340.0, "magnet", 35, 0.0, 1, 1),
+    (341.0, "pop", 38, 0.0, 1, 1),
+    (343.0, "leafer", 42, 0.0, 1, 0),
+    (344.0, "atomictoaster", 43, 0.0, 1, 0),
+    (345.0, "moltov", 44, 0.0, 1, 0),
+    (346.0, "towels", 45, 0.0, 1, 1),
+    (349.0, "ladder", 174, 0.0, 1, 1),
+    (351.0, "pipes", 178, 0.0, 1, 1),
+    (350.0, "cord", 177, 0.0, 1, 0),
+    (353.0, "dimdes", 213, 0.0, 1, 0),
+    (354.0, "kurtcoord", 214, 0.0, 1, 0),
+    (355.0, "posdoo", 215, 0.0, 1, 0),
+    (356.0, "schaingun", 225, 0.0, 1, 0),
+    (357.0, "fballgun", 226, 0.0, 1, 0),
+    (358.0, "toast", 227, 0.0, 1, 0),
+    (359.0, "handdryer", 239, 0.0, 1, 0),
+    (360.0, "loafbaguette", 324, 0.0, 5, 1),
+    (361.0, "loafpumper", 374, 0.0, 3, 1),
+    (362.0, "fishbowle", 29, 0.0, 1, 0),
 ];
 
 /// The item Kurt starts holding, and the one the harness fires. **Ours, not
@@ -483,7 +483,7 @@ pub const STARTING_GUN: f64 = 300.0;
 /// and zero for the uzi, the gatling gun and everything that is not a
 /// weapon, which is the table saying "as fast as you can ask".
 pub fn fire_interval(kind: f64) -> Option<f64> {
-    ITEM.iter().find(|(k, ..)| *k == kind).map(|(_, _, _, t, _)| *t)
+    ITEM.iter().find(|(k, ..)| *k == kind).map(|(_, _, _, t, ..)| *t)
 }
 
 /// The model a type wears, if one of the three tables names it — and they
@@ -599,6 +599,23 @@ pub const AI_OF: [(f64, usize); 10] = [
 pub fn ai(kind: f64) -> Option<Ai> {
     let i = AI_OF.iter().find(|(k, _)| *k == kind)?.1;
     Some(AI[i])
+}
+
+/// **Which of a character's two banks an item goes into**, out of the record's
+/// `+0x24` (0x40b1e0 and 0x40ce40 both shift it by five and add it to
+/// `character + 0x6c`). Ten of the 49 are 1 and the rest 0, and the ten are
+/// `lighter`, `loaf`, `plutonium`, `magnet`, `pop`, `towels`, `ladder`,
+/// `pipes`, `loafbaguette` and `loafpumper` — which is Doc's *combine*: two
+/// hands, one item selected in each, and `loaf` plus `toaster` is `toast`,
+/// itself an item in this table.
+pub fn item_bank(kind: f64) -> Option<i64> {
+    ITEM.iter().find(|(k, ..)| *k == kind).map(|r| r.5)
+}
+
+/// How many a pickup of this type gives — the record's `+0x30`. **Negative is
+/// unlimited** and 0x40ce40 turns it into -1.
+pub fn item_gives(kind: f64) -> Option<i64> {
+    ITEM.iter().find(|(k, ..)| *k == kind).map(|r| r.4 as i64)
 }
 
 /// The base hitpoints for a type, if it is one the table names.

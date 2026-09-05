@@ -236,8 +236,8 @@ fn main() {
     // non-zero base off zero gets checked: the table has no record small
     // enough to reach it.
     if args.iter().any(|a| a == "--items") {
-        for (kind, model, string, interval, give) in goodomen::game::world::ITEM {
-            println!("{} {model} {string} {interval} {give}", kind as i64);
+        for (kind, model, string, interval, give, bank) in goodomen::game::world::ITEM {
+            println!("{} {model} {string} {interval} {give} {bank}", kind as i64);
         }
         return;
     }

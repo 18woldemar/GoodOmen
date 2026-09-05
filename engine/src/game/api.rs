@@ -406,6 +406,17 @@ pub struct Boot {
     /// Objects that have been told to fight at least once. `mdkDoganboyAttack`
     /// is a *task*, so this counts the enemies whose script got that far.
     pub fighting: BTreeSet<String>,
+    /// **What each character is carrying**, by `(who, bank)`. A bank lives at
+    /// `character + 0x6c + bank * 0x20` — capacity at `+0x0c`, the selected
+    /// slot at `+0x10`, and an array of 16-byte `{type, count, ?, the object
+    /// in its hand}` at `+0x1c` — and there are **two**, chosen by the item
+    /// record's `+0x24`. Two banks with a selection each is Doc's *combine*:
+    /// `loaf` plus `toaster` is `toast`, itself an item in the table.
+    ///
+    /// 0x4157d0 is the whole of giving: walk the slots, add to the count when
+    /// the type is already there, otherwise take the first empty one and
+    /// refuse when there is none. Seven slots (0x40b1fb counts to 6).
+    pub carried: BTreeMap<(String, i64), Vec<(f64, i64)>>,
     /// The screen shake: **amplitude in radians, frequency, duration and how
     /// far in it is**. `omSceneShake(scene, amplitude, frequency, duration,
     /// sound)` — 0x41ee00 into 0x45f5f0 — writes the first four into
@@ -1122,6 +1133,103 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             let leash = args.get(2).map(number).unwrap_or(0.0);
             boot_mut(lua)?.pen.insert(who, (home, leash));
             Ok(1.0)
+        })?,
+    )?;
+    // **The inventory.** `mdkDocGiveItem(gob, type, count)` is 0x43e0d0 into
+    // 0x40ce40, which is four lines: look the record up, force the count to
+    // **-1 when the record's give column is negative** — unlimited, which is
+    // `sniperbullet` and `loaf` — and hand it to 0x4157d0 with the bank the
+    // record names. `mdkMaxGiveItem` is the same call for Max.
+    //
+    // ponytail: the original also creates the *model* in the character's hand
+    // and hangs it off a node. The engine keeps the counts and not the props.
+    for name in ["mdkDocGiveItem", "mdkMaxGiveItem"] {
+        globals.set(
+            name,
+            lua.create_function(|lua, args: Variadic<Value>| {
+                let Some(who) = args.first().and_then(gob_name) else { return Ok(()) };
+                let kind = args.get(1).map(number).unwrap_or(0.0);
+                /// The type the tables use for "nothing", which the give
+                /// refuses outright (0x40b1bb and 0x4157e8).
+                const NOTHING: f64 = 399.0;
+                if kind == 0.0 || kind == NOTHING {
+                    return Ok(());
+                }
+                let Some(bank) = crate::game::world::item_bank(kind) else { return Ok(()) };
+                let mut count = args.get(2).map(number).unwrap_or(1.0) as i64;
+                if crate::game::world::item_gives(kind).is_some_and(|g| g < 0) {
+                    count = -1;
+                }
+                /// How many slots a bank holds — 0x40b1fb counts to 6.
+                const SLOTS: usize = 7;
+                let mut boot = boot_mut(lua)?;
+                let held = boot.carried.entry((who, bank)).or_default();
+                match held.iter().position(|&(t, _)| t == kind) {
+                    Some(i) if held[i].1 >= 0 && count >= 0 => held[i].1 += count,
+                    Some(i) => held[i].1 = -1,
+                    None if held.len() < SLOTS => held.push((kind, count)),
+                    None => {}
+                }
+                Ok(())
+            })?,
+        )?;
+    }
+    // `mdkDocHasItem(gob, type)` — 0x43f270 into 0x40d000, which is "the
+    // count in that type's own bank is above zero".
+    globals.set(
+        "mdkDocHasItem",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(who) = args.first().and_then(gob_name) else { return Ok(0.0) };
+            let kind = args.get(1).map(number).unwrap_or(0.0);
+            let Some(bank) = crate::game::world::item_bank(kind) else { return Ok(0.0) };
+            let has = boot_ref(lua)?
+                .carried
+                .get(&(who, bank))
+                .is_some_and(|held| held.iter().any(|&(t, n)| t == kind && n != 0));
+            Ok(if has { 1.0 } else { 0.0 })
+        })?,
+    )?;
+    // `mdkKurtRemoveItem(gob, type, count)` and Doc's — 0x415980 takes the
+    // count *off* the slot and, when it reaches zero, **drops the slot and
+    // shifts the rest down**, which is why the original re-reads the type
+    // afterwards to see whether the hand emptied.
+    for name in ["mdkKurtRemoveItem", "mdkDocRemoveItem"] {
+        globals.set(
+            name,
+            lua.create_function(|lua, args: Variadic<Value>| {
+                let Some(who) = args.first().and_then(gob_name) else { return Ok(()) };
+                let kind = args.get(1).map(number).unwrap_or(0.0);
+                let count = args.get(2).map(number).unwrap_or(1.0) as i64;
+                let Some(bank) = crate::game::world::item_bank(kind) else { return Ok(()) };
+                let mut boot = boot_mut(lua)?;
+                let Some(held) = boot.carried.get_mut(&(who, bank)) else { return Ok(()) };
+                if let Some(i) = held.iter().position(|&(t, _)| t == kind) {
+                    if held[i].1 >= 0 {
+                        held[i].1 -= count;
+                        if held[i].1 < 1 {
+                            held.remove(i);
+                        }
+                    }
+                }
+                Ok(())
+            })?,
+        )?;
+    }
+    // `mdkDocGetHeldItem(gob, bank)` — 0x43f400 into 0x40d040, one read of
+    // `character + 0xb4 + bank * 4`, which the select at 0x40b7xx writes with
+    // the type it put in that hand. Nothing here switches hands, so what is
+    // held is the first slot.
+    globals.set(
+        "mdkDocGetHeldItem",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(who) = args.first().and_then(gob_name) else { return Ok(0.0) };
+            let bank = args.get(1).map(number).unwrap_or(0.0) as i64;
+            Ok(boot_ref(lua)?
+                .carried
+                .get(&(who, bank))
+                .and_then(|held| held.first())
+                .map(|&(t, _)| t)
+                .unwrap_or(0.0))
         })?,
     )?;
     // `omSceneShake(scene, amplitude, frequency, duration, sound)` —
@@ -1875,15 +1983,14 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
     //
     // `mdkDialogIsDone` — nothing is speaking, so it is done.
     //
-    // `mdkDocHasItem(gob, OBJ_*)` — Doc's inventory, which the engine does
-    // not hold. **0 is what a fresh game answers**, so this is right until
-    // there is an inventory and wrong only in the same place a real one
-    // would be.
+    // `mdkDocHasItem` was here, answering a constant 0 because the engine
+    // held no inventory. It holds one now and the real binding is above; a
+    // constant left in this list would have quietly won, since this loop runs
+    // later, and it did for exactly one test run.
     for (name, answer) in [
         ("mdkIsCutSceneAllowed", 1.0),
         ("chIsLoadingResources", 0.0),
         ("mdkDialogIsDone", 1.0),
-        ("mdkDocHasItem", 0.0),
     ] {
         globals.set(name, lua.create_function(move |_, _: Variadic<Value>| Ok(answer))?)?;
     }
@@ -5089,6 +5196,42 @@ mod tests {
         assert!(thrown > 0, "the last round of the burst should be a grenade");
         let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
         assert!(boot.fired > 0, "and it is a real shot, with the table's numbers");
+    }
+
+    /// **The inventory keeps counts, and the table says which hand.** Giving
+    /// the same type twice adds; a type whose give column is negative is
+    /// unlimited and stays so; removing the last one drops the slot.
+    #[test]
+    fn what_a_character_carries_is_counted_and_two_handed() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('doc', 190, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkDocGiveItem(doc, 317, 5)\n\
+                 mdkDocGiveItem(doc, 317, 5)\n\
+                 mdkDocGiveItem(doc, 328, 1)\n\
+                 mdkDocGiveItem(doc, 329, 1)",
+            )
+            .exec()
+            .unwrap();
+        let carried = |s: &Scripts, bank: i64| {
+            s.lua.app_data_ref::<Boot>().unwrap().carried.get(&("doc".into(), bank)).cloned()
+        };
+        // 317 grenade and 329 toaster are bank 0, 328 loaf is bank 1
+        assert_eq!(carried(&scripts, 0), Some(vec![(317.0, 10.0 as i64), (329.0, 1)]));
+        assert_eq!(carried(&scripts, 1), Some(vec![(328.0, -1)]), "a loaf is unlimited");
+        let ask = |q: &str| {
+            scripts.lua.load(format!("answer = {q}")).exec().unwrap();
+            scripts.lua.globals().get::<f64>("answer").unwrap()
+        };
+        assert_eq!(ask("mdkDocHasItem(doc, 328)"), 1.0);
+        assert_eq!(ask("mdkDocHasItem(doc, 330)"), 0.0, "booze it never had");
+        assert_eq!(ask("mdkDocGetHeldItem(doc, 1)"), 328.0, "the other hand");
+        scripts.lua.load("mdkDocRemoveItem(doc, 329, 1)").exec().unwrap();
+        assert_eq!(carried(&scripts, 0), Some(vec![(317.0, 10)]), "the slot goes with the last one");
     }
 
     /// **The screen shake is three sines of one phase**, at 6, 10 and 16
