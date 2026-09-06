@@ -1338,7 +1338,17 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         // once a second, which is often enough to catch a list that moves
         // and cheap enough to leave on for the whole run
         if stalls && step % 30 == 0 {
-            for (who, what0, at, where_) in api::stalls(&scripts.lua) {
+            let now = api::stalls(&scripts.lua);
+            // **an object that has stopped being reported is not stuck**: it
+            // finished its list, or it went into stasis and its list is
+            // asleep. Keeping the last thing it was waiting on made a healthy
+            // cutscene read as a stall with a clock frozen at the moment it
+            // was frozen -- which is exactly what `l3_bathmovie` was.
+            let here: std::collections::BTreeSet<String> =
+                now.iter().map(|(w, ..)| w.clone()).collect();
+            watched.retain(|k, _| here.contains(k));
+            seen.retain(|k, _| here.contains(k));
+            for (who, what0, at, where_) in now {
                 let what = format!("{what0} at task {at}");
                 // a list whose index moved is alive, and so is an object that
                 // walked -- level 9's `ch1` runs 89 units, arrives, deletes
