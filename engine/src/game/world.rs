@@ -63,6 +63,12 @@ pub struct Gob {
     pub bbox_min: Option<[f64; 3]>,
     pub bbox_max: Option<[f64; 3]>,
     pub flag: f64,
+    /// **This object belongs to the GUI scene, not the world.** `mdk2.lua`
+    /// swaps `scene` to `mdkGetGuiScene()` around each character's inventory
+    /// and puts it back afterwards, and the third argument of every
+    /// registration is the scene it goes into. Nothing in the GUI scene is
+    /// drawn in the world -- and everything parented to it is GUI too.
+    pub gui: bool,
 }
 
 /// The four difficulties the menu offers, and the number each one hands to
@@ -1172,6 +1178,13 @@ pub fn install(lua: &Lua) -> Result<(), Error> {
             Value::Table(t) => t.get::<Option<Id>>("__gob").unwrap_or(None),
             _ => None,
         };
+        // **and which scene it goes into.** The third argument is one of the
+        // two `mdkGetScene`/`mdkGetGuiScene` answer with, and a child of a
+        // GUI object is GUI whatever it was told.
+        let gui = matches!(&arg(2), Value::String(s) if s == "gui")
+            || parent.is_some_and(|p| {
+                world(lua).and_then(|w| w.get(p).map(|g| g.gui)).unwrap_or(false)
+            });
         let gob = Gob {
             name: name.clone(),
             kind: number(&arg(1)),
@@ -1194,6 +1207,7 @@ pub fn install(lua: &Lua) -> Result<(), Error> {
                 number(&arg(15)),
                 number(&arg(16)),
             ],
+            gui,
             // The scene graph carries none of this -- no object spends a
             // payload slot on health -- and the original's type constructors
             // set it. `World::register` fills all three in from the type,

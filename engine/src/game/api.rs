@@ -709,9 +709,15 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
     let globals = lua.globals();
 
     // --- the scene ------------------------------------------------------
-    let scene = lua.create_function(|_, ()| Ok("scene"))?;
-    globals.set("mdkGetScene", &scene)?;
-    globals.set("mdkGetGuiScene", &scene)?;
+    // **and the two scenes are two scenes.** `mdk2.lua` swaps `scene` to
+    // `mdkGetGuiScene()` around each character's inventory and puts it back
+    // afterwards, so the third argument of a registration says which world
+    // the object lives in. Answering the same string for both put every
+    // inventory model **in the level, at the player's feet** -- the pale
+    // octagonal pad with four pillars converging that stood under the player
+    // on every checkpoint of every level, and hid Hyde inside it.
+    globals.set("mdkGetScene", lua.create_function(|_, ()| Ok("scene"))?)?;
+    globals.set("mdkGetGuiScene", lua.create_function(|_, ()| Ok("gui"))?)?;
 
     // `mdkCreateObjectLua(name, type, scene, parent, group)` defines a global
     // of that name, exactly as registering does. Three of the ten levels do
@@ -6543,6 +6549,34 @@ mod tests {
         }
         let past = scripts.lua.globals().get::<f64>("past").unwrap();
         assert!((past - 2.0).abs() < 1e-6, "sixty thirtieths of a second: {past}");
+    }
+
+    /// `mdkGetScene` and `mdkGetGuiScene` are two scenes, and an object
+    /// registered into the second is not in the world -- nor is anything
+    /// hanging off it.
+    #[test]
+    fn the_gui_scene_is_not_the_world() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('inworld', 800, mdkGetScene(), nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 scene = mdkGetGuiScene()\n\
+                 mdkRegisterObject('panel', 800, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkRegisterObject('dial', 800, scene, panel, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 scene = mdkGetScene()",
+            )
+            .exec()
+            .unwrap();
+        let w = world::world(&scripts.lua).unwrap();
+        let gui = |n: &str| w.get(w.find(n).unwrap()).unwrap().gui;
+        assert!(!gui("inworld"));
+        assert!(gui("panel"), "registered into the GUI scene");
+        assert!(gui("dial"), "and a child of it is GUI whatever it was told");
     }
 
     /// The four the player wears are four literals in four constructors, and

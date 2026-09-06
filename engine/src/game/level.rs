@@ -151,6 +151,10 @@ pub unsafe fn start(
             // renderer refuses the two whose vertices are not sane, so it is
             // applied to everything now rather than to the player alone:
             // it is what puts the characters and the pickups in the world.
+            // nothing in the GUI scene is in the world
+            if gob.gui {
+                return None;
+            }
             let from_type = named.is_none();
             let resource = named.or_else(|| crate::game::api::model_for_type(gob.kind))?;
             Some((

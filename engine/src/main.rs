@@ -2187,6 +2187,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                     .map(|w| {
                         w.iter()
                             .filter(|(id, _)| !drawn.contains(id))
+                            .filter(|(_, g)| !g.gui)
                             .filter_map(|(id, g)| {
                                 Some((id, goodomen::game::api::model_for_type(g.kind)?))
                             })

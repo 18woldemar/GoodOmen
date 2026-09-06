@@ -491,7 +491,11 @@ ENGINE = [
     ("the room graph culls what the engine draws",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
-      "--play", "1", "1", "--expect-drawn", "14038",
+      # 14038 -> 13730 with the **GUI scene split off from the world**:
+      # `mdk2.lua` swaps `scene` to `mdkGetGuiScene()` around each
+      # character's inventory, and answering the same string for both put
+      # seven or eight inventory models into every level.
+      "--play", "1", "1", "--expect-drawn", "13730",
       "--expect-sounds", "6"], None),
     ("the renderer draws a level",
      ["cargo", "run", "--quiet", "--release",
