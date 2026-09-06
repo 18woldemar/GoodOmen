@@ -490,6 +490,34 @@ pub const ITEM: [(f64, &str, i32, f64, i32, i64); 49] = [
     (362.0, "fishbowle", 29, 0.0, 1, 0),
 ];
 
+/// **What walking over one is worth.** The item table's `+0x18` column is 1
+/// for six types, and those are the ones whose pickup is an *effect* rather
+/// than an inventory entry: 0x421a82 branches on it and 0x423930 is the
+/// switch. Two of the six are health and they are what the levels place --
+/// **29 apples and 17 hams** across the ten:
+///
+/// | type | | |
+/// |---|---|---|
+/// | 313 `OBJ_APPLE` | **+25** | 0x423944, and `GeneralPowerupSmall` |
+/// | 314 `OBJ_HAM` | **+100** | 0x423966, and `GeneralPowerupLarge` |
+///
+/// Both clamp at **200**, which is a literal in both branches and *not* the
+/// character's own maximum -- so a ham takes Kurt past his hundred, which is
+/// what the original does.
+pub const HEALS: [(f64, i16); 2] = [(313.0, 25), (314.0, 100)];
+
+/// And the ceiling both of them clamp to, 0x42394f and 0x423971.
+pub const HEAL_CAP: i16 = 200;
+
+/// How near you have to be to pick something up: the float at **0x48f590**,
+/// tested at 0x421a22 against the distance from the player to the item.
+pub const REACH: f64 = 1.5;
+
+/// What an apple or a ham is worth, if this type is one.
+pub fn heals(kind: f64) -> Option<i16> {
+    HEALS.iter().find(|(k, _)| *k == kind).map(|(_, h)| *h)
+}
+
 /// The item Kurt starts holding, and the one the harness fires. **Ours, not
 /// the original's**: there is no inventory here yet, so a driver that shoots
 /// has to name a weapon, and the magnum is what he begins the game with.

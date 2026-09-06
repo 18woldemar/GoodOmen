@@ -5226,6 +5226,52 @@ pub fn tick_touching(
         }
     }
 
+    // **And you pick things up by walking over them.** 0x421a22 measures the
+    // player against every item in the world and takes anything inside
+    // [`world::REACH`]; the item table's `+0x18` says whether that is an
+    // effect (0x423930's switch) or an inventory entry. The engine builds the
+    // effect half, which is the half the levels place: **29 apples and 17
+    // hams**, worth 25 and 100 hitpoints and clamped at 200.
+    //
+    // ponytail: everything else inside the reach is left where it is. The
+    // inventory half wants the two banks, a selection and a use, and none of
+    // that is built -- see the lighter.
+    {
+        let me = boot_ref(&scripts.lua)?.player.clone();
+        let eaten: Vec<(String, i16)> = match (&me, crate::game::world::world(&scripts.lua)) {
+            (Some(_), Some(w)) => w
+                .iter()
+                .filter(|(_, g)| !g.name.is_empty())
+                .filter_map(|(_, g)| {
+                    let worth = crate::game::world::heals(g.kind)?;
+                    let d = (0..3)
+                        .map(|c| (g.position[c] - at[c]).powi(2))
+                        .sum::<f64>()
+                        .sqrt();
+                    (d < crate::game::world::REACH).then(|| (g.name.clone(), worth))
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        if let Some(me) = me {
+            for (what, worth) in eaten {
+                if let Some(mut w) = crate::game::world::world_mut(&scripts.lua) {
+                    if let Some(g) = w.find(&me).and_then(|id| w.get_mut(id)) {
+                        g.hitpoints =
+                            (g.hitpoints + worth).min(crate::game::world::HEAL_CAP);
+                    }
+                }
+                // `OnPickedUp`, event 15, on the thing picked up
+                if let Ok(gob) = globals.get::<mlua::Table>(what.as_str()) {
+                    if let Ok(handler) = gob.get::<mlua::Function>("OnPickedUp") {
+                        let _ = handler.call::<Value>(gob);
+                    }
+                }
+                destroy_room(&scripts.lua, &what)?;
+            }
+        }
+    }
+
     // the room under the player, and an entry when it changes
     let here = rooms.at(at).first().copied();
     if here != state.room {
@@ -6887,6 +6933,44 @@ mod tests {
             Some("dr"),
             "0x4084c4, and `doc.mod` is not a file in the game"
         );
+    }
+
+    /// **An apple is 25 hitpoints and a ham is 100**, both clamped at 200,
+    /// and you get them by walking over the thing.
+    #[test]
+    fn walking_over_an_apple_is_worth_twenty_five() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('bob', 100, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkSetPlayModeGobs(0, bob)\n\
+                 mdkSwitchPlayMode(0)\n\
+                 eaten = 0\n\
+                 mdkRegisterObject('apple', 313, scene, nil, -1, 0.5,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 apple.OnPickedUp = function(g) eaten = 1 end\n\
+                 mdkRegisterObject('faraway', 313, scene, nil, -1, 40,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkSubtractHitpoints(bob, 90)",
+            )
+            .exec()
+            .unwrap();
+        let health = || {
+            let w = world::world(&scripts.lua).unwrap();
+            w.get(w.find("bob").unwrap()).unwrap().hitpoints
+        };
+        assert_eq!(health(), 10);
+        let rooms = Visibility::default();
+        let mut state = Ticking::default();
+        tick(&scripts, &rooms, [0.0; 3], 0.0, 1.0 / 30.0, &mut state).unwrap();
+        assert_eq!(health(), 35, "ten and an apple");
+        assert_eq!(scripts.lua.globals().get::<f64>("eaten").unwrap(), 1.0, "OnPickedUp");
+        let w = world::world(&scripts.lua).unwrap();
+        assert!(w.find("apple").is_none(), "and it is gone");
+        assert!(w.find("faraway").is_some(), "the one out of reach is not");
     }
 
     /// **Where to aim at a thing is its own.** `mdkGobSetBullseye` raises
