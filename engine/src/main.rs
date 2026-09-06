@@ -1929,6 +1929,19 @@ fn title(root: &std::path::Path, show: bool) -> Result<String, String> {
             }
             let _ = api::set_scheme(&scripts.lua);
             let _ = api::menu_update(&scripts.lua);
+            // **the buttons are closed until an animation opens them.** At
+            // rest `ss_button00.mod` is a flat rectangle with tiled texture
+            // coordinates -- the reference tool draws the same thing -- and
+            // `Level.HilightCurrent` is what plays `ANIM_ENABLED` on the one
+            // under the cursor and `ANIM_DISABLED` on the rest. So the
+            // scene has to be told what the scripts chose, the same way the
+            // play loop tells it.
+            if let (Some(world), Some(boot)) = (
+                goodomen::game::world::world(&scripts.lua),
+                scripts.lua.app_data_ref::<api::Boot>(),
+            ) {
+                scene.follow(&world, &boot.playing, &boot.hidden, &boot.opacity);
+            }
 
             video.gl.viewport(0, 0, w as i32, h as i32);
             video.gl.clear_color(0.0, 0.0, 0.0, 1.0);
