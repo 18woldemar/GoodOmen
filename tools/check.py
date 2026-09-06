@@ -348,7 +348,9 @@ ENGINE = [
       # walking across the geometry rather than along it.
       # 18 -> 20: two of level 9's three `OBJ_CONEHEADCIV1` are out of
       # stasis in the first thirty seconds and now have legs
-      "--run", "9", "1", "30", "--expect-walkers", "20",
+      # 20 -> 22 with `mdkConeheadLemming` built: level 9's three lemmings
+      # march, and two of them are awake in the first thirty seconds.
+      "--run", "9", "1", "30", "--expect-walkers", "22",
       # 8994 -> 8781 walled with the retreat built: a walker that turns and
       # runs leaves the wall it was pressed against.
       # 8781 wall frames -> 964 and **nothing leaves level 9 any more**,
@@ -357,14 +359,16 @@ ENGINE = [
       # is a conehead not leaning on the wall it was left facing.
       # 885 -> 1320 with the goto core's wobble in: a civilian that wanders
       # to a corner of its pen finds more corners.
-      "--expect-walled", "1320", "--expect-buried", "0", "--expect-keys", "9",
+      # 1320 -> 1253 wall frames and 9 -> 8 keys with the lemmings: three
+      # more walkers marching into walls, and one fewer key struck.
+      "--expect-walled", "1253", "--expect-buried", "0", "--expect-keys", "8",
       "--expect-lost", "0",
       # 46070 -> 47868 with the conehead civilians alive: level 9 places
       # fourteen of them and each one now takes a task list to the end
       # instead of falling off `mdkConeheadCivUpdate` as a recorder.
       # 47868 -> 49604 with the birdbrain built: level 9 places three and
       # they are the last enemy class the scripts deploy in numbers.
-      "--expect-events", "49604", "--expect-survived", "49604"], None),
+      "--expect-events", "50672", "--expect-survived", "50672"], None),
     # level 10's zizzy turrets shoot, each bullet carrying its damage, damage
     # type, lifetime and speed out of the shot table at 0x497388 rather than
     # out of the call.
@@ -454,7 +458,10 @@ ENGINE = [
       # 56 -> 48 keys with the civilians alive: they hold their walk and look
       # animations, which are the two clips in the corpus with no key on them,
       # in place of the ready pose that has one.
-      "--expect-deleted", "16", "--expect-keys", "50"], None),
+      # 16 -> 22 deleted and 50 -> 26 keys with the lemmings marching: they
+      # walk into the room's own deletions and they hold a walk animation,
+      # which carries no key.
+      "--expect-deleted", "22", "--expect-keys", "26"], None),
     # **The path a person actually plays**, which had never been checked
     # because it could only be watched. Two bugs lived in it this session --
     # a window that loaded no animation keys, so nothing ever shot at the

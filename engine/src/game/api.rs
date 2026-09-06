@@ -1696,6 +1696,48 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             Ok(0.0)
         })?,
     )?;
+    // **The lemming**, which is the whole of `mdkConeheadLemming` -- 0x4405b0
+    // into **0x434c00**, sixteen lines and the shortest AI in the game:
+    //
+    // - off its heading by **0.17 radians** or more, gait 0 and nothing else,
+    //   so it stands still while it turns;
+    // - square, it **snaps the quaternion** to the heading exactly and walks;
+    // - and on the ground, with a wall inside **3** units, it adds **pi** to
+    //   the heading and wraps at 2pi. Turn around and walk back.
+    //
+    // The probe is called with the cliff leg **off**, which is the joke: a
+    // lemming turns at a wall and walks off a ledge. Level 9 is the only
+    // caller, one task list.
+    globals.set(
+        "mdkConeheadLemming",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(who) = args.first().and_then(gob_name) else { return Ok(0.0) };
+            let Some((at, yaw)) = stance(lua, &who) else { return Ok(0.0) };
+            /// How far ahead it looks before turning round.
+            const LOOK: f64 = 3.0;
+            let solid = lua
+                .app_data_ref::<std::rc::Rc<crate::game::body::Collision>>()
+                .map(|c| c.clone());
+            let mut boot = boot_mut(lua)?;
+            let heading = boot.heading.get(&who).copied().unwrap_or(yaw);
+            if !facing(yaw, heading) {
+                boot.gait.insert(who, 0);
+                return Ok(0.0);
+            }
+            boot.gait.insert(who.clone(), 1);
+            let ahead = crate::game::body::facing(heading).0;
+            let from = [at[0], at[1], at[2] + 1.0];
+            let end = [from[0] + ahead[0] * LOOK, from[1] + ahead[1] * LOOK, from[2]];
+            if solid.as_ref().is_some_and(|c| !c.sees(from, end)) {
+                let mut want = heading + std::f64::consts::PI;
+                if want > std::f64::consts::TAU {
+                    want -= std::f64::consts::TAU;
+                }
+                boot.heading.insert(who, want);
+            }
+            Ok(0.0)
+        })?,
+    )?;
     // **The samsmite is a kamikaze**, and it is the smallest of the three AI
     // machines: `mdkSamsmiteAttack(gob)` is 0x4403e0 into **0x434340**, two
     // states on `walker + 0x7c`.
