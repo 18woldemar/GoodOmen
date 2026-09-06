@@ -42,6 +42,9 @@ pub struct Item {
     /// Where the text starts, absolute, both already justified.
     pub x: f32,
     pub y: f32,
+    /// How wide the text is on screen, which is what the frame around the
+    /// menu is measured from.
+    pub width: f32,
     /// `item + 0x3c & 2`, which `mdkMenuItemEnable` writes.
     pub enabled: bool,
     /// Whatever the caller uses to find the script's own object for this
@@ -60,6 +63,8 @@ pub struct Menu {
     pub justify: i64,
     pub title: Option<Vec<u8>>,
     pub title_at: [f32; 2],
+    /// The title's width on screen at one cell, before the 1.2.
+    pub title_width: f32,
     pub items: Vec<Item>,
     /// The record's `[2]`, which the constructor sets to 0 and the draw
     /// compares each item against.
@@ -75,22 +80,25 @@ impl Menu {
         title: Option<Vec<u8>>,
         width: impl Fn(&[u8]) -> f32,
     ) -> Menu {
+        let title_width = title.as_deref().map(&width).unwrap_or(0.0) * w;
         let title_at = match &title {
-            Some(t) => [
-                MIDDLE - width(t) * w * TITLE_SCALE * MIDDLE,
-                y - h * TITLE_ABOVE,
-            ],
+            Some(_) => [MIDDLE - title_width * TITLE_SCALE * MIDDLE, y - h * TITLE_ABOVE],
             None => [x, y],
         };
-        Menu { x, y, w, h, gap, justify, title, title_at, items: Vec::new(), selected: 0 }
+        Menu {
+            x, y, w, h, gap, justify, title, title_at, title_width,
+            items: Vec::new(),
+            selected: 0,
+        }
     }
 
     /// `mdkSetMenuTitle` — the title again, which has to be placed again
     /// because the placing is of the title's own width.
     pub fn retitle(&mut self, title: Option<Vec<u8>>, width: impl Fn(&[u8]) -> f32) {
+        self.title_width = title.as_deref().map(&width).unwrap_or(0.0) * self.w;
         self.title_at = match &title {
-            Some(t) => [
-                MIDDLE - width(t) * self.w * TITLE_SCALE * MIDDLE,
+            Some(_) => [
+                MIDDLE - self.title_width * TITLE_SCALE * MIDDLE,
                 self.y - self.h * TITLE_ABOVE,
             ],
             None => [self.x, self.y],
@@ -105,7 +113,37 @@ impl Menu {
             _ => 0.0,
         };
         let y = self.y + (self.gap + self.h) * self.items.len() as f32;
-        self.items.push(Item { text, x: self.x + offset, y, enabled: true, handle });
+        let width = width(&text) * self.w;
+        self.items.push(Item { text, x: self.x + offset, y, width, enabled: true, handle });
+    }
+
+    /// The box the frame is drawn around — **0x413650**, which walks the
+    /// items and the title and keeps the extremes. The original stores it in
+    /// the record at `[0x11]`..`[0x14]` and recomputes it whenever the menu
+    /// changes; here it is cheap enough to ask for.
+    ///
+    /// `None` for a menu with nothing in it, which is what a freshly cleared
+    /// one is.
+    pub fn frame(&self) -> Option<[f32; 4]> {
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        let mut seen = false;
+        let mut take = |x: f32, y: f32, w: f32, h: f32| {
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x + w);
+            y1 = y1.max(y + h);
+            seen = true;
+        };
+        for item in &self.items {
+            take(item.x, item.y, item.width, self.h);
+        }
+        if let Some(t) = &self.title {
+            // the title is drawn 1.2 cells tall and wide, so its box is too
+            let width = self.title_width * TITLE_SCALE;
+            take(self.title_at[0], self.title_at[1], width, self.h * TITLE_SCALE);
+            let _ = t;
+        }
+        seen.then_some([x0, y0, x1 - x0, y1 - y0])
     }
 
     /// Move the cursor, skipping anything disabled and wrapping at the ends.

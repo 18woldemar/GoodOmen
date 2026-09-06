@@ -160,14 +160,47 @@ impl Overlay {
         colour: [f32; 4],
     ) {
         let (top, bottom) = (1.0 - v, 1.0 - (v + vh));
+        self.emit(texture, [x, y, w, h], [(u, top), (u, bottom), (u + uw, bottom), (u + uw, top)], colour);
+    }
+
+    /// The same quad with its texture **turned a quarter**: the strip's own
+    /// long axis runs across the quad rather than down it. 0x462ff0 needs
+    /// it for the top and bottom of a frame, where one edge texture is
+    /// reused sideways -- the tile count arrives in the `v` slot and has to
+    /// end up along the width.
+    pub fn quad_turned(
+        &mut self,
+        texture: Option<glow::Texture>,
+        place: [f32; 4],
+        [u, v, uw, vh]: [f32; 4],
+        colour: [f32; 4],
+    ) {
+        let (top, bottom) = (1.0 - v, 1.0 - (v + vh));
+        self.emit(
+            texture,
+            place,
+            [(top, u), (bottom, u), (bottom, u + uw), (top, u + uw)],
+            colour,
+        );
+    }
+
+    /// Two triangles, with the texture coordinates of the four corners given
+    /// clockwise from the top left.
+    fn emit(
+        &mut self,
+        texture: Option<glow::Texture>,
+        [x, y, w, h]: [f32; 4],
+        [tl, bl, br, tr]: [(f32, f32); 4],
+        colour: [f32; 4],
+    ) {
         let first = (self.vertices.len() / FLOATS) as i32;
-        for (px, py, pu, pv) in [
-            (x, y, u, top),
-            (x, y + h, u, bottom),
-            (x + w, y + h, u + uw, bottom),
-            (x, y, u, top),
-            (x + w, y + h, u + uw, bottom),
-            (x + w, y, u + uw, top),
+        for (px, py, (pu, pv)) in [
+            (x, y, tl),
+            (x, y + h, bl),
+            (x + w, y + h, br),
+            (x, y, tl),
+            (x + w, y + h, br),
+            (x + w, y, tr),
         ] {
             self.vertices.extend_from_slice(&[px, py, pu, pv]);
             self.vertices.extend_from_slice(&colour);
@@ -207,6 +240,60 @@ impl Overlay {
             pen += font.advance[b as usize] * w;
         }
         pen
+    }
+
+    /// The rounded metal frame the game puts behind a menu, a dialogue
+    /// panel and the title screen's caption -- **0x462ff0**, nine quads out
+    /// of two textures.
+    ///
+    /// `textbox2` is the corner, mirrored into all four; `textbox1` is the
+    /// edge, and it repeats: the tile count is `floor(2 * length) + 1`, in
+    /// screen widths, so a menu half the screen across gets one length of it
+    /// and a wide one gets two. The middle is filled from a single texel of
+    /// the corner texture at `(0.8, 0.8)`, which is how one texture does
+    /// both the border and the backing. The `0.004` inset on every edge is
+    /// the float at 0x490340, and it is there so the repeat does not sample
+    /// across the seam.
+    ///
+    /// `corner` is the corner's size on screen, which the menu passes as
+    /// **0.04**; the frame is drawn *outside* the box it is given.
+    pub fn frame(
+        &mut self,
+        corners: &GpuTexture,
+        edges: &GpuTexture,
+        [x, y, w, h]: [f32; 4],
+        corner: f32,
+        alpha: f32,
+    ) {
+        let (c, white) = (corner, [1.0, 1.0, 1.0, alpha]);
+        const IN: f32 = 0.004;
+        const OUT: f32 = 1.0 - IN;
+        let tiles = |length: f32| (2.0 * length).floor() + 1.0 - IN;
+        let (across, down) = (tiles(w), tiles(h));
+        let (co, ed) = (Some(corners.texture), Some(edges.texture));
+        // the binary's texture coordinates count v **up** from the bottom,
+        // the way the sampler does; [`Overlay::quad`] takes them counting
+        // down from the top like everything else on this layer. So every v
+        // out of 0x462ff0 is turned over on the way in, and only here.
+        let mut piece = |o: &mut Self, texture, place: [f32; 4], [u0, v0, u1, v1]: [f32; 4]| {
+            o.quad(texture, place, [u0, 1.0 - v0, u1 - u0, v0 - v1], white);
+        };
+        let mut turned = |o: &mut Self, texture, place: [f32; 4], [u0, v0, u1, v1]: [f32; 4]| {
+            o.quad_turned(texture, place, [u0, 1.0 - v0, u1 - u0, v0 - v1], white);
+        };
+
+        // the middle, from one texel of the corner sheet
+        piece(self, co, [x, y, w, h], [0.8, 0.8, 0.8, 0.8]);
+        // the four corners, the same picture turned over into each quadrant
+        piece(self, co, [x - c, y - c, c, c], [IN, IN, OUT, OUT]);
+        piece(self, co, [x + w, y - c, c, c], [OUT, IN, IN, OUT]);
+        piece(self, co, [x - c, y + h, c, c], [IN, OUT, OUT, IN]);
+        piece(self, co, [x + w, y + h, c, c], [OUT, OUT, IN, IN]);
+        // and the four edges, each a run of the same strip
+        turned(self, ed, [x, y - c, w, c], [IN, IN, OUT, across]);
+        turned(self, ed, [x, y + h, w, c], [OUT, across, IN, IN]);
+        piece(self, ed, [x - c, y, c, h], [IN, IN, OUT, down]);
+        piece(self, ed, [x + w, y, c, h], [OUT, down, IN, IN]);
     }
 
     /// The whole screen in one colour — `omSceneFade`, and the backdrop a

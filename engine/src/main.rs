@@ -1748,6 +1748,9 @@ const WIDEST: f64 = 60.0;
 /// `OBJ_SNIPERBULLET`, which is what the scope fires.
 const SNIPERBULLET: f64 = 406.0;
 
+/// The corner size 0x412090 passes to the frame, and the alpha with it.
+const MENU_CORNER: f32 = 0.04;
+
 /// Queue whatever menu the scripts have made current.
 ///
 /// The title is grey 0.85 (0x412090 sets it with 0x3f59999a three times over)
@@ -1763,10 +1766,18 @@ const SNIPERBULLET: f64 = 406.0;
 fn draw_menu(
     overlay: &mut goodomen::render::overlay::Overlay,
     font: &goodomen::render::overlay::Font,
+    frame: Option<(
+        &goodomen::render::scene::GpuTexture,
+        &goodomen::render::scene::GpuTexture,
+    )>,
     boot: &goodomen::game::api::Boot,
 ) {
     use goodomen::game::menu::TITLE_SCALE;
     let Some(menu) = boot.menu.and_then(|i| boot.menus.get(i)) else { return };
+    // the frame first, because it is behind everything
+    if let (Some((corners, edges)), Some(box_)) = (frame, menu.frame()) {
+        overlay.frame(corners, edges, box_, MENU_CORNER, 1.0);
+    }
     if let Some(title) = &menu.title {
         overlay.text(
             font,
@@ -1818,15 +1829,22 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         .collect();
     let mut pressed = 0usize;
     let mut overlay = goodomen::render::overlay::Overlay::default();
-    let font = install.read("font.tex").ok().and_then(|bytes| {
+    let mut picture = |install: &mut Install, name: &str| {
+        let bytes = install.read(name).ok()?;
         let tex = goodomen::formats::tex::Texture::parse(&bytes).ok()?;
         // SAFETY: the context Video::open made is current on this thread.
-        let texture = unsafe { goodomen::render::scene::upload(&video.gl, &tex) }?;
+        unsafe { goodomen::render::scene::upload(&video.gl, &tex) }
+    };
+    let font = picture(&mut install, "font.tex").and_then(|texture| {
         let lua = install.read("font.lua").ok()?;
         let source: String = lua.iter().map(|&b| b as char).collect();
         let advance = goodomen::render::overlay::Font::advances(&source).ok()?;
         Some(goodomen::render::overlay::Font { texture, advance })
     });
+    // the frame the menus, the dialogue panel and the title screen's caption
+    // all sit in. 0x4117a0 loads exactly these two, by these names.
+    let corners = picture(&mut install, "textbox2.tex");
+    let edges = picture(&mut install, "textbox1.tex");
 
     let goodomen::game::level::Started {
         scripts: level_scripts,
@@ -2735,7 +2753,12 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                         if let Some(boot) =
                             level_scripts.lua.app_data_ref::<goodomen::game::api::Boot>()
                         {
-                            draw_menu(&mut overlay, font, &boot);
+                            draw_menu(
+                                &mut overlay,
+                                font,
+                                corners.as_ref().zip(edges.as_ref()),
+                                &boot,
+                            );
                         }
                     }
                     overlay.draw(&video.gl)?;

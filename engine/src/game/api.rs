@@ -335,6 +335,11 @@ pub struct Boot {
     /// Where `mdkShowMouse` last put the cursor, and whether it asked for
     /// one at all.
     pub mouse: Option<[f32; 2]>,
+    /// `mdkPauseGame`, which the pause menu turns on as it opens and its
+    /// Continue turns off. A paused tick advances its own clock and does
+    /// nothing else — the run still ends when `--for` says, and the world
+    /// stands still.
+    pub paused: bool,
     pub rooms: Vec<Room>,
     pub checkpoints: Vec<Checkpoint>,
     pub input: Input,
@@ -4072,6 +4077,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                             _ => 0.0,
                         };
                         m.items[i].x = m.x + offset;
+                        m.items[i].width = width_of(&advance, &text) * m.w;
                         m.items[i].text = text.clone();
                     }
                 }
@@ -4105,6 +4111,14 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 m.retitle(title, |t| width_of(&advance, t));
             }
             boot.advance = advance;
+            Ok(())
+        })?,
+    )?;
+
+    globals.set(
+        "mdkPauseGame",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            boot_mut(lua)?.paused = args.first().map(number).unwrap_or(0.0) != 0.0;
             Ok(())
         })?,
     )?;
@@ -5733,7 +5747,12 @@ pub fn tick_touching(
     state: &mut Ticking,
     touching: &BTreeSet<String>,
 ) -> Result<(), Error> {
+    // the clock runs whether or not the world does, so a paused run still
+    // reaches the end `--for` asked for
     state.clock += dt;
+    if scripts.lua.app_data_ref::<Boot>().is_some_and(|b| b.paused) {
+        return Ok(());
+    }
     let globals = scripts.lua.globals();
 
     // **The player's own object has to move with the body.** Everything this
