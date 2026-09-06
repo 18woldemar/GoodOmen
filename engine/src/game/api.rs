@@ -1277,21 +1277,9 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 if kind == 0.0 || kind == NOTHING {
                     return Ok(());
                 }
-                let Some(bank) = crate::game::world::item_bank(kind) else { return Ok(()) };
-                let mut count = args.get(2).map(number).unwrap_or(1.0) as i64;
-                if crate::game::world::item_gives(kind).is_some_and(|g| g < 0) {
-                    count = -1;
-                }
-                /// How many slots a bank holds — 0x40b1fb counts to 6.
-                const SLOTS: usize = 7;
+                let count = args.get(2).map(number).unwrap_or(1.0) as i64;
                 let mut boot = boot_mut(lua)?;
-                let held = boot.carried.entry((who, bank)).or_default();
-                match held.iter().position(|&(t, _)| t == kind) {
-                    Some(i) if held[i].1 >= 0 && count >= 0 => held[i].1 += count,
-                    Some(i) => held[i].1 = -1,
-                    None if held.len() < SLOTS => held.push((kind, count)),
-                    None => {}
-                }
+                give_item(&mut boot, &who, kind, count);
                 Ok(())
             })?,
         )?;
@@ -4134,6 +4122,32 @@ pub fn stalls(lua: &Lua) -> Vec<(String, String, i64, [f64; 3])> {
     out
 }
 
+/// **Put one in a bank**, which is 0x4157d0: the item's own bank from the
+/// table (`+0x24`), the count clamped to **-1 when the record's give column
+/// is negative** -- unlimited, which is `sniperbullet` and `loaf` -- and
+/// **seven slots**, counted to six at 0x40b1fb.
+fn give_item(boot: &mut Boot, who: &str, kind: f64, count: i64) {
+    /// The type the tables use for "nothing", refused outright at 0x40b1bb.
+    const NOTHING: f64 = 399.0;
+    const SLOTS: usize = 7;
+    if kind == 0.0 || kind == NOTHING {
+        return;
+    }
+    let Some(bank) = crate::game::world::item_bank(kind) else { return };
+    let count = if crate::game::world::item_gives(kind).is_some_and(|g| g < 0) {
+        -1
+    } else {
+        count
+    };
+    let held = boot.carried.entry((who.to_string(), bank)).or_default();
+    match held.iter().position(|&(t, _)| t == kind) {
+        Some(i) if held[i].1 >= 0 && count >= 0 => held[i].1 += count,
+        Some(i) => held[i].1 = -1,
+        None if held.len() < SLOTS => held.push((kind, count)),
+        None => {}
+    }
+}
+
 /// **The game's area damage**, 0x40e930 into **0x40e960**: walk every gob,
 /// skip the source, and for anything inside `radius` deal `damage - distance`
 /// of `kind`. The falloff is a plain subtraction and the distance is measured
@@ -5238,27 +5252,41 @@ pub fn tick_touching(
     // that is built -- see the lighter.
     {
         let me = boot_ref(&scripts.lua)?.player.clone();
-        let eaten: Vec<(String, i16)> = match (&me, crate::game::world::world(&scripts.lua)) {
-            (Some(_), Some(w)) => w
-                .iter()
-                .filter(|(_, g)| !g.name.is_empty())
-                .filter_map(|(_, g)| {
-                    let worth = crate::game::world::heals(g.kind)?;
-                    let d = (0..3)
-                        .map(|c| (g.position[c] - at[c]).powi(2))
-                        .sum::<f64>()
-                        .sqrt();
-                    (d < crate::game::world::REACH).then(|| (g.name.clone(), worth))
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
+        let eaten: Vec<(String, f64, Option<i16>)> =
+            match (&me, crate::game::world::world(&scripts.lua)) {
+                (Some(_), Some(w)) => w
+                    .iter()
+                    .filter(|(_, g)| !g.name.is_empty())
+                    .filter(|(_, g)| crate::game::world::item_bank(g.kind).is_some())
+                    .filter_map(|(_, g)| {
+                        let d = (0..3)
+                            .map(|c| (g.position[c] - at[c]).powi(2))
+                            .sum::<f64>()
+                            .sqrt();
+                        (d < crate::game::world::REACH).then(|| {
+                            (g.name.clone(), g.kind, crate::game::world::heals(g.kind))
+                        })
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
         if let Some(me) = me {
-            for (what, worth) in eaten {
-                if let Some(mut w) = crate::game::world::world_mut(&scripts.lua) {
-                    if let Some(g) = w.find(&me).and_then(|id| w.get_mut(id)) {
-                        g.hitpoints =
-                            (g.hitpoints + worth).min(crate::game::world::HEAL_CAP);
+            for (what, kind, worth) in eaten {
+                match worth {
+                    Some(worth) => {
+                        if let Some(mut w) = crate::game::world::world_mut(&scripts.lua) {
+                            if let Some(g) = w.find(&me).and_then(|id| w.get_mut(id)) {
+                                g.hitpoints =
+                                    (g.hitpoints + worth).min(crate::game::world::HEAL_CAP);
+                            }
+                        }
+                    }
+                    // and everything else goes in the bank its own record
+                    // names, which is the other half of 0x421a82's branch
+                    None => {
+                        let n = crate::game::world::item_gives(kind).unwrap_or(1) as i64;
+                        let mut boot = boot_mut(&scripts.lua)?;
+                        give_item(&mut boot, &me, kind, n.max(1));
                     }
                 }
                 // `OnPickedUp`, event 15, on the thing picked up
@@ -6971,6 +6999,20 @@ mod tests {
         let w = world::world(&scripts.lua).unwrap();
         assert!(w.find("apple").is_none(), "and it is gone");
         assert!(w.find("faraway").is_some(), "the one out of reach is not");
+        drop(w);
+        // and something with no effect of its own goes into its own bank
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('gren', 317, scene, nil, -1, 0.5,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)",
+            )
+            .exec()
+            .unwrap();
+        tick(&scripts, &rooms, [0.0; 3], 0.0, 1.0 / 30.0, &mut state).unwrap();
+        scripts.lua.load("has = mdkDocHasItem(bob, 317)").exec().unwrap();
+        assert_eq!(scripts.lua.globals().get::<f64>("has").unwrap(), 1.0, "five grenades");
+        assert_eq!(health(), 35, "and it is not food");
     }
 
     /// **Where to aim at a thing is its own.** `mdkGobSetBullseye` raises
