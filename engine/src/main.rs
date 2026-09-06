@@ -800,6 +800,25 @@ fn menu_check(root: &std::path::Path) -> Result<String, String> {
         return Err(format!("the pause key did not put up the pause menu: {paused}"));
     }
 
+    // a subtitle, which is the same panel a movie puts up
+    let said = {
+        scripts
+            .lua
+            .load("mdkDialogPanel(strings.hint_l1r1, 0, 4, 0)")
+            .exec()
+            .map_err(|e| e.to_string())?;
+        let boot = scripts.lua.app_data_ref::<api::Boot>().ok_or("no boot state")?;
+        let d = boot.dialog.as_ref().ok_or("mdkDialogPanel put up nothing")?;
+        if d.text.is_empty() {
+            return Err("the subtitle has no words".into());
+        }
+        if d.seconds != 4.0 {
+            return Err(format!("the subtitle lasts {} seconds, not 4", d.seconds));
+        }
+        d.text.iter().map(|&b| b as char).collect::<String>()
+    };
+    scripts.lua.load("mdkDialogPanel(-1, 0, 0, 0)").exec().ok();
+
     // and down into Options -> Video, where the widgets are: three downs and
     // a select each time, one command per step because `SetConScheme` only
     // promotes a scheme between frames
@@ -843,7 +862,7 @@ fn menu_check(root: &std::path::Path) -> Result<String, String> {
     Ok(format!(
         "{menus} menus of {items} items; the first has {count} -- {words} -- the cursor walked \
          all of them and wrapped, and choosing one reached the script. \
-         The pause key put up: {paused}, and {widgets}"
+         The pause key put up: {paused}, {widgets}, and a subtitle reads {said:?}"
     ))
 }
 
@@ -2069,6 +2088,12 @@ fn title(
                         draw_menu(&mut overlay, gui, &boot);
                     }
                 }
+                api::dialog_step(&scripts.lua, dt);
+                if let Some(boot) = scripts.lua.app_data_ref::<api::Boot>() {
+                    if let Some(d) = &boot.dialog {
+                        draw_dialog(&mut overlay, gui, d);
+                    }
+                }
                 let fade = api::fade_step(&scripts.lua, dt);
                 if fade[3] > 0.0 {
                     overlay.fill(fade);
@@ -2161,6 +2186,52 @@ const BAR_EMPTY: [f32; 4] = [1.0 / 256.0, 129.0 / 256.0, 254.0 / 256.0, 62.0 / 2
 const NEEDLE: [f32; 4] = [0.0, 64.0 / 256.0, 32.0 / 256.0, 64.0 / 256.0];
 const CHECK_ON: [f32; 4] = [127.0 / 256.0, 64.0 / 256.0, 64.0 / 256.0, 64.0 / 256.0];
 const CHECK_OFF: [f32; 4] = [191.0 / 256.0, 64.0 / 256.0, 64.0 / 256.0, 64.0 / 256.0];
+
+/// The subtitle a movie is showing, in the frame the game draws it in.
+///
+/// The colour and the frame's corner are 0x4062c0's own -- warm 1.0, 0.7,
+/// 0.3 and 0.04 -- and the **place is chosen**: a strip across the lower
+/// third, or the upper one for `DIALOGFLAG_TOP`, because the record the
+/// original draws from is filled by a constructor that has not been read.
+/// The text wraps at the panel's width, which the original must also do and
+/// which nothing here has measured.
+fn draw_dialog(
+    overlay: &mut goodomen::render::overlay::Overlay,
+    gui: &Gui,
+    dialog: &goodomen::game::api::Dialog,
+) {
+    if dialog.hidden || dialog.text.is_empty() {
+        return;
+    }
+    const CELL: f32 = 0.028;
+    const LINE: f32 = 0.045;
+    const LEFT: f32 = 0.14;
+    const WIDE: f32 = 0.72;
+    // break the line where it runs past the panel, on a space
+    let mut lines: Vec<&[u8]> = Vec::new();
+    let mut rest = &dialog.text[..];
+    while !rest.is_empty() {
+        let mut cut = rest.len();
+        while gui.font.width(&rest[..cut]) * CELL > WIDE {
+            match rest[..cut].iter().rposition(|&b| b == b' ') {
+                Some(space) => cut = space,
+                None => break,
+            }
+        }
+        lines.push(&rest[..cut]);
+        rest = &rest[(cut + usize::from(cut < rest.len()))..];
+    }
+    const PAD: f32 = 0.012;
+    let height = LINE * lines.len() as f32 + PAD * 2.0;
+    let top = if dialog.at_top() { 0.08 } else { 0.97 - height };
+    overlay.frame(&gui.corners, &gui.edges, [LEFT, top, WIDE, height], MENU_CORNER, 1.0);
+    for (i, line) in lines.iter().enumerate() {
+        // centred in the panel, the way the game centres its own
+        let x = LEFT + (WIDE - gui.font.width(line) * CELL) / 2.0;
+        let y = top + PAD + LINE * i as f32;
+        overlay.text(&gui.font, line, x, y, CELL, LINE, [1.0, 0.7, 0.3, 1.0]);
+    }
+}
 
 /// One item's widget, to the right of its own words.
 fn draw_widget(
@@ -2284,6 +2355,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
     // not a menu is up: the same layer carries the HUD and the subtitles.
     let to_press = presses();
     let mut pressed = 0usize;
+    let mut said = false;
     let mut overlay = goodomen::render::overlay::Overlay::default();
     let gui = {
         let picture = |install: &mut Install, name: &str| {
@@ -3232,7 +3304,28 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                             draw_menu(&mut overlay, gui, &boot);
                         }
                     }
-                    // and the fade over all of it, menu included
+                    // `--say ID` puts a subtitle up on the first frame, the
+                    // way `--press` sends a key: it is how a person looks at
+                    // one without waiting for a movie to reach it
+                    if !said {
+                        said = true;
+                        if let Some(id) = std::env::args()
+                            .position(|a| a == "--say")
+                            .and_then(|i| std::env::args().nth(i + 1))
+                        {
+                            let _ = level_scripts
+                                .lua
+                                .load(format!("mdkDialogPanel({id}, 0, 30, 0)"))
+                                .exec();
+                        }
+                    }
+                    // the subtitle, then the fade over all of it
+                    goodomen::game::api::dialog_step(&level_scripts.lua, dt);
+                    if let Some(boot) = level_scripts.lua.app_data_ref::<goodomen::game::api::Boot>() {
+                        if let Some(d) = &boot.dialog {
+                            draw_dialog(&mut overlay, gui, d);
+                        }
+                    }
                     let fade = goodomen::game::api::fade_step(&level_scripts.lua, dt);
                     if fade[3] > 0.0 {
                         overlay.fill(fade);

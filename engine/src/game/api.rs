@@ -95,6 +95,42 @@ impl Fade {
     }
 }
 
+/// One line of subtitle, from `mdkDialogPanel(id, portrait, seconds, flags)`.
+///
+/// **A dialogue panel is a gob.** 0x4420e0 hands its four arguments to
+/// 0x406860, which registers an object called `gobdialog` of type **1000**
+/// with them in its slots -- so the timing out, the hiding and the drawing
+/// all live in that type's own update, 0x4062c0. What that update draws is
+/// the same frame the menus use (0x462ff0, corner **0.04**) with the text in
+/// **1.0, 0.7, 0.3** -- 0x4537d0's arguments there, and the same warm colour
+/// the menu puts under its cursor -- in the **default** font, the global at
+/// 0x5d270c that `mdkCreateMenu` also takes its font from.
+///
+/// The flags are `docs/lua-constants.md`'s: 0 `BOTTOM`, 1 `USERABORT`,
+/// 2 `TOP`, 4 `HIDE`, 8 `NODUMP`.
+///
+/// **Where the panel sits is chosen, not read.** The record 0x4062c0 draws
+/// from carries its own x, y, w and h and the constructor that fills them
+/// has not been read; the strip below is the shape a subtitle wants and it
+/// is marked here as the guess it is.
+pub struct Dialog {
+    pub text: Vec<u8>,
+    pub portrait: i64,
+    pub seconds: f64,
+    pub flags: i64,
+    pub elapsed: f64,
+    /// `mdkDialogSetHide`, which the pause key raises so a subtitle does not
+    /// sit under the menu.
+    pub hidden: bool,
+}
+
+impl Dialog {
+    /// `DIALOGFLAG_TOP`.
+    pub fn at_top(&self) -> bool {
+        self.flags & 2 != 0
+    }
+}
+
 /// A room, with the box a camera is tested against and the rooms it draws.
 #[derive(Default)]
 pub struct Visibility {
@@ -398,6 +434,8 @@ pub struct Boot {
     /// Where `mdkShowMouse` last put the cursor, and whether it asked for
     /// one at all.
     pub mouse: Option<[f32; 2]>,
+    /// The subtitle a movie is showing, if any. See [`Dialog`].
+    pub dialog: Option<Dialog>,
     /// The screen fade — `omSceneFade`, which the movies open and close
     /// with and which `menu.diff.Go` holds black over a level load. See
     /// [`Fade`].
@@ -895,6 +933,21 @@ pub fn command(lua: &Lua, id: i64) -> mlua::Result<()> {
 pub fn set_video_size(lua: &Lua, width: u32, height: u32) {
     if let Some(mut boot) = lua.app_data_mut::<Boot>() {
         boot.video = [width as i64, height as i64];
+    }
+}
+
+/// One frame of the subtitle's own clock; it goes when its seconds are up.
+pub fn dialog_step(lua: &Lua, dt: f64) {
+    let Some(mut boot) = lua.app_data_mut::<Boot>() else { return };
+    let done = match boot.dialog.as_mut() {
+        Some(d) => {
+            d.elapsed += dt;
+            d.seconds > 0.0 && d.elapsed > d.seconds
+        }
+        None => false,
+    };
+    if done {
+        boot.dialog = None;
     }
 }
 
@@ -4246,6 +4299,44 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 alpha: boot.fade.alpha,
             };
             Ok(())
+        })?,
+    )?;
+
+    globals.set(
+        "mdkDialogPanel",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let id = args.first().map(number).unwrap_or(-1.0);
+            let mut boot = boot_mut(lua)?;
+            let text = if id >= 0.0 {
+                boot.strings.text(id as u32).map(|t| t.to_vec()).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            boot.dialog = Some(Dialog {
+                text,
+                portrait: args.get(1).map(number).unwrap_or(0.0) as i64,
+                seconds: args.get(2).map(number).unwrap_or(0.0),
+                flags: args.get(3).map(number).unwrap_or(0.0) as i64,
+                elapsed: 0.0,
+                hidden: false,
+            });
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "mdkDialogSetHide",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let hide = args.first().map(number).unwrap_or(0.0) != 0.0;
+            if let Some(d) = boot_mut(lua)?.dialog.as_mut() {
+                d.hidden = hide;
+            }
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "mdkDialogGetVisible",
+        lua.create_function(|lua, _: Variadic<Value>| {
+            Ok(boot_ref(lua)?.dialog.as_ref().is_some_and(|d| !d.hidden) as i64)
         })?,
     )?;
 
