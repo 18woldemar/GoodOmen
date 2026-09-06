@@ -1573,6 +1573,8 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
 /// `mdk2.lua` gives both the same gob, which is why the mode has to be a
 /// number the engine keeps and not something derived from who is being played.
 const PLAYMODE_KURT: i64 = 1;
+/// `OBJ_DOC`, whose left button uses an item rather than firing.
+const OBJ_DOC: f64 = 102.0;
 const PLAYMODE_SNIPER: i64 = 4;
 /// The wide end of the sniper's zoom, in degrees -- the float at 0x48fa1c,
 /// which is where the scope opens. See [`goodomen::game::api::zoom`].
@@ -1980,6 +1982,19 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                             .app_data_ref::<goodomen::game::api::Boot>()
                             .and_then(|b| b.player.clone())
                         {
+                            // **and Doc's button is not a trigger.**
+                            // `mdk2.lua` binds `COM_INVCOMBINE` and
+                            // `COM_INVACTIVATE` to the same MOUSEB0 the gun
+                            // uses, so on his levels the left button *uses
+                            // what he is holding* -- and the one thing this
+                            // engine knows how to use is the lighter.
+                            let doc = goodomen::game::world::world(&level_scripts.lua)
+                                .and_then(|w| w.find(&name).and_then(|i| w.get(i)).map(|g| g.kind))
+                                == Some(OBJ_DOC);
+                            if doc {
+                                goodomen::game::api::use_lighter(&level_scripts.lua, &name);
+                                continue;
+                            }
                             // **and through the scope it is a real shot.**
                             // `COM_SMSHOOT` fires `kurtsnipe`'s own weapon,
                             // `OBJ_SNIPERBULLET`, and the sniper is the one

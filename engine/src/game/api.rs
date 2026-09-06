@@ -462,6 +462,15 @@ pub struct Boot {
     /// call: `mdkGobSetBullseye(hanspilot, 3.5)`. He sits high in his
     /// machine, so a shot at [`crate::game::body::EYE`] passes under him.
     pub bullseye: BTreeMap<String, f64>,
+    /// **The lighter's two clocks**, `(burn, cooldown)`, from `walker + 0x44`
+    /// and `+0x48`. Lighting it is 0x40cc50, reached from `case 5` of Doc's
+    /// item-use switch at 0x40bf10, and it is allowed only when both are
+    /// spent and the held type in bank 1 is **0x147**, `OBJ_LIGHTER`. It
+    /// burns for **8** seconds (0x41000000); `DocUpdate` counts it down and
+    /// the tick it crosses zero sets the cooldown to **2** (0x40000000).
+    /// Using it again while it burns snuffs it -- burn to 0 and **no
+    /// cooldown**, so a deliberate snuff can be relit at once.
+    pub lighter: BTreeMap<String, (f64, f64)>,
     pub oneshot: BTreeSet<(String, i64)>,
     /// Objects whose current animation has run to its end and clamped there.
     /// `omAnimIsPlaying` answers 0 for them, which is what `WaitForAnim` in
@@ -1726,6 +1735,17 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 w.set_rotation(id, q);
             }
             Ok(())
+        })?,
+    )?;
+    // `mdkDocIsLighterOn(gob)` -- 0x43e820 into **0x40cc20**, one comparison:
+    // `walker + 0x44 > 0`. `level3.lua` reads it every frame and lights a
+    // rocket fuse with it when Doc is within 2.5 of one.
+    globals.set(
+        "mdkDocIsLighterOn",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(who) = args.first().and_then(gob_name) else { return Ok(0.0) };
+            let lit = boot_ref(lua)?.lighter.get(&who).is_some_and(|&(burn, _)| burn > 0.0);
+            Ok(if lit { 1.0 } else { 0.0 })
         })?,
     )?;
     // one store, and the only shipped call is on the Hans pilot -- see
@@ -4122,6 +4142,38 @@ pub fn stalls(lua: &Lua) -> Vec<(String, String, i64, [f64; 3])> {
     out
 }
 
+/// How long the lighter burns, and how long before it may be lit again --
+/// the 8.0 at 0x40cc9c and the 2.0 0x409dc7 arms. See [`Boot::lighter`].
+pub const LIGHTER_BURN: f64 = 8.0;
+pub const LIGHTER_COOLDOWN: f64 = 2.0;
+
+/// **Doc's item-use button**, which is `case 5` of the switch at 0x40bf10:
+/// with the lighter in bank 1 and both clocks spent it lights for eight
+/// seconds; with it already burning it snuffs, and snuffing costs nothing.
+/// Answers whether anything happened.
+pub fn use_lighter(lua: &Lua, who: &str) -> bool {
+    /// `OBJ_LIGHTER`, the 0x147 both branches compare the held type against.
+    const LIGHTER: f64 = 327.0;
+    let holding = boot_ref(lua)
+        .ok()
+        .and_then(|b| b.carried.get(&(who.to_string(), 1)).and_then(|h| h.first()).map(|&(t, _)| t))
+        == Some(LIGHTER);
+    if !holding {
+        return false;
+    }
+    let Ok(mut boot) = boot_mut(lua) else { return false };
+    let (burn, cool) = boot.lighter.get(who).copied().unwrap_or((0.0, 0.0));
+    if burn > 0.0 {
+        boot.lighter.insert(who.to_string(), (0.0, 0.0));
+        return true;
+    }
+    if cool > 0.0 {
+        return false;
+    }
+    boot.lighter.insert(who.to_string(), (LIGHTER_BURN, 0.0));
+    true
+}
+
 /// **Put one in a bank**, which is 0x4157d0: the item's own bank from the
 /// table (`+0x24`), the count clamped to **-1 when the record's give column
 /// is negative** -- unlimited, which is `sniperbullet` and `loaf` -- and
@@ -5816,6 +5868,19 @@ pub fn tick_touching(
         for left in boot.reaim.values_mut() {
             *left -= dt;
         }
+        // and the lighter's two, `walker + 0x44` and `+0x48`: the burn counts
+        // down and the tick it would cross zero arms the cooldown instead
+        for (burn, cool) in boot.lighter.values_mut() {
+            if *burn > 0.0 {
+                *burn -= dt;
+                if *burn <= 0.0 {
+                    *burn = 0.0;
+                    *cool = LIGHTER_COOLDOWN;
+                }
+            } else if *cool > 0.0 {
+                *cool -= dt;
+            }
+        }
     }
 
     // the animation clock, and the keys it passes.
@@ -7013,6 +7078,51 @@ mod tests {
         scripts.lua.load("has = mdkDocHasItem(bob, 317)").exec().unwrap();
         assert_eq!(scripts.lua.globals().get::<f64>("has").unwrap(), 1.0, "five grenades");
         assert_eq!(health(), 35, "and it is not food");
+    }
+
+    /// **The lighter burns for eight seconds and then waits two.** Lighting
+    /// it needs it in bank 1 and both clocks spent; using it again while it
+    /// burns snuffs it, and a snuff costs nothing.
+    #[test]
+    fn the_lighter_burns_for_eight_and_waits_two() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('doc', 102, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)",
+            )
+            .exec()
+            .unwrap();
+        let lit = || {
+            scripts.lua.load("on = mdkDocIsLighterOn(doc)").exec().unwrap();
+            scripts.lua.globals().get::<f64>("on").unwrap()
+        };
+        // nothing in hand, nothing happens
+        assert!(!use_lighter(&scripts.lua, "doc"));
+        assert_eq!(lit(), 0.0);
+        scripts.lua.load("mdkDocGiveItem(doc, 327, 1)").exec().unwrap();
+        assert!(use_lighter(&scripts.lua, "doc"), "and now it lights");
+        assert_eq!(lit(), 1.0);
+        let rooms = Visibility::default();
+        let mut state = Ticking::default();
+        let run = |n: usize, state: &mut Ticking| {
+            for _ in 0..n {
+                tick(&scripts, &rooms, [0.0; 3], 0.0, 1.0 / 30.0, state).unwrap();
+            }
+        };
+        run(239, &mut state); // just under eight seconds
+        assert_eq!(lit(), 1.0, "still burning at 7.97");
+        run(2, &mut state);
+        assert_eq!(lit(), 0.0, "and out at eight");
+        assert!(!use_lighter(&scripts.lua, "doc"), "two seconds before it may relight");
+        run(61, &mut state);
+        assert!(use_lighter(&scripts.lua, "doc"), "and then it may");
+        // snuffing it costs nothing at all
+        assert!(use_lighter(&scripts.lua, "doc"), "snuffed");
+        assert_eq!(lit(), 0.0);
+        assert!(use_lighter(&scripts.lua, "doc"), "and relit at once");
     }
 
     /// **Where to aim at a thing is its own.** `mdkGobSetBullseye` raises
