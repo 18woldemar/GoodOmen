@@ -6545,6 +6545,20 @@ mod tests {
         assert!((past - 2.0).abs() < 1e-6, "sixty thirtieths of a second: {past}");
     }
 
+    /// The four the player wears are four literals in four constructors, and
+    /// only three of them match the `OBJ_*` name. Doc's is `dr`.
+    #[test]
+    fn the_doctor_has_a_model() {
+        assert_eq!(model_for_type(100.0).as_deref(), Some("kurt"));
+        assert_eq!(model_for_type(101.0).as_deref(), Some("max"));
+        assert_eq!(model_for_type(103.0).as_deref(), Some("hyde"));
+        assert_eq!(
+            model_for_type(102.0).as_deref(),
+            Some("dr"),
+            "0x4084c4, and `doc.mod` is not a file in the game"
+        );
+    }
+
     /// A birdbrain fires from the air: it hovers, faces you, spends its
     /// three rounds and then repositions -- either closing or picking a new
     /// height, which is **your own z plus ten**.

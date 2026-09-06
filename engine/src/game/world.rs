@@ -496,13 +496,33 @@ pub fn fire_interval(kind: f64) -> Option<f64> {
     ITEM.iter().find(|(k, ..)| *k == kind).map(|(_, _, _, t, ..)| *t)
 }
 
+/// **The four the player wears**, and they are not guessable. Each
+/// character's own file has a constructor that pushes a literal model name
+/// when the object was registered without a resource, which every one of them
+/// is: `kurt` at 0x4167f3, `max` at 0x420a25, `hyde` at 0x413e94 -- and
+/// **`dr` at 0x4084c4**, in `mdkDoctor.c`.
+///
+/// Three of the four happen to match the `OBJ_*` name and Doc does not, so
+/// **on his two levels the player was invisible**: `doc.mod` is not a file,
+/// `dr.mod` is, and a montage of the ten levels is what showed it. There is
+/// no table behind these; they are four literals in four constructors.
+pub const WORN: [(f64, &str); 4] = [
+    (100.0, "kurt"),
+    (101.0, "max"),
+    (102.0, "dr"),
+    (103.0, "hyde"),
+];
+
 /// The model a type wears, if one of the three tables names it — and they
 /// name 137 types between them, where guessing from the `OBJ_*` name covers
 /// 67 of 149. See [`crate::game::api::model_for_type`], which asks this first.
 pub fn table_model(kind: f64) -> Option<&'static str> {
-    ITEM.iter()
+    WORN.iter()
+        .find(|(k, _)| *k == kind)
+        .map(|(_, m)| *m)
+        .or_else(|| ITEM.iter()
         .find(|(k, ..)| *k == kind)
-        .map(|(_, m, ..)| *m)
+        .map(|(_, m, ..)| *m))
         .or_else(|| BULLET.iter().find(|(k, ..)| *k == kind).map(|(_, m, ..)| *m))
         .or_else(|| BASE_HITPOINTS.iter().find(|(k, ..)| *k == kind).map(|(_, m, _)| *m))
 }
