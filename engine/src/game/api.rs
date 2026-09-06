@@ -452,6 +452,14 @@ pub struct Boot {
     /// returns 0 when there is none, so an object looping animation A does
     /// not answer a script waiting on B. Cleared and refilled every tick.
     pub looped: BTreeMap<String, f64>,
+    /// **`(model, animation)` pairs that do not come round again**, out of the
+    /// record's `ends` field -- see [`crate::formats::model::Animation::ends`].
+    /// 0x4611b0 wraps a 0, reverses a 2 and **clamps everything else**.
+    pub oneshot: BTreeSet<(String, i64)>,
+    /// Objects whose current animation has run to its end and clamped there.
+    /// `omAnimIsPlaying` answers 0 for them, which is what `WaitForAnim` in
+    /// `script.lua` waits for, and playing anything clears it.
+    pub done: BTreeSet<String>,
     /// How fast each object plays its animation, from `omAnimSetSpeed`. One
     /// per object rather than per animation, because [`Boot::playing`] holds
     /// one animation. **Negative runs it backwards** — `elevators.lua` shuts
@@ -2898,7 +2906,8 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 let id = args.get(1).map(number).unwrap_or(0.0);
                 let mut boot = boot_mut(lua)?;
                 boot.playing.insert(name.clone(), id);
-                boot.since.insert(name, 0.0);
+                boot.since.insert(name.clone(), 0.0);
+                boot.done.remove(&name);
             }
             Ok(())
         })?,
@@ -2951,7 +2960,19 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         "omAnimIsPlaying",
         lua.create_function(|lua, args: Variadic<Value>| {
             let Some(name) = args.first().and_then(gob_name) else { return Ok(0) };
-            Ok(boot_ref(lua)?.playing.contains_key(&name) as i32)
+            // **and one that has ended is not playing.** `WaitForAnim` in
+            // `script.lua` is `omAnimIsPlaying(self, anim) == 0`, so an
+            // engine whose animations never end waits for ever -- which is
+            // what `l3_bathroom03` and `l5_r11` were doing.
+            let boot = boot_ref(lua)?;
+            let up = boot.playing.get(&name);
+            let want = args.get(1).map(number);
+            Ok(match (up, want) {
+                (Some(_), _) if boot.done.contains(&name) => 0,
+                (Some(a), Some(b)) => (*a as i64 == b as i64) as i32,
+                (Some(_), None) => 1,
+                (None, _) => 0,
+            })
         })?,
     )?;
 
@@ -5602,6 +5623,7 @@ pub fn tick_touching(
                 .collect()
         };
         let (mut out, mut advanced, mut looped) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut stopped, mut running) = (Vec::new(), Vec::new());
         for (name, anim, model) in live {
             let was = boot.since.get(&name).copied().unwrap_or(0.0);
             let speed = boot.speed.get(&name).copied().unwrap_or(1.0);
@@ -5635,12 +5657,28 @@ pub fn tick_touching(
                 }
             }
             if wrapped {
-                now -= span * (now / span).floor();
                 looped.push((name.clone(), anim));
+                // **and it only comes round if the record says so.** A
+                // one-shot clamps at its end and stays there, which is both
+                // what 0x4611b0 does and what leaves the last frame on
+                // screen instead of snapping back to the bind pose.
+                if boot.oneshot.contains(&(model.clone(), anim as i64)) {
+                    now = span;
+                    stopped.push(name.clone());
+                } else {
+                    now -= span * (now / span).floor();
+                    running.push(name.clone());
+                }
             }
             advanced.push((name, now));
         }
         boot.looped = looped.into_iter().collect();
+        for name in stopped {
+            boot.done.insert(name);
+        }
+        for name in running {
+            boot.done.remove(&name);
+        }
         for (name, now) in advanced {
             boot.since.insert(name, now);
         }
@@ -6669,6 +6707,52 @@ mod tests {
             Some("dr"),
             "0x4084c4, and `doc.mod` is not a file in the game"
         );
+    }
+
+    /// **A one-shot animation stops at its end**, which is what
+    /// `WaitForAnim` in `script.lua` is waiting for -- it is
+    /// `omAnimIsPlaying(gob, anim) == 0`. A looping one never stops.
+    #[test]
+    fn a_one_shot_animation_ends_and_a_loop_does_not() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('a', 800, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkRegisterObject('b', 800, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)",
+            )
+            .exec()
+            .unwrap();
+        {
+            let mut boot = scripts.lua.app_data_mut::<Boot>().unwrap();
+            // both play animation 17 of `scenery`; only one of them is told
+            // that 17 does not come round again
+            boot.spans.insert(("scenery".into(), 17), 0.5);
+            boot.oneshot.insert(("scenery".into(), 17));
+            boot.spans.insert(("scenery".into(), 6), 0.5);
+        }
+        scripts.lua.load("omAnimPlay(a, 17)\n omAnimPlay(b, 6)").exec().unwrap();
+        let rooms = Visibility::default();
+        let mut state = Ticking::default();
+        for _ in 0..30 {
+            tick(&scripts, &rooms, [0.0; 3], 0.0, 1.0 / 30.0, &mut state).unwrap();
+        }
+        let ask = |who: &str, anim: f64| {
+            scripts
+                .lua
+                .load(&format!("answer = omAnimIsPlaying({who}, {anim})"))
+                .exec()
+                .unwrap();
+            scripts.lua.globals().get::<f64>("answer").unwrap()
+        };
+        assert_eq!(ask("a", 17.0), 0.0, "a one-shot has stopped");
+        assert_eq!(ask("b", 6.0), 1.0, "and a loop has not");
+        // and playing it again starts it
+        scripts.lua.load("omAnimPlay(a, 17)").exec().unwrap();
+        assert_eq!(ask("a", 17.0), 1.0, "asking again starts it");
     }
 
     /// A birdbrain fires from the air: it hovers, faces you, spends its

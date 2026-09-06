@@ -122,7 +122,11 @@ CORPUS = [
     # on one of the 24 floorless checkpoints, which is the original's own
     # arrangement.
     ("the game loses the bodies it is known to lose, and no others",
-     ["sweep.py", "extracted", "--run", "$MDK2_GOG", "--expect-lost", "22"],
+     # 22 -> 24 with the one-shot rule: `l1_r8gen1_spawn` and
+     # `l1_r8gen2_spawn` join the list, and the cause is the random stream --
+     # an animation that stops instead of looping changes when the AI next
+     # rolls, and level 1's generator doganboys walk somewhere else.
+     ["sweep.py", "extracted", "--run", "$MDK2_GOG", "--expect-lost", "24"],
      None),
     ("room graphs resolve",
      ["rooms.py", "extracted", "--check", "--expect", "823"],
@@ -372,7 +376,11 @@ ENGINE = [
     ("a run fires shots that carry the table's own numbers",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
-      "--run", "10", "1", "30", "--expect-shots", "253",
+      # and **253 -> 39 when a one-shot animation started stopping**:
+      # `ziz_tur01.mod`'s `ANIM_SHOOT` has `ends` 3, so 0x4611b0 clamps it at
+      # the last frame instead of wrapping, and a turret fires once per time
+      # the script asks rather than once per loop for ever.
+      "--run", "10", "1", "30", "--expect-shots", "39",
       "--expect-events", "2751", "--expect-survived", "2751"], None),
     # and a shot reaches the player. `--hunt` steers the driver at the
     # nearest thing with hitpoints instead of holding forwards, which is what

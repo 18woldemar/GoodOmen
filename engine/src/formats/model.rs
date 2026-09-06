@@ -143,12 +143,29 @@ pub struct Animation {
     /// standstill. Use [`Animation::loop_rate`], which says when the field
     /// can be believed.
     pub rate: f32,
+    /// **How it ends**, the dword at +0x10. 0x4611b0 is the whole of it: when
+    /// the normalised clock runs off either end it raises the instance's
+    /// just-looped flag and fires `OnAnimLoop`, and then switches on this --
+    /// **0 wraps, 2 reverses the rate (a ping-pong), anything else clamps**
+    /// and the animation stops where it stopped.
+    ///
+    /// Over the 6311 records it is 0 in 2404, 3 in 2266, 1 in 865 and 2 in
+    /// 41, and it lines up with what should loop: `ANIM_WALK` and
+    /// `ANIM_WALKBACK` are **0 in every model that has them**, `ANIM_DIE` and
+    /// `ANIM_THROW` are 3 in most. The copy from here into the instance was
+    /// not traced; the correlation and the switch are the argument.
+    pub ends: u32,
     pub channels: Vec<Channel>,
 }
 
 impl Animation {
     /// The rate to play this at: the record's own where it is believable, and
     /// the corpus median where it is not.
+    /// Whether it comes round again. See [`Animation::ends`].
+    pub fn repeats(&self) -> bool {
+        self.ends == 0 || self.ends == 2
+    }
+
     pub fn loop_rate(&self) -> f32 {
         let r = self.rate.abs();
         if (1e-3..=1e6).contains(&r) {
@@ -305,6 +322,7 @@ impl Model {
                 animations.push(Animation {
                     id: u32le(data, o)?,
                     rate: f32le(data, o + 8)?,
+                    ends: u32le(data, o + 16)?,
                     channels,
                 });
             }
