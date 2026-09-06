@@ -3577,6 +3577,22 @@ pub fn model_for_type(kind: f64) -> Option<String> {
     if let Some(m) = crate::game::world::table_model(kind) {
         return Some(m.to_string());
     }
+    // **and the guess is wrong for `OBJ_CHECKPOINT`.** `CheckPoint.mod` is a
+    // file, so guessing from the name found it and drew it -- a pale
+    // octagonal pad with four beams converging above, standing on several
+    // checkpoints with the player *inside* it. Level 6's Hyde could not be
+    // seen at four of his checkpoints because of it.
+    //
+    // The object factory settles it: 0x42ac60's switch on the type has no
+    // case for **0x244**, so a checkpoint falls to the default and loads
+    // whatever resource it was registered with, which for every one of them
+    // is nothing. The model belongs to **`OBJ_PORTAL`** -- case **0x208** is
+    // the only place `"checkpoint"` appears in the binary, at 0x42b5a1, and
+    // it is that type's *default* name.
+    const CHECKPOINT: f64 = 580.0;
+    if kind == CHECKPOINT {
+        return None;
+    }
     type_name(kind).map(|n| n[4..].to_ascii_lowercase())
 }
 

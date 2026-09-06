@@ -1707,13 +1707,31 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
 
     let mut yaw = spawn.facing;
     let mut pitch = 0.0f64;
+    // **who you are and what you are wearing.** A play mode names the gob and
+    // the gob's type names the model, and when either is wrong the player is
+    // simply not on screen -- which is how the doctor spent two sessions
+    // invisible on his own levels.
+    let wearing = {
+        let boot = level_scripts.lua.app_data_ref::<goodomen::game::api::Boot>();
+        let who = boot.as_ref().and_then(|b| b.player.clone());
+        let kind = who.as_deref().and_then(|n| {
+            let w = goodomen::game::world::world(&level_scripts.lua)?;
+            w.find(n).and_then(|i| w.get(i)).map(|g| g.kind)
+        });
+        match (who, kind.and_then(goodomen::game::api::model_for_type)) {
+            (Some(n), Some(m)) => format!("{n} as {m}.mod"),
+            (Some(n), None) => format!("{n} with no model"),
+            _ => "nobody".to_string(),
+        }
+    };
     let summary = format!(
-        "l{number} cp{checkpoint}: {} objects, {} placed ({} by their type), {} triangles, \
+        "l{number} cp{checkpoint}: you are {wearing}, {} objects, {} placed ({} by their type, {} without one), {} triangles, \
          {} posed, {} lights, {} refused, in {} \
          ({} rooms visible from it, {standing_in}, {track_here}), {sounding}, {}",
         loaded.objects,
         loaded.placed,
         loaded.by_type,
+        loaded.without_a_model,
         loaded.triangles,
         scene.posed_draws(),
         scene.lights.len(),

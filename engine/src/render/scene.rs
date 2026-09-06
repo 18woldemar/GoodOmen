@@ -34,8 +34,8 @@ layout (location = 2) in float node;
 layout (location = 3) in vec3 normal;
 uniform mat4 view_projection;
 uniform mat4 model;
-uniform vec4 node_rotation[64];
-uniform vec4 node_offset[64];
+uniform vec4 node_rotation[128];
+uniform vec4 node_offset[128];
 out vec2 vary_uv;
 out float vary_depth;
 out vec3 vary_world;
@@ -63,7 +63,7 @@ void main() {
 
 /// How many nodes fit in the uniform block. A model with more stays in its
 /// bind pose, which is what `tools/mod2html.py` does for the same reason.
-pub const MAX_NODES: usize = 64;
+pub const MAX_NODES: usize = 128;
 
 /// No lighting yet: the levels ship static lights as objects and nothing
 /// reads them. A little distance shading instead, so that shape is visible
