@@ -312,44 +312,51 @@ fn to_rgba(bgra: &[u8]) -> Vec<u8> {
     out
 }
 
+/// One decoded texture on the GPU, mip chain and all.
+///
+/// Free rather than a method on [`Scene`] because the 2-D overlay uploads
+/// the font through the same path; see [`crate::render::overlay`].
+///
+/// # Safety
+/// A GL context must be current on this thread.
+pub unsafe fn upload(gl: &glow::Context, tex: &Texture) -> Option<GpuTexture> {
+    let handle = gl.create_texture().ok()?;
+    gl.bind_texture(glow::TEXTURE_2D, Some(handle));
+    for (level, image) in tex.levels.iter().enumerate() {
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            level as i32,
+            glow::RGBA8 as i32,
+            image.width as i32,
+            image.height as i32,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(&to_rgba(&image.bgra))),
+        );
+    }
+    // the chain is complete down to 1x1, so there is nothing to generate
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_MIN_FILTER,
+        glow::LINEAR_MIPMAP_LINEAR as i32,
+    );
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_MAX_LEVEL,
+        tex.levels.len() as i32 - 1,
+    );
+    Some(GpuTexture { texture: handle, alpha: tex.channels == 4 })
+}
+
 impl Scene {
     /// # Safety
     /// A GL context must be current on this thread.
     pub unsafe fn upload_texture(&mut self, gl: &glow::Context, name: &str, tex: &Texture) {
-        let handle = match gl.create_texture() {
-            Ok(t) => t,
-            Err(_) => return,
-        };
-        gl.bind_texture(glow::TEXTURE_2D, Some(handle));
-        for (level, image) in tex.levels.iter().enumerate() {
-            gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                level as i32,
-                glow::RGBA8 as i32,
-                image.width as i32,
-                image.height as i32,
-                0,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(Some(&to_rgba(&image.bgra))),
-            );
+        if let Some(t) = upload(gl, tex) {
+            self.textures.insert(name.to_ascii_lowercase(), t);
         }
-        // the chain is complete down to 1x1, so there is nothing to generate
-        gl.tex_parameter_i32(
-            glow::TEXTURE_2D,
-            glow::TEXTURE_MIN_FILTER,
-            glow::LINEAR_MIPMAP_LINEAR as i32,
-        );
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
-        gl.tex_parameter_i32(
-            glow::TEXTURE_2D,
-            glow::TEXTURE_MAX_LEVEL,
-            tex.levels.len() as i32 - 1,
-        );
-        self.textures.insert(
-            name.to_ascii_lowercase(),
-            GpuTexture { texture: handle, alpha: tex.channels == 4 },
-        );
     }
 
     /// # Safety

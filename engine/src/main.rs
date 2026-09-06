@@ -41,6 +41,31 @@ fn main() {
         }
         return;
     }
+    // `--font` draws a string offscreen with the game's own font, which is
+    // the check for the whole 2-D layer. It needs the installation, so it
+    // comes after `--triangle` and before everything that needs a level.
+    if args.iter().any(|a| a == "--font") {
+        let root = args
+            .iter()
+            .find(|a| !a.starts_with("--") && a.parse::<u32>().is_err())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(Install::beside_the_binary);
+        let line = Install::open(&root).map_err(|e| e.to_string()).and_then(|mut install| {
+            let lua = install.read("font.lua").map_err(|e| e.to_string())?;
+            let tex = install.read("font.tex").map_err(|e| e.to_string())?;
+            let source: String = lua.iter().map(|&b| b as char).collect();
+            goodomen::render::overlay::selfcheck(&source, &tex)
+        });
+        match line {
+            Ok(line) => println!("{line}"),
+            Err(e) if e.starts_with(goodomen::render::NO_VIDEO) => println!("skip: {e}"),
+            Err(e) => {
+                eprintln!("goodomen: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     // `--boot [N [CP]]` starts a level the way the game does. No GL.
     if let Some(i) = args.iter().position(|a| a == "--boot") {
         // the level and checkpoint are positional and both optional, so a
@@ -2488,14 +2513,7 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                                 glow::PixelPackData::Slice(Some(&mut pixels)),
                             );
                         }
-                        let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
-                        for row in (0..h).rev() {
-                            for col in 0..w {
-                                let o = ((row * w + col) * 4) as usize;
-                                ppm.extend_from_slice(&pixels[o..o + 3]);
-                            }
-                        }
-                        let _ = std::fs::write(&path, ppm);
+                        let _ = goodomen::render::write_ppm(&path, &pixels, w, h);
                     }
                 }
             }
@@ -2549,14 +2567,8 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                     glow::RGBA, glow::UNSIGNED_BYTE,
                     glow::PixelPackData::Slice(Some(&mut pixels)),
                 );
-                let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
-                for row in (0..height).rev() {
-                    for col in 0..width {
-                        let o = ((row * width + col) * 4) as usize;
-                        ppm.extend_from_slice(&pixels[o..o + 3]);
-                    }
-                }
-                std::fs::write(&path, ppm).map_err(|e| e.to_string())?;
+                goodomen::render::write_ppm(&path, &pixels, width, height)
+                    .map_err(|e| e.to_string())?;
             }
         }
         target.delete(&video.gl);
@@ -2812,15 +2824,8 @@ fn level(
         // in the checks reads it.
         if let Some(i) = std::env::args().position(|a| a == "--save") {
             if let Some(path) = std::env::args().nth(i + 1) {
-                let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
-                // GL counts rows from the bottom, PPM from the top
-                for row in (0..height).rev() {
-                    for col in 0..width {
-                        let o = ((row * width + col) * 4) as usize;
-                        ppm.extend_from_slice(&pixels[o..o + 3]);
-                    }
-                }
-                std::fs::write(&path, ppm).map_err(|e| e.to_string())?;
+                goodomen::render::write_ppm(&path, &pixels, width, height)
+                    .map_err(|e| e.to_string())?;
             }
         }
 

@@ -11,12 +11,27 @@
 use glow::HasContext;
 
 pub mod camera;
+pub mod overlay;
 pub mod scene;
 pub mod triangle;
 
 /// The prefix [`Video::open`] puts on an error that means "there is no
 /// display here", as opposed to "the renderer is wrong".
 pub const NO_VIDEO: &str = "no video device";
+
+/// A read-back RGBA buffer as a PPM. GL hands pixels back **bottom-up**, so
+/// the rows are reversed on the way out; every caller was doing that by
+/// hand, in four places.
+pub fn write_ppm(path: &str, pixels: &[u8], width: i32, height: i32) -> std::io::Result<()> {
+    let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
+    for row in (0..height).rev() {
+        for column in 0..width {
+            let o = ((row * width + column) * 4) as usize;
+            ppm.extend_from_slice(&pixels[o..o + 3]);
+        }
+    }
+    std::fs::write(path, ppm)
+}
 
 pub struct Video {
     /// Dropped last: the GL context must outlive everything made with it,
