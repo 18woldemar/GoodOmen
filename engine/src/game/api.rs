@@ -3593,6 +3593,15 @@ pub fn model_for_type(kind: f64) -> Option<String> {
     if kind == CHECKPOINT {
         return None;
     }
+    // **And the guess is right everywhere else it fires, which was checked
+    // rather than assumed.** Turning it off costs level 1 and level 8 nothing
+    // at all -- the tables already name everything they draw -- and level 4
+    // eight objects and 4264 triangles, every one of them an
+    // `OBJ_BOXINGGLOVE`. The factory's own case for that type, **0x24e at
+    // 0x427970**, pushes the literal `"boxingglove"` and hands it to the
+    // model loader, so the guess agrees with the binary. The same holds for
+    // the other constructors that name a model outright: `ladderspot`
+    // (0x23f), `lightflare02` and `stars` (0x259).
     type_name(kind).map(|n| n[4..].to_ascii_lowercase())
 }
 
