@@ -130,6 +130,15 @@ CORPUS = [
      # had, so what they do next changes and the random stream with it.
      ["sweep.py", "extracted", "--run", "$MDK2_GOG", "--expect-lost", "25"],
      None),
+    # **Every level opens a window and plays.** The two pinned window checks
+    # are two checkpoints of two levels, which is enough to catch a change and
+    # not enough to catch a level: the doctor spent two sessions invisible on
+    # his own two, and nothing said so. This walks all ten through the path a
+    # person uses and fails if any of them does not reach its own summary --
+    # or reaches it with no triangles, or with nobody being played.
+    ("every level opens a window and plays",
+     ["playall.py", "extracted", "--run", "$MDK2_GOG", "--seconds", "6"],
+     None),
     ("room graphs resolve",
      ["rooms.py", "extracted", "--check", "--expect", "823"],
      "scripts/level1.lua"),
