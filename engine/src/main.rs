@@ -770,6 +770,41 @@ fn menu_check(root: &std::path::Path) -> Result<String, String> {
         return Err(format!("the pause key did not put up the pause menu: {paused}"));
     }
 
+    // and down into Options -> Video, where the widgets are: three downs and
+    // a select each time, one command per step because `SetConScheme` only
+    // promotes a scheme between frames
+    let widgets = (|| -> Result<String, String> {
+        for id in [api::MENU_DOWN, api::MENU_DOWN, api::MENU_DOWN, 62, 62] {
+            api::command(&scripts.lua, id).map_err(|e| e.to_string())?;
+            api::set_scheme(&scripts.lua).map_err(|e| e.to_string())?;
+        }
+        let (kinds, before) = {
+            let boot = scripts.lua.app_data_ref::<api::Boot>().ok_or("no boot state")?;
+            let menu = boot.menu.and_then(|i| boot.menus.get(i)).ok_or("no menu")?;
+            let kinds = menu
+                .items
+                .iter()
+                .filter(|i| !matches!(i.widget, goodomen::game::menu::Widget::None))
+                .count();
+            (kinds, menu.items.first().map(|i| i.value).unwrap_or(-1.0))
+        };
+        if kinds < 3 {
+            return Err(format!("the video options carry {kinds} widgets"));
+        }
+        // the first item is the driver combo, which has one entry: right
+        // must not walk off the end of it
+        api::command(&scripts.lua, api::MENU_RIGHT).map_err(|e| e.to_string())?;
+        let after = {
+            let boot = scripts.lua.app_data_ref::<api::Boot>().ok_or("no boot state")?;
+            let menu = boot.menu.and_then(|i| boot.menus.get(i)).ok_or("no menu")?;
+            menu.items.first().map(|i| i.value).unwrap_or(-1.0)
+        };
+        if after != before {
+            return Err(format!("a combo of one walked from {before} to {after}"));
+        }
+        Ok(format!("{kinds} widgets on the video options"))
+    })()?;
+
     let (menus, items) = scripts
         .lua
         .app_data_ref::<api::Boot>()
@@ -778,7 +813,7 @@ fn menu_check(root: &std::path::Path) -> Result<String, String> {
     Ok(format!(
         "{menus} menus of {items} items; the first has {count} -- {words} -- the cursor walked \
          all of them and wrapped, and choosing one reached the script. \
-         The pause key put up: {paused}"
+         The pause key put up: {paused}, and {widgets}"
     ))
 }
 
@@ -1813,6 +1848,10 @@ fn title(root: &std::path::Path, show: bool) -> Result<String, String> {
 
     let mut video = Video::open("goodomen", 1024, 768, show)?;
     let version = video.version();
+    {
+        let (w, h) = video.window.drawable_size();
+        api::set_video_size(&scripts.lua, w, h);
+    }
     let mut scene = Scene::default();
     // SAFETY: the context Video::open made is current on this thread.
     let loaded = unsafe {
@@ -1852,20 +1891,31 @@ fn title(root: &std::path::Path, show: bool) -> Result<String, String> {
     );
 
     let mut overlay = goodomen::render::overlay::Overlay::default();
-    let mut picture = |install: &mut Install, name: &str| {
-        let bytes = install.read(name).ok()?;
-        let tex = goodomen::formats::tex::Texture::parse(&bytes).ok()?;
-        // SAFETY: the context is current on this thread.
-        unsafe { goodomen::render::scene::upload(&video.gl, &tex) }
+    let gui = {
+        let mut picture = |install: &mut Install, name: &str| {
+            let bytes = install.read(name).ok()?;
+            let tex = goodomen::formats::tex::Texture::parse(&bytes).ok()?;
+            // SAFETY: the context Video::open made is current on this thread.
+            unsafe { goodomen::render::scene::upload(&video.gl, &tex) }
+        };
+        // 0x4117a0 loads exactly these three by these names, and the font
+        // goes with them
+        let font = picture(&mut install, "font.tex").and_then(|texture| {
+            let lua = install.read("font.lua").ok()?;
+            let source: String = lua.iter().map(|&b| b as char).collect();
+            let advance = goodomen::render::overlay::Font::advances(&source).ok()?;
+            Some(goodomen::render::overlay::Font { texture, advance })
+        });
+        let corners = picture(&mut install, "textbox2.tex");
+        let edges = picture(&mut install, "textbox1.tex");
+        let options = picture(&mut install, "optionbox1.tex");
+        match (font, corners, edges, options) {
+            (Some(font), Some(corners), Some(edges), Some(options)) => {
+                Some(Gui { font, corners, edges, options })
+            }
+            _ => None,
+        }
     };
-    let font = picture(&mut install, "font.tex").and_then(|texture| {
-        let lua = install.read("font.lua").ok()?;
-        let source: String = lua.iter().map(|&b| b as char).collect();
-        let advance = goodomen::render::overlay::Font::advances(&source).ok()?;
-        Some(goodomen::render::overlay::Font { texture, advance })
-    });
-    let corners = picture(&mut install, "textbox2.tex");
-    let edges = picture(&mut install, "textbox1.tex");
 
     let quit_after: Option<f64> = std::env::args()
         .position(|a| a == "--for")
@@ -1954,11 +2004,11 @@ fn title(root: &std::path::Path, show: bool) -> Result<String, String> {
                 started.elapsed().as_secs_f64(),
                 eye,
             )?;
-            if let Some(font) = &font {
+            if let Some(gui) = &gui {
                 overlay.clear();
                 if api::showing_menu(&scripts.lua) {
                     if let Some(boot) = scripts.lua.app_data_ref::<api::Boot>() {
-                        draw_menu(&mut overlay, font, corners.as_ref().zip(edges.as_ref()), &boot);
+                        draw_menu(&mut overlay, gui, &boot);
                     }
                 }
                 overlay.draw(&video.gl)?;
@@ -1997,6 +2047,80 @@ const FOV: f32 = 1.1;
 /// The corner size 0x412090 passes to the frame, and the alpha with it.
 const MENU_CORNER: f32 = 0.04;
 
+/// Everything the 2-D layer draws the interface out of: the font and the
+/// three sheets 0x4117a0 loads by name.
+struct Gui {
+    font: goodomen::render::overlay::Font,
+    corners: goodomen::render::scene::GpuTexture,
+    edges: goodomen::render::scene::GpuTexture,
+    /// `OptionBox1` — one sheet with the slider's two bars, its needle and
+    /// the checkbox in both states. The boxes below were measured off it.
+    options: goodomen::render::scene::GpuTexture,
+}
+
+/// Where each sprite sits in `OptionBox1.tex`, in picture coordinates:
+/// `[u, v, width, height]` over the 256 by 256 sheet.
+const BAR_FULL: [f32; 4] = [1.0 / 256.0, 1.0 / 256.0, 254.0 / 256.0, 62.0 / 256.0];
+const BAR_EMPTY: [f32; 4] = [1.0 / 256.0, 129.0 / 256.0, 254.0 / 256.0, 62.0 / 256.0];
+const NEEDLE: [f32; 4] = [0.0, 64.0 / 256.0, 32.0 / 256.0, 64.0 / 256.0];
+const CHECK_ON: [f32; 4] = [127.0 / 256.0, 64.0 / 256.0, 64.0 / 256.0, 64.0 / 256.0];
+const CHECK_OFF: [f32; 4] = [191.0 / 256.0, 64.0 / 256.0, 64.0 / 256.0, 64.0 / 256.0];
+
+/// One item's widget, to the right of its own words.
+fn draw_widget(
+    overlay: &mut goodomen::render::overlay::Overlay,
+    gui: &Gui,
+    menu: &goodomen::game::menu::Menu,
+    item: &goodomen::game::menu::Item,
+    colour: [f32; 4],
+) {
+    use goodomen::game::menu::Widget;
+    let sheet = Some(gui.options.texture);
+    // the slot starts where the words end, and the **0.04** every widget but
+    // the checkbox adds to its own width (0x48f6c8) is the gap in front of
+    // it -- 0x413650 counts it into the width and never says where it goes,
+    // and a value drawn hard against its label reads as one word
+    const PAD: f32 = 0.04;
+    let x = item.x + item.width + PAD;
+    match &item.widget {
+        Widget::None => {}
+        Widget::CheckBox => {
+            // its slot is a fixed 0.21 and the sprite is round: centre it
+            let box_ = if item.value == 0.0 { CHECK_OFF } else { CHECK_ON };
+            let at = item.x + item.width + (0.21 - menu.h) / 2.0;
+            overlay.quad(sheet, [at, item.y, menu.h, menu.h], box_, [1.0, 1.0, 1.0, 1.0]);
+        }
+        Widget::Slider { .. } => {
+            // the track is the slot the frame was measured for, and the
+            // needle rides it
+            let (track, tall) = (menu.h, menu.h * 0.6);
+            let y = item.y + (menu.h - tall) / 2.0;
+            overlay.quad(sheet, [x, y, track, tall], BAR_EMPTY, [1.0, 1.0, 1.0, 1.0]);
+            let filled = track * item.value.clamp(0.0, 1.0) as f32;
+            if filled > 0.0 {
+                let mut full = BAR_FULL;
+                full[2] *= item.value.clamp(0.0, 1.0) as f32;
+                overlay.quad(sheet, [x, y, filled, tall], full, [1.0, 1.0, 1.0, 1.0]);
+            }
+            let needle = menu.h * 0.35;
+            overlay.quad(
+                sheet,
+                [x + filled - needle / 2.0, item.y, needle, menu.h],
+                NEEDLE,
+                [1.0, 1.0, 1.0, 1.0],
+            );
+        }
+        Widget::Combo(strings) => {
+            if let Some(text) = strings.get(item.value.max(0.0) as usize) {
+                overlay.text(&gui.font, text, x, item.y, menu.w, menu.h, colour);
+            }
+        }
+        Widget::TextBox(text) => {
+            overlay.text(&gui.font, text, x, item.y, menu.w, menu.h, colour);
+        }
+    }
+}
+
 /// Queue whatever menu the scripts have made current.
 ///
 /// The title is grey 0.85 (0x412090 sets it with 0x3f59999a three times over)
@@ -2011,22 +2135,18 @@ const MENU_CORNER: f32 = 0.04;
 /// heights tall. Selected is orange and the rest are blue without it.
 fn draw_menu(
     overlay: &mut goodomen::render::overlay::Overlay,
-    font: &goodomen::render::overlay::Font,
-    frame: Option<(
-        &goodomen::render::scene::GpuTexture,
-        &goodomen::render::scene::GpuTexture,
-    )>,
+    gui: &Gui,
     boot: &goodomen::game::api::Boot,
 ) {
     use goodomen::game::menu::TITLE_SCALE;
     let Some(menu) = boot.menu.and_then(|i| boot.menus.get(i)) else { return };
     // the frame first, because it is behind everything
-    if let (Some((corners, edges)), Some(box_)) = (frame, menu.frame()) {
-        overlay.frame(corners, edges, box_, MENU_CORNER, 1.0);
+    if let Some(box_) = menu.frame() {
+        overlay.frame(&gui.corners, &gui.edges, box_, MENU_CORNER, 1.0);
     }
     if let Some(title) = &menu.title {
         overlay.text(
-            font,
+            &gui.font,
             title,
             menu.title_at[0],
             menu.title_at[1],
@@ -2036,7 +2156,9 @@ fn draw_menu(
         );
     }
     for (i, item) in menu.items.iter().enumerate() {
-        overlay.text(font, &item.text, item.x, item.y, menu.w, menu.h, menu.colour(i));
+        let colour = menu.colour(i);
+        overlay.text(&gui.font, &item.text, item.x, item.y, menu.w, menu.h, colour);
+        draw_widget(overlay, gui, menu, item, colour);
     }
 }
 
@@ -2075,22 +2197,31 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         .collect();
     let mut pressed = 0usize;
     let mut overlay = goodomen::render::overlay::Overlay::default();
-    let mut picture = |install: &mut Install, name: &str| {
-        let bytes = install.read(name).ok()?;
-        let tex = goodomen::formats::tex::Texture::parse(&bytes).ok()?;
-        // SAFETY: the context Video::open made is current on this thread.
-        unsafe { goodomen::render::scene::upload(&video.gl, &tex) }
+    let gui = {
+        let mut picture = |install: &mut Install, name: &str| {
+            let bytes = install.read(name).ok()?;
+            let tex = goodomen::formats::tex::Texture::parse(&bytes).ok()?;
+            // SAFETY: the context Video::open made is current on this thread.
+            unsafe { goodomen::render::scene::upload(&video.gl, &tex) }
+        };
+        // 0x4117a0 loads exactly these three by these names, and the font
+        // goes with them
+        let font = picture(&mut install, "font.tex").and_then(|texture| {
+            let lua = install.read("font.lua").ok()?;
+            let source: String = lua.iter().map(|&b| b as char).collect();
+            let advance = goodomen::render::overlay::Font::advances(&source).ok()?;
+            Some(goodomen::render::overlay::Font { texture, advance })
+        });
+        let corners = picture(&mut install, "textbox2.tex");
+        let edges = picture(&mut install, "textbox1.tex");
+        let options = picture(&mut install, "optionbox1.tex");
+        match (font, corners, edges, options) {
+            (Some(font), Some(corners), Some(edges), Some(options)) => {
+                Some(Gui { font, corners, edges, options })
+            }
+            _ => None,
+        }
     };
-    let font = picture(&mut install, "font.tex").and_then(|texture| {
-        let lua = install.read("font.lua").ok()?;
-        let source: String = lua.iter().map(|&b| b as char).collect();
-        let advance = goodomen::render::overlay::Font::advances(&source).ok()?;
-        Some(goodomen::render::overlay::Font { texture, advance })
-    });
-    // the frame the menus, the dialogue panel and the title screen's caption
-    // all sit in. 0x4117a0 loads exactly these two, by these names.
-    let corners = picture(&mut install, "textbox2.tex");
-    let edges = picture(&mut install, "textbox1.tex");
 
     let goodomen::game::level::Started {
         scripts: level_scripts,
@@ -2099,6 +2230,10 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         checkpoints,
         collision,
     } = started_level;
+    {
+        let (w, h) = video.window.drawable_size();
+        goodomen::game::api::set_video_size(&level_scripts.lua, w, h);
+    }
 
     // the same animation keys and spans a headless run loads. Without them an
     // enemy plays `ANIM_SHOOT` and nothing comes out of it, and a taunt whose
@@ -2993,18 +3128,13 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 }
                 let _ = goodomen::game::api::set_scheme(&level_scripts.lua);
                 let _ = goodomen::game::api::menu_update(&level_scripts.lua);
-                if let Some(font) = &font {
+                if let Some(gui) = &gui {
                     overlay.clear();
                     if goodomen::game::api::showing_menu(&level_scripts.lua) {
                         if let Some(boot) =
                             level_scripts.lua.app_data_ref::<goodomen::game::api::Boot>()
                         {
-                            draw_menu(
-                                &mut overlay,
-                                font,
-                                corners.as_ref().zip(edges.as_ref()),
-                                &boot,
-                            );
+                            draw_menu(&mut overlay, gui, &boot);
                         }
                     }
                     overlay.draw(&video.gl)?;

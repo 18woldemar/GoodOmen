@@ -335,6 +335,9 @@ pub struct Boot {
     /// Where `mdkShowMouse` last put the cursor, and whether it asked for
     /// one at all.
     pub mouse: Option<[f32; 2]>,
+    /// The window's size, which the video options read back and show. One
+    /// resolution is offered because one is what the engine has.
+    pub video: [i64; 2],
     /// `mdkPauseGame`, which the pause menu turns on as it opens and its
     /// Continue turns off. A paused tick advances its own clock and does
     /// nothing else — the run still ends when `--for` says, and the world
@@ -762,6 +765,9 @@ pub const MENU_CANCEL2: i64 = 85;
 /// rather than here, so each half does what the other does not.
 pub fn command(lua: &Lua, id: i64) -> mlua::Result<()> {
     let up = showing_menu(lua);
+    // `options.lua` hangs `Inc` and `Dec` on every item it puts a widget on,
+    // and that is how a changed option reaches the thing it changes
+    let mut nudged = None;
     let cancel = {
         let mut boot = boot_mut(lua)?;
         let current = boot.menu.filter(|_| up);
@@ -772,6 +778,16 @@ pub fn command(lua: &Lua, id: i64) -> mlua::Result<()> {
             }
             (MENU_DOWN, Some(m)) => {
                 m.step(1);
+                None
+            }
+            (MENU_LEFT, Some(m)) => {
+                m.nudge(-1.0);
+                nudged = m.items.get(m.selected).map(|i| (i.handle, "Dec"));
+                None
+            }
+            (MENU_RIGHT, Some(m)) => {
+                m.nudge(1.0);
+                nudged = m.items.get(m.selected).map(|i| (i.handle, "Inc"));
                 None
             }
             (MENU_CANCEL | MENU_CANCEL2, Some(_)) => current,
@@ -785,10 +801,24 @@ pub fn command(lua: &Lua, id: i64) -> mlua::Result<()> {
             f.call::<()>(())?;
         }
     }
+    if let Some((handle, which)) = nudged {
+        let item: mlua::Table =
+            lua.named_registry_value::<mlua::Table>("menuitems")?.get(handle + 1)?;
+        if let Ok(f) = item.get::<mlua::Function>(which) {
+            f.call::<()>(item)?;
+        }
+    }
     if let Ok(f) = lua.globals().get::<mlua::Function>("OnLuaCommand") {
         f.call::<()>(id)?;
     }
     Ok(())
+}
+
+/// What size the window came out, so the video options can show it.
+pub fn set_video_size(lua: &Lua, width: u32, height: u32) {
+    if let Some(mut boot) = lua.app_data_mut::<Boot>() {
+        boot.video = [width as i64, height as i64];
+    }
 }
 
 /// Whether a menu is up — `gamecontrol.showmenu`, which the scripts raise
@@ -4086,6 +4116,177 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             })?,
         )?;
     }
+
+    // --- what the video and sound options ask ----------------------------
+    //
+    // `options.lua` builds its combos by counting: `n =
+    // chVideoGetDriverTotal()` and then a string per driver. The recorder
+    // answers a fresh table for anything with `Get` in its name, and a table
+    // is not a number -- `while (i < n)` threw. These are the ones it counts
+    // with, and they answer for the engine that is actually running.
+    for (name, value) in [
+        // one driver and one resolution, because that is what there is
+        ("chVideoGetDriverTotal", 1.0),
+        ("chVideoGetDriverIndex", 0.0),
+        ("chVideoGetResTotal", 1.0),
+        ("chVideoGetResWidthHeightAsId", 0.0),
+        // "16" and "32" are the two the script offers, and this is 32
+        ("chVideoGetBppAsId", 1.0),
+        ("chVideoGetFullScreen", 0.0),
+        // **0x454760**: `glGetIntegerv(GL_MAX_TEXTURE_SIZE)`, then 4 above
+        // 1023, 3 at exactly 512 and 2 below. Nothing this engine runs on
+        // is under 1024.
+        ("chVideoGetTextureMax", 4.0),
+        // and the quality itself, 0x4541e0's float at 0x4b5400. The slider
+        // is `(q - 0.4) / (0.2 * (max - 1))`, so 1.0 is the top stop.
+        ("chVideoGetTexQuality", 1.0),
+        // none, bilinear, trilinear -- and the engine samples trilinear
+        ("chVideoGetFilterMode", 2.0),
+        ("chGetNumJoysticks", 0.0),
+        ("omSceneGetShadows", 0.0),
+    ] {
+        globals.set(
+            name,
+            lua.create_function(move |_, _: Variadic<Value>| Ok(value))?,
+        )?;
+    }
+    globals.set(
+        "chVideoGetDriverName",
+        lua.create_function(|_, _: Variadic<Value>| Ok("OpenGL".to_string()))?,
+    )?;
+    for (name, axis) in [("chGetVideoWidth", 0), ("chVideoGetResWidth", 0),
+                         ("chGetVideoHeight", 1), ("chVideoGetResHeight", 1)] {
+        globals.set(
+            name,
+            lua.create_function(move |lua, _: Variadic<Value>| {
+                Ok(boot_ref(lua)?.video[axis])
+            })?,
+        )?;
+    }
+
+    // --- the option widgets ---------------------------------------------
+    //
+    // `options.lua` hangs one of four on an item and then reads and writes
+    // its value: `mdkMenuItemAddComboBox(item)` then a string at a time,
+    // `mdkMenuItemAddSlider(item, 1/(n-1), 1)`, `mdkMenuItemAddCheckBox(item,
+    // on)`. Each adds its own width to the item's, which is what 0x413650
+    // measures the frame from.
+    for name in [
+        "mdkMenuItemAddCheckBox",
+        "mdkMenuItemAddSlider",
+        "mdkMenuItemAddComboBox",
+        "mdkMenuItemAddTextBox",
+    ] {
+        globals.set(
+            name,
+            lua.create_function(move |lua, args: Variadic<Value>| {
+                let Some(handle) = args.first().and_then(item_handle) else { return Ok(()) };
+                let widget = match name {
+                    "mdkMenuItemAddCheckBox" => crate::game::menu::Widget::CheckBox,
+                    "mdkMenuItemAddSlider" => crate::game::menu::Widget::Slider {
+                        step: args.get(1).map(number).unwrap_or(0.1),
+                    },
+                    "mdkMenuItemAddComboBox" => crate::game::menu::Widget::Combo(Vec::new()),
+                    _ => crate::game::menu::Widget::TextBox(match args.get(1) {
+                        Some(Value::String(s)) => code_page(&s.as_bytes()),
+                        _ => Vec::new(),
+                    }),
+                };
+                // a checkbox arrives with its value already in hand
+                let value = if name == "mdkMenuItemAddCheckBox" {
+                    args.get(1).map(number).unwrap_or(0.0)
+                } else {
+                    0.0
+                };
+                let mut boot = boot_mut(lua)?;
+                let advance = std::mem::take(&mut boot.advance);
+                for m in boot.menus.iter_mut() {
+                    let extra = m.widget_width(&widget, |t| width_of(&advance, t));
+                    if let Some(i) = m.items.iter_mut().find(|i| i.handle == handle) {
+                        i.widget = widget.clone();
+                        i.extra = extra;
+                        i.value = value;
+                    }
+                }
+                boot.advance = advance;
+                Ok(())
+            })?,
+        )?;
+    }
+
+    for (name, by_id) in
+        [("mdkMenuItemAddComboString", false), ("mdkMenuItemAddComboStringW", true)]
+    {
+        globals.set(
+            name,
+            lua.create_function(move |lua, args: Variadic<Value>| {
+                let Some(handle) = args.first().and_then(item_handle) else { return Ok(()) };
+                let text = match args.get(1) {
+                    Some(v) if by_id => {
+                        let id = number(v) as u32;
+                        boot_ref(lua)?.strings.text(id).map(|t| t.to_vec()).unwrap_or_default()
+                    }
+                    Some(Value::String(s)) => code_page(&s.as_bytes()),
+                    Some(v) => number(v).to_string().into_bytes(),
+                    None => Vec::new(),
+                };
+                let mut boot = boot_mut(lua)?;
+                let advance = std::mem::take(&mut boot.advance);
+                for m in boot.menus.iter_mut() {
+                    let mut grown = None;
+                    if let Some(i) = m.items.iter_mut().find(|i| i.handle == handle) {
+                        if let crate::game::menu::Widget::Combo(strings) = &mut i.widget {
+                            strings.push(text.clone());
+                            grown = Some((i.handle, i.widget.clone()));
+                        }
+                    }
+                    if let Some((handle, widget)) = grown {
+                        let extra = m.widget_width(&widget, |t| width_of(&advance, t));
+                        if let Some(i) = m.items.iter_mut().find(|i| i.handle == handle) {
+                            i.extra = extra;
+                        }
+                    }
+                }
+                boot.advance = advance;
+                Ok(())
+            })?,
+        )?;
+    }
+
+    globals.set(
+        "mdkMenuItemSetWidgitValue",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(handle) = args.first().and_then(item_handle) else { return Ok(()) };
+            let value = args.get(1).map(number).unwrap_or(0.0);
+            let mut boot = boot_mut(lua)?;
+            for m in boot.menus.iter_mut() {
+                if let Some(i) = m.items.iter_mut().find(|i| i.handle == handle) {
+                    i.value = value;
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    globals.set(
+        "mdkMenuItemGetWidgitValue",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(handle) = args.first().and_then(item_handle) else {
+                return Ok(Value::Nil);
+            };
+            let boot = boot_ref(lua)?;
+            let value = boot
+                .menus
+                .iter()
+                .flat_map(|m| m.items.iter())
+                .find(|i| i.handle == handle)
+                .map(|i| i.value);
+            Ok(match value {
+                Some(v) => Value::Number(v),
+                None => Value::Nil,
+            })
+        })?,
+    )?;
 
     globals.set(
         "mdkMenuSetHighlighted",

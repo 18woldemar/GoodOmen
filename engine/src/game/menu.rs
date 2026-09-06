@@ -35,6 +35,28 @@ pub const TITLE_ABOVE: f32 = 1.8;
 /// not on its own x — the 0.5 at 0x48f2fc.
 const MIDDLE: f32 = 0.5;
 
+/// What an item carries to the right of its own words.
+///
+/// The kind is `(item + 0x3c >> 3) & 0xf`, and 0x413650 reads it to size the
+/// menu's frame: each widget adds its own width to the item's, and all but
+/// the checkbox add the float at 0x48f6c8 -- **0.04** -- on top.
+#[derive(Default, Clone)]
+pub enum Widget {
+    #[default]
+    None,
+    /// Kind 1. A fixed **0.21** wide, the float at 0x48f6cc, and the only
+    /// one whose width does not depend on what is in it.
+    CheckBox,
+    /// Kind 2, and one menu height wide. `mdkMenuItemAddSlider(item, step,
+    /// 1)` -- `options.lua` passes `1/(n-1)` for a slider of n stops.
+    Slider { step: f64 },
+    /// Kind 3, as wide as its widest string. Filled by
+    /// `mdkMenuItemAddComboString` one at a time.
+    Combo(Vec<Vec<u8>>),
+    /// Kind 4, as wide as the one string it holds.
+    TextBox(Vec<u8>),
+}
+
 pub struct Item {
     /// Code-page bytes, the way [`crate::formats::strfile`] hands them over
     /// and the way the font is indexed.
@@ -51,6 +73,14 @@ pub struct Item {
     /// item again — the scripts hang `Select` on it, and something has to
     /// call that. The model here does not care what it means.
     pub handle: usize,
+    pub widget: Widget,
+    /// How much room [`Menu::widget_width`] said the widget wants, kept
+    /// beside the label's own width so the frame can be measured without a
+    /// font.
+    pub extra: f32,
+    /// `mdkMenuItemGetWidgitValue` and its setter: a checkbox's 0 or 1, a
+    /// slider's 0..1, a combo's index.
+    pub value: f64,
 }
 
 pub struct Menu {
@@ -114,7 +144,61 @@ impl Menu {
         };
         let y = self.y + (self.gap + self.h) * self.items.len() as f32;
         let width = width(&text) * self.w;
-        self.items.push(Item { text, x: self.x + offset, y, width, enabled: true, handle });
+        self.items.push(Item {
+            text,
+            x: self.x + offset,
+            y,
+            width,
+            enabled: true,
+            handle,
+            widget: Widget::None,
+            extra: 0.0,
+            value: 0.0,
+        });
+    }
+
+    /// How much room an item's widget wants beside its words — the switch
+    /// in 0x413650, with the **0.04** at 0x48f6c8 and the **0.21** at
+    /// 0x48f6cc.
+    pub fn widget_width(&self, widget: &Widget, width: impl Fn(&[u8]) -> f32) -> f32 {
+        const PAD: f32 = 0.04;
+        match widget {
+            Widget::None => 0.0,
+            Widget::CheckBox => 0.21,
+            Widget::Slider { .. } => self.h + PAD,
+            Widget::Combo(strings) => {
+                strings.iter().map(|s| width(s) * self.w).fold(0.0, f32::max) + PAD
+            }
+            Widget::TextBox(text) => width(text) * self.w + PAD,
+        }
+    }
+
+    /// Left and right on a menu — the engine's own half, the way up and down
+    /// are: nothing in Lua handles `COM_MENULEFT` outside the title screen.
+    ///
+    /// **Not read out of the binary.** A checkbox toggles, a slider steps by
+    /// its own step and stops at the ends, a combo walks its strings and
+    /// stops at the ends; the shapes come from what `options.lua` builds and
+    /// from `mdkMenuItemSetWidgitValue`'s own arguments -- an index for a
+    /// combo, 0 or 1 for a checkbox, a fraction for a slider.
+    pub fn nudge(&mut self, by: f64) {
+        let (h, w) = (self.h, self.w);
+        let _ = (h, w);
+        let Some(item) = self.items.get_mut(self.selected) else { return };
+        if !item.enabled {
+            return;
+        }
+        match &item.widget {
+            Widget::None | Widget::TextBox(_) => {}
+            Widget::CheckBox => item.value = if item.value == 0.0 { 1.0 } else { 0.0 },
+            Widget::Slider { step } => {
+                item.value = (item.value + by * step.abs().max(1e-6)).clamp(0.0, 1.0)
+            }
+            Widget::Combo(strings) => {
+                let last = strings.len().saturating_sub(1) as f64;
+                item.value = (item.value + by).clamp(0.0, last);
+            }
+        }
     }
 
     /// The box the frame is drawn around — **0x413650**, which walks the
@@ -135,7 +219,7 @@ impl Menu {
             seen = true;
         };
         for item in &self.items {
-            take(item.x, item.y, item.width, self.h);
+            take(item.x, item.y, item.width + item.extra, self.h);
         }
         if let Some(t) = &self.title {
             // the title is drawn 1.2 cells tall and wide, so its box is too
