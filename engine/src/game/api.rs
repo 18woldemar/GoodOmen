@@ -5623,7 +5623,7 @@ pub fn tick_touching(
                 .collect()
         };
         let (mut out, mut advanced, mut looped) = (Vec::new(), Vec::new(), Vec::new());
-        let (mut stopped, mut running) = (Vec::new(), Vec::new());
+        let (mut stopped, mut running, mut fired) = (Vec::new(), Vec::new(), Vec::new());
         for (name, anim, model) in live {
             let was = boot.since.get(&name).copied().unwrap_or(0.0);
             let speed = boot.speed.get(&name).copied().unwrap_or(1.0);
@@ -5658,6 +5658,11 @@ pub fn tick_touching(
             }
             if wrapped {
                 looped.push((name.clone(), anim));
+                // **and the scripts hear it.** 0x4611f6 fires event 5,
+                // `OnAnimLoop`, through 0x42be80 on the frame the clock runs
+                // off either end -- one-shot or not. `level1.lua` uses it to
+                // follow `ANIM_SPAWN` with `ANIM_SPIN`.
+                fired.push((name.clone(), anim));
                 // **and it only comes round if the record says so.** A
                 // one-shot clamps at its end and stays there, which is both
                 // what 0x4611b0 does and what leaves the last frame on
@@ -5681,6 +5686,14 @@ pub fn tick_touching(
         }
         for (name, now) in advanced {
             boot.since.insert(name, now);
+        }
+        drop(boot);
+        for (name, anim) in fired {
+            if let Ok(gob) = scripts.lua.globals().get::<mlua::Table>(name.as_str()) {
+                if let Ok(handler) = gob.get::<mlua::Function>("OnAnimLoop") {
+                    let _ = handler.call::<Value>((gob, anim));
+                }
+            }
         }
         out
     };

@@ -126,7 +126,9 @@ CORPUS = [
      # `l1_r8gen2_spawn` join the list, and the cause is the random stream --
      # an animation that stops instead of looping changes when the AI next
      # rolls, and level 1's generator doganboys walk somewhere else.
-     ["sweep.py", "extracted", "--run", "$MDK2_GOG", "--expect-lost", "24"],
+     # 24 -> 25 with `OnAnimLoop` fired: the scripts get a hook they never
+     # had, so what they do next changes and the random stream with it.
+     ["sweep.py", "extracted", "--run", "$MDK2_GOG", "--expect-lost", "25"],
      None),
     ("room graphs resolve",
      ["rooms.py", "extracted", "--check", "--expect", "823"],
@@ -226,7 +228,9 @@ ENGINE = [
       # 19318 -> 19330 with the goto core's aim frame: a walker given a new
       # heading spends one frame on whatever it was already doing, so a task
       # list runs one step further before the frame is over.
-      "--expect-events", "19330", "--expect-survived", "19330",
+      # 19330 -> 19322 with `OnAnimLoop`: `level1.lua` follows `ANIM_SPAWN`
+      # with `ANIM_SPIN` on the platform, so the platform stops asking.
+      "--expect-events", "19322", "--expect-survived", "19322",
       "--expect-shot-at", "0", "--expect-killed", "0",
       "--expect-touched", "1"], None),
     ("a run reaches a spawner and the enemies arrive with hitpoints",
@@ -489,12 +493,12 @@ ENGINE = [
     ("the sniper scope is a play mode, and standing still in it hurts",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
-      # Forty-five seconds rather than thirty, because that is long enough
-      # for the other half of the loop: he is killed and starts over at the
-      # checkpoint, whole, and finishes on 90.
-      "--play", "1", "5", "--window", "--for", "45", "--sniper", "8",
-      "--expect-events", "19313", "--expect-shots", "24",
-      "--expect-health", "90", "--expect-deaths", "1"], None),
+      # Sixty seconds rather than thirty, because that is long enough for the
+      # other half of the loop: he is killed and starts over at the
+      # checkpoint, whole, and is back down to 65 by the end.
+      "--play", "1", "5", "--window", "--for", "60", "--sniper", "8",
+      "--expect-events", "25627", "--expect-shots", "28",
+      "--expect-health", "65", "--expect-deaths", "1"], None),
     ("walking drives the player's own animation, and reaches the scripts",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
