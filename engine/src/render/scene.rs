@@ -85,6 +85,7 @@ uniform float opacity;
 uniform vec4 fog;          // start, end, enabled, unused
 uniform vec3 fog_colour;
 uniform int light_count;
+uniform bool unlit;
 uniform vec3 light_position[16];
 uniform vec3 light_colour[16];
 uniform float light_radius[16];
@@ -108,7 +109,14 @@ void main() {
     // The base is **0.2** and that is not a choice either: `glLightModelfv`
     // is resolved by name at 0x45a81b and **never called**, so the ambient
     // stays GL's own default of (0.2, 0.2, 0.2, 1).
-    vec3 lit = vec3(0.2);
+    // **A scene with no lights at all is drawn as it is.** The title
+    // screen's graph places six objects and not one `OBJ_STATICLIGHT`, and
+    // the original shows it bright -- which is what fixed-function GL does
+    // with `GL_LIGHTING` off: the texture times a white vertex colour. Every
+    // playable level has lights (112 in level 1, 197 in level 4), so this
+    // only ever fires on the front end. Hypothesis, not a reading: the call
+    // that would switch lighting off has not been found.
+    vec3 lit = unlit ? vec3(1.0) : vec3(0.2);
     for (int i = 0; i < light_count; i++) {
         vec3 to = light_position[i] - vary_world;
         float d = length(to);
@@ -749,6 +757,12 @@ impl Scene {
         gl.uniform_1_i32(
             gl.get_uniform_location(shader, "light_count").as_ref(),
             near.len() as i32,
+        );
+        // the *scene's* own count, not this frame's -- a room out of reach
+        // of all sixteen nearest lights is dark, and must stay dark
+        gl.uniform_1_i32(
+            gl.get_uniform_location(shader, "unlit").as_ref(),
+            self.lights.is_empty() as i32,
         );
         if !near.is_empty() {
             gl.uniform_3_f32_slice(

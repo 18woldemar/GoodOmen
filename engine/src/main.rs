@@ -41,6 +41,23 @@ fn main() {
         }
         return;
     }
+    // `--title` opens level 0, which is the game's own front door.
+    if args.iter().any(|a| a == "--title") {
+        let root = args
+            .iter()
+            .find(|a| !a.starts_with("--") && a.parse::<u32>().is_err())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(Install::beside_the_binary);
+        match title(&root, args.iter().any(|a| a == "--window")) {
+            Ok(line) => println!("{line}"),
+            Err(e) if e.starts_with(goodomen::render::NO_VIDEO) => println!("skip: {e}"),
+            Err(e) => {
+                eprintln!("goodomen: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     // `--menu` works the menu the scripts put up. No GL.
     if args.iter().any(|a| a == "--menu") {
         let root = args
@@ -1747,6 +1764,222 @@ const PLAYMODE_SNIPER: i64 = 4;
 const WIDEST: f64 = 60.0;
 /// `OBJ_SNIPERBULLET`, which is what the scope fires.
 const SNIPERBULLET: f64 = 406.0;
+
+/// `--title` opens the game's own front door.
+///
+/// **Level 0 is a level like any other and unlike any other**: `level0.lua`
+/// declares a scene graph (`startscreen`) and no checkpoints, so nothing
+/// spawns a player and `--play` refuses it. What it does instead is bind
+/// `comfuncs.title` to `Level.Prev`, `Level.Next` and `Level.Select`, put
+/// five button gobs in `Level.buttongobs`, and animate the one under the
+/// cursor.
+///
+/// The camera is the piece the binary does not hand over: nothing registers
+/// one and no script places one. It is taken from the art instead --
+/// `Startscreen.mod` is a flat quad **8.192 by 6.144**, which is 4:3 to the
+/// last digit, so the camera stands off its own plane by exactly far enough
+/// to fill the view. That is checkable against a screenshot of the original
+/// and it follows the field of view if that ever changes.
+fn title(root: &std::path::Path, show: bool) -> Result<String, String> {
+    use goodomen::game::{api, script::Scripts};
+    use goodomen::render::{scene::Scene, Offscreen};
+    use sdl2::event::Event;
+    use sdl2::keyboard::{Keycode, Scancode};
+
+    let mut install = Install::open(root).map_err(|e| e.to_string())?;
+    let sources = sources_of(&mut install);
+    let scripts = Scripts::new().map_err(|e| e.to_string())?;
+    api::install(&scripts.lua, sources.clone()).map_err(|e| e.to_string())?;
+    if let (Ok(font), Ok(strings)) = (install.read("font.lua"), install.read("mdk2.str")) {
+        let source: String = font.iter().map(|&b| b as char).collect();
+        api::load_text(&scripts.lua, &source, &strings);
+    }
+    let mdk2 = sources.get("mdk2.lua").ok_or("no mdk2.lua")?;
+    scripts.run("mdk2.lua", mdk2).map_err(|e| e.to_string())?;
+    if let Some(src) = sources.get("menu.lua") {
+        scripts.run("menu.lua", src).map_err(|e| format!("menu.lua: {e}"))?;
+    }
+    api::level(&scripts, 0, 0, "sectionA").map_err(|e| e.to_string())?;
+    api::set_scheme(&scripts.lua).map_err(|e| e.to_string())?;
+
+    // the graph the level named for itself
+    let file: String = scripts
+        .lua
+        .globals()
+        .get::<mlua::Table>("Level")
+        .and_then(|t| t.get("file"))
+        .map_err(|e| format!("level 0 names no scene graph: {e}"))?;
+    let graph = format!("{file}.lua");
+
+    let mut video = Video::open("goodomen", 1024, 768, show)?;
+    let version = video.version();
+    let mut scene = Scene::default();
+    // SAFETY: the context Video::open made is current on this thread.
+    let loaded = unsafe {
+        goodomen::game::level::load(&video.gl, &mut install, &mut scene, &graph)
+            .map_err(|e| e.to_string())?
+    };
+
+    // **the camera stands off the flat face.** `Startscreen.mod` is a flat
+    // quad **8.192 by 6.144** -- 4:3 to the last digit -- lying in the world's
+    // x-z plane: the five buttons the graph puts in front of it are all at
+    // y = -0.807916 and spread in x and z, which is what says the panel's
+    // normal is y and which side is the front.
+    //
+    // So the camera stands on -y, far enough back that the panel's own half
+    // height fills half the view, and z is up. Nothing in the binary places
+    // it; this is measured off the art, and a screenshot of the original is
+    // what it is checked against.
+    const PANEL_HALF_HEIGHT: f32 = 3.072;
+    const PANEL_HALF_WIDTH: f32 = 4.096;
+    let (w, h) = video.window.drawable_size();
+    let aspect = w as f32 / h.max(1) as f32;
+    let half = (FOV / 2.0).tan();
+    let back = std::env::args()
+        .position(|a| a == "--back")
+        .and_then(|i| std::env::args().nth(i + 1))
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or_else(|| (PANEL_HALF_HEIGHT / half).max(PANEL_HALF_WIDTH / (half * aspect)));
+    let centre = [0.0, 0.0, 0.0];
+    let eye = [0.0, -back, 0.0];
+    let view = Mat4::look_at(eye, centre, [0.0, 0.0, 1.0]);
+    let projection = Mat4::perspective(FOV, aspect, 0.05, back * 4.0);
+
+    let summary = format!(
+        "OpenGL {version}: {graph}, {} objects, {} placed, {} triangles, \
+         camera {back:.2} back",
+        loaded.objects, loaded.placed, loaded.triangles
+    );
+
+    let mut overlay = goodomen::render::overlay::Overlay::default();
+    let mut picture = |install: &mut Install, name: &str| {
+        let bytes = install.read(name).ok()?;
+        let tex = goodomen::formats::tex::Texture::parse(&bytes).ok()?;
+        // SAFETY: the context is current on this thread.
+        unsafe { goodomen::render::scene::upload(&video.gl, &tex) }
+    };
+    let font = picture(&mut install, "font.tex").and_then(|texture| {
+        let lua = install.read("font.lua").ok()?;
+        let source: String = lua.iter().map(|&b| b as char).collect();
+        let advance = goodomen::render::overlay::Font::advances(&source).ok()?;
+        Some(goodomen::render::overlay::Font { texture, advance })
+    });
+    let corners = picture(&mut install, "textbox2.tex");
+    let edges = picture(&mut install, "textbox1.tex");
+
+    let quit_after: Option<f64> = std::env::args()
+        .position(|a| a == "--for")
+        .and_then(|i| std::env::args().nth(i + 1))
+        .and_then(|v| v.parse().ok());
+    let to_press: Vec<i64> = std::env::args()
+        .position(|a| a == "--press")
+        .and_then(|i| std::env::args().nth(i + 1))
+        .iter()
+        .flat_map(|v| v.split(','))
+        .filter_map(|v| v.trim().parse::<i64>().ok())
+        .collect();
+
+    // SAFETY: the context is current on this thread.
+    unsafe {
+        let target = (!show).then(|| Offscreen::new(&video.gl, 1024, 768)).transpose()?;
+        let started = std::time::Instant::now();
+        let mut pressed = 0usize;
+        loop {
+            let over = quit_after.is_some_and(|n| started.elapsed().as_secs_f64() >= n);
+            let mut leaving = over;
+            for event in video.events.poll_iter() {
+                if let Event::KeyDown { scancode: Some(code), repeat: false, .. } = event {
+                    if let Some(dik) = goodomen::game::keys::dik(code) {
+                        let bound: Vec<i64> = scripts
+                            .lua
+                            .app_data_ref::<api::Boot>()
+                            .map(|b| {
+                                b.input
+                                    .bindings
+                                    .iter()
+                                    .filter(|(_, id)| *id == dik)
+                                    .map(|(c, _)| *c as i64)
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        for id in bound {
+                            if let Err(e) = api::command(&scripts.lua, id) {
+                                eprintln!("goodomen: command {id}: {e}");
+                            }
+                        }
+                    }
+                }
+                match event {
+                    Event::Quit { .. } => leaving = true,
+                    Event::KeyDown { keycode: Some(Keycode::Escape), keymod, .. }
+                        if keymod.intersects(
+                            sdl2::keyboard::Mod::LSHIFTMOD | sdl2::keyboard::Mod::RSHIFTMOD,
+                        ) =>
+                    {
+                        leaving = true
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(id) = to_press.get(pressed).copied() {
+                pressed += 1;
+                if let Err(e) = api::command(&scripts.lua, id) {
+                    eprintln!("goodomen: --press {id}: {e}");
+                }
+            }
+            let _ = api::set_scheme(&scripts.lua);
+            let _ = api::menu_update(&scripts.lua);
+
+            video.gl.viewport(0, 0, w as i32, h as i32);
+            video.gl.clear_color(0.0, 0.0, 0.0, 1.0);
+            video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+            scene.draw(
+                &video.gl,
+                &projection.times(&view),
+                scene.fog,
+                None,
+                started.elapsed().as_secs_f64(),
+                eye,
+            )?;
+            if let Some(font) = &font {
+                overlay.clear();
+                if api::showing_menu(&scripts.lua) {
+                    if let Some(boot) = scripts.lua.app_data_ref::<api::Boot>() {
+                        draw_menu(&mut overlay, font, corners.as_ref().zip(edges.as_ref()), &boot);
+                    }
+                }
+                overlay.draw(&video.gl)?;
+            }
+            if leaving {
+                if let Some(i) = std::env::args().position(|a| a == "--save") {
+                    if let Some(path) = std::env::args().nth(i + 1) {
+                        let (w, h) = (w as i32, h as i32);
+                        let mut pixels = vec![0u8; (w * h * 4) as usize];
+                        video.gl.read_pixels(
+                            0, 0, w, h,
+                            glow::RGBA,
+                            glow::UNSIGNED_BYTE,
+                            glow::PixelPackData::Slice(Some(&mut pixels)),
+                        );
+                        let _ = goodomen::render::write_ppm(&path, &pixels, w, h);
+                    }
+                }
+                break;
+            }
+            if show {
+                video.window.gl_swap_window();
+            }
+        }
+        if let Some(t) = target {
+            t.delete(&video.gl);
+        }
+        scene.delete(&video.gl);
+    }
+    Ok(summary)
+}
+
+/// The vertical field of view the whole game is drawn at, in radians.
+const FOV: f32 = 1.1;
 
 /// The corner size 0x412090 passes to the frame, and the alpha with it.
 const MENU_CORNER: f32 = 0.04;
