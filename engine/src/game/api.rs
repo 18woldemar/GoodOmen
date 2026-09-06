@@ -459,7 +459,7 @@ pub struct Boot {
     /// Objects whose current animation has run to its end and clamped there.
     /// `omAnimIsPlaying` answers 0 for them, which is what `WaitForAnim` in
     /// `script.lua` waits for, and playing anything clears it.
-    pub done: BTreeSet<String>,
+    pub done: BTreeMap<String, f64>,
     /// How fast each object plays its animation, from `omAnimSetSpeed`. One
     /// per object rather than per animation, because [`Boot::playing`] holds
     /// one animation. **Negative runs it backwards** — `elevators.lua` shuts
@@ -1462,6 +1462,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 return Ok(0.0);
             }
             boot.playing.insert(who.clone(), id);
+            boot.done.remove(&who);
             boot.since.insert(who, 0.0);
             Ok(1.0)
         })?,
@@ -1686,6 +1687,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                     let far = dist >= crate::game::world::shoot_within(kind);
                     boot.playing.insert(who.clone(), if far { ANIM_SHOOT } else { ANIM_SWIPE });
                     boot.since.insert(who.clone(), 0.0);
+                    boot.done.remove(&who);
                     boot.burst.insert(who.clone(), left - 1.0);
                     boot.cooldown.insert(who, if far { AFTER_SHOT } else { AFTER_SWIPE });
                     let _ = SQUARE_ON;
@@ -1974,6 +1976,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                             let coin = boot.random.next() <= 0.5;
                             boot.playing.insert(who.clone(), SCARED + coin as i64 as f64);
                             boot.since.insert(who.clone(), 0.0);
+                            boot.done.remove(&who);
                             boot.state.insert(who.clone(), 0x10);
                             boot.cooldown.insert(who, LOOKING);
                         }
@@ -2018,6 +2021,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                         let coin = boot.random.next() <= 0.5;
                         boot.playing.insert(who.clone(), SCARED + coin as i64 as f64);
                         boot.since.insert(who.clone(), 0.0);
+                        boot.done.remove(&who);
                         state = 0x10;
                         boot.cooldown.insert(who.clone(), LOOKING);
                     }
@@ -2391,6 +2395,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                         if span > 0.0 {
                             boot.playing.insert(who.clone(), id);
                             boot.since.insert(who.clone(), 0.0);
+                            boot.done.remove(&who);
                             boot.cooldown.insert(who.clone(), span);
                             boot.gait.insert(who, 0);
                             return Ok(0.0);
@@ -2420,6 +2425,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                         // ANIM_THROW, and the grenade comes straight out
                         boot.playing.insert(who.clone(), ANIM_THROW);
                         boot.since.insert(who.clone(), 0.0);
+                        boot.done.remove(&who);
                         drop(boot);
                         fire_key_object(lua, &who, DBGRENADE).ok();
                         return Ok(0.0);
@@ -2434,6 +2440,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                     // one of the columns the engine keeps.
                     boot.playing.insert(who.clone(), ANIM_SHOOT);
                     boot.since.insert(who.clone(), 0.0);
+                    boot.done.remove(&who);
                 } else if dist < reach && rounds > 0.0 {
                     boot.burst.insert(who.clone(), rounds);
                     boot.cooldown.insert(who.clone(), interval);
@@ -2908,6 +2915,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 boot.playing.insert(name.clone(), id);
                 boot.since.insert(name.clone(), 0.0);
                 boot.done.remove(&name);
+                boot.done.remove(&name);
             }
             Ok(())
         })?,
@@ -2968,7 +2976,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             let up = boot.playing.get(&name);
             let want = args.get(1).map(number);
             Ok(match (up, want) {
-                (Some(_), _) if boot.done.contains(&name) => 0,
+                (Some(a), _) if boot.done.get(&name) == Some(a) => 0,
                 (Some(a), Some(b)) => (*a as i64 == b as i64) as i32,
                 (Some(_), None) => 1,
                 (None, _) => 0,
@@ -3979,7 +3987,26 @@ pub fn stalls(lua: &Lua) -> Vec<(String, String, i64, [f64; 3])> {
         // an object that is not in that set has a task list nothing runs.
         let mut name = if ticking.contains(&g.name) { name } else { format!("{name} (untouched)") };
         if !about.is_empty() {
-            name = format!("{name}({about})");
+            // and, when the thing it is waiting on is an object with an
+            // animation up, how far through that animation it is -- which is
+            // the whole answer for anything waiting on `omAnimJustLooped` or
+            // `omAnimIsPlaying`
+            let clock = boot_ref(lua).ok().and_then(|b| {
+                let who = about.split(' ').next()?;
+                let up = *b.playing.get(who)?;
+                let model = w.find(who).and_then(|i| w.get(i)).and_then(|g| {
+                    model_of(g.kind, g.resource.as_deref())
+                })?;
+                let span = b.spans.get(&(model.clone(), up as i64)).copied().unwrap_or(0.0);
+                let at = b.since.get(who).copied().unwrap_or(0.0);
+                let speed = b.speed.get(who).copied().unwrap_or(1.0);
+                Some(format!(
+                    " anim {up} at {at:.2}/{span:.2} x{speed}{}{}",
+                    if b.done.get(who) == Some(&up) { " ended" } else { "" },
+                    if b.stasis.contains(who) { " frozen" } else { "" }
+                ))
+            });
+            name = format!("{name}({about}{})", clock.unwrap_or_default());
         }
         // and `script.lua`'s own clock if the object is on one, because
         // "waiting on Wait" and "waiting on Wait with eight seconds still on
@@ -4092,6 +4119,7 @@ fn die(lua: &Lua, name: &str) -> mlua::Result<()> {
         let mut boot = boot_mut(lua)?;
         boot.playing.insert(name.to_string(), ANIM_DIE);
         boot.since.insert(name.to_string(), 0.0);
+        boot.done.remove(&name.to_string());
         boot.gait.remove(name);
         boot.bodies.remove(name);
         boot.fighting.remove(name);
@@ -5454,7 +5482,12 @@ pub fn tick_touching(
                 // looped, fired its key again every pass. It holds for one
                 // loop now, which is what an animation priority buys in the
                 // original, and then the legs take it back.
+                // and **an animation that has ended is played out too**:
+                // `looped` only holds the frame it ended on, so without
+                // `done` a one-shot pose is held for ever and the legs never
+                // come back
                 let idle = boot.looped.contains_key(name)
+                    || (now.is_some() && boot.done.get(name) == now.as_ref())
                     || now.is_none_or(|a| {
                         crate::game::world::GAIT_ANIM.contains(&a)
                             || crate::game::world::GAIT_ANIM_HURT.contains(&a)
@@ -5466,6 +5499,7 @@ pub fn tick_touching(
     for (name, id) in poses {
         let mut boot = boot_mut(&scripts.lua)?;
         boot.playing.insert(name.clone(), id);
+        boot.done.remove(&name);
         boot.since.insert(name, 0.0);
     }
 
@@ -5607,6 +5641,14 @@ pub fn tick_touching(
             };
             w.iter()
                 .filter(|(_, g)| !g.name.is_empty())
+                // **and one that has already ended is not advanced.** The
+                // clamp puts the clock exactly on the span, which is outside
+                // `0..span`, so without this it reads as wrapping again on
+                // every tick for ever -- firing `OnAnimLoop` thirty times a
+                // second and holding `omAnimJustLooped` at 1.
+                .filter(|(_, g)| {
+                    boot.done.get(&g.name) != boot.playing.get(&g.name)
+                })
                 .filter_map(|(_, g)| {
                     // **the model it is actually wearing**, not its type's:
                     // every cutscene actor is an `OBJ_SCENERY` with its own
@@ -5669,7 +5711,7 @@ pub fn tick_touching(
                 // screen instead of snapping back to the bind pose.
                 if boot.oneshot.contains(&(model.clone(), anim as i64)) {
                     now = span;
-                    stopped.push(name.clone());
+                    stopped.push((name.clone(), anim));
                 } else {
                     now -= span * (now / span).floor();
                     running.push(name.clone());
@@ -5678,8 +5720,8 @@ pub fn tick_touching(
             advanced.push((name, now));
         }
         boot.looped = looped.into_iter().collect();
-        for name in stopped {
-            boot.done.insert(name);
+        for (name, anim) in stopped {
+            boot.done.insert(name, anim);
         }
         for name in running {
             boot.done.remove(&name);
@@ -6542,6 +6584,7 @@ mod tests {
             boot.spans.insert(("hoser".into(), 56), SPAN);
             boot.playing.insert("h".into(), 56.0);
             boot.since.insert("h".into(), 0.0);
+            boot.done.remove("h");
         }
         let rooms = Visibility::default();
         let mut ticking = Ticking::default();
