@@ -3043,6 +3043,64 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             Ok(())
         })?,
     )?;
+    // **`omAnimSetStyle(gob, animation, style)`** -- 0x420120 into
+    // **0x461800**, one store into `instance + 0x8`, which is the very field
+    // 0x4611b0 switches on at the end of a pass. And the constants name it:
+    // **`ANIMSTYLE_LOOP` is 0 and `ANIMSTYLE_PLAYONCE` is 3**, which are two
+    // of the four values the record's own `+0x10` holds. So the record sets
+    // the default and this overrides it.
+    //
+    // The instance lives on the **model** (`model + 0x24 + index * 0x28`,
+    // 0x461520), not on the object, so setting a style changes it for
+    // everything wearing that model -- which is what [`Boot::oneshot`] is
+    // keyed by too.
+    globals.set(
+        "omAnimSetStyle",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(name) = args.first().and_then(gob_name) else { return Ok(()) };
+            let anim = args.get(1).map(number).unwrap_or(0.0) as i64;
+            /// `ANIMSTYLE_LOOP` and the ping-pong the switch also wraps.
+            const LOOPS: [f64; 2] = [0.0, 2.0];
+            let style = args.get(2).map(number).unwrap_or(0.0);
+            let Some(model) = with_gob(lua, args.first(), |g| {
+                model_of(g.kind, g.resource.as_deref())
+            })
+            .flatten() else {
+                return Ok(());
+            };
+            let mut boot = boot_mut(lua)?;
+            if LOOPS.contains(&style) {
+                boot.oneshot.remove(&(model, anim));
+            } else {
+                boot.oneshot.insert((model, anim));
+            }
+            boot.done.remove(&name);
+            Ok(())
+        })?,
+    )?;
+    // **`omAnimSetDelta(gob, animation, t)`** -- 0x4202e0 into **0x461890**,
+    // which writes `instance + 0xc` *and* `+0x10`: the clock and the one the
+    // pass compares against. The clock is normalised, so `0` is the start --
+    // which is every one of `level4.lua`'s calls, rewinding a platform.
+    globals.set(
+        "omAnimSetDelta",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(name) = args.first().and_then(gob_name) else { return Ok(()) };
+            let anim = args.get(1).map(number).unwrap_or(0.0) as i64;
+            let t = args.get(2).map(number).unwrap_or(0.0);
+            let Some(model) = with_gob(lua, args.first(), |g| {
+                model_of(g.kind, g.resource.as_deref())
+            })
+            .flatten() else {
+                return Ok(());
+            };
+            let mut boot = boot_mut(lua)?;
+            let span = boot.spans.get(&(model, anim)).copied().unwrap_or(0.0);
+            boot.since.insert(name.clone(), t * span);
+            boot.done.remove(&name);
+            Ok(())
+        })?,
+    )?;
     // `omAnimJustLooped(gob, slot)` — 0x420250 into 0x461850, which finds the
     // animation instance and returns one field of it. The engine's tick sets
     // it on the frame the clock wraps; see [`Boot::looped`].
@@ -7078,6 +7136,50 @@ mod tests {
         scripts.lua.load("has = mdkDocHasItem(bob, 317)").exec().unwrap();
         assert_eq!(scripts.lua.globals().get::<f64>("has").unwrap(), 1.0, "five grenades");
         assert_eq!(health(), 35, "and it is not food");
+    }
+
+    /// **`omAnimSetStyle` overrides the record**, and `ANIMSTYLE_LOOP` is 0
+    /// while `ANIMSTYLE_PLAYONCE` is 3 -- two of the four values the record's
+    /// own field holds.
+    #[test]
+    fn a_style_overrides_what_the_record_says() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('g', 800, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)",
+            )
+            .exec()
+            .unwrap();
+        {
+            let mut boot = scripts.lua.app_data_mut::<Boot>().unwrap();
+            boot.spans.insert(("scenery".into(), 6), 0.5);
+            boot.oneshot.insert(("scenery".into(), 6));
+        }
+        let ask = || {
+            scripts.lua.load("answer = omAnimIsPlaying(g, 6)").exec().unwrap();
+            scripts.lua.globals().get::<f64>("answer").unwrap()
+        };
+        let rooms = Visibility::default();
+        let mut state = Ticking::default();
+        // told to loop, it never stops
+        scripts.lua.load("omAnimPlay(g, 6)\n omAnimSetStyle(g, 6, 0)").exec().unwrap();
+        for _ in 0..40 {
+            tick(&scripts, &rooms, [0.0; 3], 0.0, 1.0 / 30.0, &mut state).unwrap();
+        }
+        assert_eq!(ask(), 1.0, "ANIMSTYLE_LOOP");
+        // told to play once, it does
+        scripts.lua.load("omAnimPlay(g, 6)\n omAnimSetStyle(g, 6, 3)").exec().unwrap();
+        for _ in 0..40 {
+            tick(&scripts, &rooms, [0.0; 3], 0.0, 1.0 / 30.0, &mut state).unwrap();
+        }
+        assert_eq!(ask(), 0.0, "ANIMSTYLE_PLAYONCE");
+        // and the delta puts the clock back, normalised
+        scripts.lua.load("omAnimSetDelta(g, 6, 0)").exec().unwrap();
+        assert_eq!(scripts.lua.app_data_ref::<Boot>().unwrap().since["g"], 0.0);
+        assert_eq!(ask(), 1.0, "rewound, so it is playing again");
     }
 
     /// **The lighter burns for eight seconds and then waits two.** Lighting
