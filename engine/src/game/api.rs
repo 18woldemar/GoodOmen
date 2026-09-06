@@ -1696,6 +1696,61 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             Ok(0.0)
         })?,
     )?;
+    // `mdkGobSetOrientation(gob, yaw, pitch, roll)` -- 0x43b8a0 into 0x40f0f0
+    // into **0x46fd20**, which is three axis-angle quaternions multiplied in
+    // order. The axes are literals: **roll about +Y** (0x4b8be0), **pitch
+    // about +X** (0x4b8bd0) and **yaw about +Z** (0x4b8bf0), composed
+    // `roll * pitch * yaw`, so yaw alone reduces to the `[cos(y/2), 0, 0,
+    // sin(y/2)]` the rest of this engine stores.
+    //
+    // That is the third time 0x46fd20's argument order has settled something
+    // -- the screen shake and the lemming were the other two.
+    globals.set(
+        "mdkGobSetOrientation",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(Value::Table(gob)) = args.first() else { return Ok(()) };
+            let Some(id) = world::id_of(gob) else { return Ok(()) };
+            let at = |i: usize| args.get(i).map(number).unwrap_or(0.0);
+            let turn = |axis: [f64; 3], angle: f64| {
+                let (s, c) = (angle / 2.0).sin_cos();
+                [c, axis[0] * s, axis[1] * s, axis[2] * s]
+            };
+            let mul = |a: [f64; 4], b: [f64; 4]| {
+                [
+                    a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
+                    a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+                    a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1],
+                    a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0],
+                ]
+            };
+            let q = mul(
+                mul(turn([0.0, 1.0, 0.0], at(3)), turn([1.0, 0.0, 0.0], at(2))),
+                turn([0.0, 0.0, 1.0], at(1)),
+            );
+            if let Some(mut w) = world::world_mut(lua) {
+                w.set_rotation(id, q);
+            }
+            Ok(())
+        })?,
+    )?;
+    // `mdkWalkerIsReady(gob)` -- 0x43fbf0 into **0x431720**, which is the same
+    // gate every AI opens with: `(def + 0x14 & 4) || the mover is on the
+    // ground`, and the walker is alive. A flier is always ready; a walker has
+    // to have its feet down. The scripts use it as a **task**, so a 0 holds
+    // the list until the thing has landed.
+    globals.set(
+        "mdkWalkerIsReady",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(who) = args.first().and_then(gob_name) else { return Ok(0.0) };
+            let kind = with_gob(lua, args.first(), |g| g.kind).unwrap_or(0.0);
+            let alive = with_gob(lua, args.first(), |g| g.max_hitpoints <= 0 || g.hitpoints > 0)
+                .unwrap_or(true);
+            let boot = boot_ref(lua)?;
+            let footed = crate::game::world::climb(kind).is_some()
+                || boot.bodies.get(&who).is_none_or(|b| b.on_ground);
+            Ok(if alive && footed { 1.0 } else { 0.0 })
+        })?,
+    )?;
     // **The lemming**, which is the whole of `mdkConeheadLemming` -- 0x4405b0
     // into **0x434c00**, sixteen lines and the shortest AI in the game:
     //
@@ -6805,6 +6860,42 @@ mod tests {
             Some("dr"),
             "0x4084c4, and `doc.mod` is not a file in the game"
         );
+    }
+
+    /// `mdkGobSetOrientation` composes three axis-angle turns the way
+    /// 0x46fd20 does, and yaw alone has to come out as the quaternion the
+    /// rest of the engine stores.
+    #[test]
+    fn an_orientation_is_three_turns_and_yaw_alone_is_the_usual_one() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "mdkRegisterObject('g', 800, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkGobSetOrientation(g, 1.0, 0, 0)",
+            )
+            .exec()
+            .unwrap();
+        let q = {
+            let w = world::world(&scripts.lua).unwrap();
+            w.get(w.find("g").unwrap()).unwrap().rotation
+        };
+        let want = [(0.5f64).cos(), 0.0, 0.0, (0.5f64).sin()];
+        for c in 0..4 {
+            assert!((q[c] - want[c]).abs() < 1e-9, "{q:?} vs {want:?}");
+        }
+        // and a pitch turns about +x, which is the axis at 0x4b8bd0
+        scripts.lua.load("mdkGobSetOrientation(g, 0, 1.0, 0)").exec().unwrap();
+        let q = {
+            let w = world::world(&scripts.lua).unwrap();
+            w.get(w.find("g").unwrap()).unwrap().rotation
+        };
+        let want = [(0.5f64).cos(), (0.5f64).sin(), 0.0, 0.0];
+        for c in 0..4 {
+            assert!((q[c] - want[c]).abs() < 1e-9, "{q:?} vs {want:?}");
+        }
     }
 
     /// **A one-shot animation stops at its end**, which is what
