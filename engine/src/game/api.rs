@@ -315,6 +315,26 @@ pub struct Boot {
     /// Named through `mdkPreloadHardCodedSound`, kept apart because it is a
     /// different loader and `tools/boot.py` counts the two separately.
     pub sounds: BTreeSet<String>,
+    /// The game's whole text, by id. Empty until [`load_text`] is called with the
+    /// installation's `mdk2.str`, because the script surface can be
+    /// installed without one — `--lua` compiles the scripts and never draws.
+    pub strings: crate::formats::strfile::Strings,
+    /// The menu font's advances, indexed by code-page byte. Empty until
+    /// [`load_text`] loads `font.lua`, and empty reads as **one cell each** —
+    /// the binary's own default for a font with no width table (0x462cf0,
+    /// and the 1.0 is at 0x48f2f4). So a menu built without a font is laid
+    /// out too wide rather than on top of itself.
+    pub advance: Vec<f32>,
+    /// Every menu the scripts have built, in the order they built them. The
+    /// Lua table for each is in the registry under `menus`, at the same
+    /// index, because the scripts hang `Select`, `Cancel` and `Update` on it.
+    pub menus: Vec<crate::game::menu::Menu>,
+    /// The one `mdkSetCurrentMenu` last named, which is the one that draws
+    /// and the one the menu keys move.
+    pub menu: Option<usize>,
+    /// Where `mdkShowMouse` last put the cursor, and whether it asked for
+    /// one at all.
+    pub mouse: Option<[f32; 2]>,
     pub rooms: Vec<Room>,
     pub checkpoints: Vec<Checkpoint>,
     pub input: Input,
@@ -697,6 +717,141 @@ pub struct Spawner {
     /// `mdkSpawnerShutOff` sets this and nothing clears it — a spawner that
     /// has been shut off stays off, and further `Queue` calls do nothing.
     pub off: bool,
+}
+
+/// The text half of the boot: the font the menus measure themselves with
+/// and the string file they take their words from.
+///
+/// Apart from [`install`] because it needs the installation, and the script
+/// surface is installed in places that have none — `--lua` compiles all 31
+/// scripts and never opens a file. A boot without it lays its menus out with
+/// one cell per character, which is the binary's own default.
+pub fn load_text(lua: &Lua, font_lua: &str, string_file: &[u8]) {
+    let mut boot = match lua.app_data_mut::<Boot>() {
+        Some(b) => b,
+        None => return,
+    };
+    if let Ok(a) = crate::render::overlay::Font::advances(font_lua) {
+        boot.advance = a.to_vec();
+    }
+    if let Ok(s) = crate::formats::strfile::Strings::parse(string_file) {
+        boot.strings = s;
+    }
+}
+
+/// The command ids the menus move by, out of `docs/lua-constants.md` and
+/// bound in `defaultkeys.lua` to the arrow cluster.
+pub const MENU_UP: i64 = 58;
+pub const MENU_DOWN: i64 = 59;
+pub const MENU_RIGHT: i64 = 60;
+pub const MENU_LEFT: i64 = 61;
+pub const MENU_CANCEL: i64 = 84;
+pub const MENU_CANCEL2: i64 = 85;
+
+/// One command, the way the game itself takes one.
+///
+/// Two halves, and both are the original's: the engine moves the cursor and
+/// closes a dialog, and then `OnLuaCommand` -- `mdk2.lua`'s own dispatcher,
+/// which looks the command up in `comfuncs[conscheme]` -- gets it. Nothing
+/// in Lua handles up or down, and `mdkMenuSelect` is bound to select there
+/// rather than here, so each half does what the other does not.
+pub fn command(lua: &Lua, id: i64) -> mlua::Result<()> {
+    let up = showing_menu(lua);
+    let cancel = {
+        let mut boot = boot_mut(lua)?;
+        let current = boot.menu.filter(|_| up);
+        match (id, current.and_then(|i| boot.menus.get_mut(i))) {
+            (MENU_UP, Some(m)) => {
+                m.step(-1);
+                None
+            }
+            (MENU_DOWN, Some(m)) => {
+                m.step(1);
+                None
+            }
+            (MENU_CANCEL | MENU_CANCEL2, Some(_)) => current,
+            _ => None,
+        }
+    };
+    if let Some(index) = cancel {
+        let menu: mlua::Table =
+            lua.named_registry_value::<mlua::Table>("menus")?.get(index + 1)?;
+        if let Ok(f) = menu.get::<mlua::Function>("Cancel") {
+            f.call::<()>(())?;
+        }
+    }
+    if let Ok(f) = lua.globals().get::<mlua::Function>("OnLuaCommand") {
+        f.call::<()>(id)?;
+    }
+    Ok(())
+}
+
+/// Whether a menu is up — `gamecontrol.showmenu`, which the scripts raise
+/// and lower and the engine obeys.
+pub fn showing_menu(lua: &Lua) -> bool {
+    lua.globals()
+        .get::<mlua::Table>("gamecontrol")
+        .and_then(|t| t.get::<Option<f64>>("showmenu"))
+        .ok()
+        .flatten()
+        .is_some_and(|v| v != 0.0)
+}
+
+/// `SetConScheme`, which `menuinit.lua` defines and the engine is expected
+/// to call: a script asks for a scheme by setting `newconscheme` and this
+/// is what makes it the current one. Without it `conscheme` never leaves
+/// what `mdk2.lua` set, and `comfuncs` never matches.
+pub fn set_scheme(lua: &Lua) -> mlua::Result<()> {
+    if let Ok(f) = lua.globals().get::<mlua::Function>("SetConScheme") {
+        f.call::<()>(())?;
+    }
+    Ok(())
+}
+
+/// The current menu's own `Update`, which `menu.pause` uses to watch for the
+/// cheat keys. Called once a frame, and quiet when there is no menu.
+pub fn menu_update(lua: &Lua) -> mlua::Result<()> {
+    let Some(index) = boot_ref(lua)?.menu else { return Ok(()) };
+    let menu: mlua::Table = lua.named_registry_value::<mlua::Table>("menus")?.get(index + 1)?;
+    if let Ok(f) = menu.get::<mlua::Function>("Update") {
+        f.call::<()>(())?;
+    }
+    Ok(())
+}
+
+/// A Lua string as the code-page bytes the font is indexed by.
+///
+/// The scripts are Latin-1 and are widened to UTF-8 when they are read, so
+/// a literal like `"Fran\u{e7}ais"` reaches Lua as **two** bytes for the
+/// cedilla and would be drawn as two glyphs. This is the inverse of that
+/// widening, and it is the only place a script's own words become text.
+fn code_page(bytes: &[u8]) -> Vec<u8> {
+    match std::str::from_utf8(bytes) {
+        Ok(t) => t.chars().map(|c| if (c as u32) < 256 { c as u8 } else { b'?' }).collect(),
+        Err(_) => bytes.to_vec(),
+    }
+}
+
+/// The engine's index for a menu table, which `mdkCreateMenu` put on it.
+fn menu_index(v: &Value) -> Option<usize> {
+    match v {
+        Value::Table(t) => t.get::<Option<i64>>("__menu").ok().flatten().map(|i| i as usize),
+        _ => None,
+    }
+}
+
+/// The same for an item table.
+fn item_handle(v: &Value) -> Option<usize> {
+    match v {
+        Value::Table(t) => t.get::<Option<i64>>("__item").ok().flatten().map(|i| i as usize),
+        _ => None,
+    }
+}
+
+/// How wide a string is in cells, with the font the boot has — the sum of
+/// its advances, which is 0x462d10.
+pub fn width_of(advance: &[f32], text: &[u8]) -> f32 {
+    text.iter().map(|&b| advance.get(b as usize).copied().unwrap_or(1.0)).sum()
 }
 
 fn number(v: &Value) -> f64 {
@@ -3724,6 +3879,269 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             let text = crate::game::script::preprocess(&source, &[])
                 .map_err(|e| mlua::Error::runtime(e.to_string()))?;
             lua.load(&text).set_name(&key).eval::<Value>()
+        })?,
+    )?;
+
+    // **`gamecontrol` is the engine's own table**, and nothing in the 31
+    // scripts creates it -- they only read and write its fields, 41 times
+    // for `showmenu` alone. It is how a script raises the menu:
+    // `comfuncs.game[COM_PAUSE]` sets `gamecontrol.showmenu = 1` and the
+    // engine is expected to start drawing one and stop driving the player.
+    let control = lua.create_table()?;
+    for field in ["showmenu", "showconsole", "showvarview", "vvtab"] {
+        control.set(field, 0)?;
+    }
+    globals.set("gamecontrol", control)?;
+
+    // --- the menu -------------------------------------------------------
+    //
+    // The whole of the menu's *behaviour* is in `menu.lua` and
+    // `options.lua`: what each item does, when it is enabled, which dialog
+    // it opens. What the engine owes is the record, the geometry and the
+    // drawing, and `mdkCreateMenu` hands back the table the scripts then
+    // hang `Cancel` and `Update` on. Both the menu tables and the item
+    // tables live in the registry so the engine can call those handlers
+    // without a second global for `_G` walkers to find.
+    lua.set_named_registry_value("menus", lua.create_table()?)?;
+    lua.set_named_registry_value("menuitems", lua.create_table()?)?;
+
+    globals.set(
+        "mdkCreateMenu",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let f = |i: usize| args.get(i).map(number).unwrap_or(0.0) as f32;
+            // 0x43c960: five floats, then the justification, then a flag,
+            // then the title's string id, which defaults to -1 for none
+            let justify = args.get(5).map(number).unwrap_or(0.0) as i64;
+            let title = match args.get(7).map(number).unwrap_or(-1.0) {
+                id if id >= 0.0 => {
+                    boot_ref(lua)?.strings.text(id as u32).map(|t| t.to_vec())
+                }
+                _ => None,
+            };
+            let table = lua.create_table()?;
+            let index = {
+                let mut boot = boot_mut(lua)?;
+                let advance = std::mem::take(&mut boot.advance);
+                let menu = crate::game::menu::Menu::new(
+                    [f(0), f(1), f(2), f(3), f(4)],
+                    justify,
+                    title,
+                    |t| width_of(&advance, t),
+                );
+                boot.advance = advance;
+                boot.menus.push(menu);
+                boot.menus.len() - 1
+            };
+            table.set("__menu", index as i64)?;
+            let menus: mlua::Table = lua.named_registry_value("menus")?;
+            menus.set(index + 1, table.clone())?;
+            Ok(table)
+        })?,
+    )?;
+
+    // `mdkCreateMenuItem(menu, "name")` takes the word itself and
+    // `mdkCreateMenuItemW(menu, id)` a string id: 120 calls against 41, so
+    // the localised one is the ordinary case and the literal is for what
+    // never needed translating -- a save-game name, a resolution.
+    for (name, by_id) in [("mdkCreateMenuItem", false), ("mdkCreateMenuItemW", true)] {
+        globals.set(
+            name,
+            lua.create_function(move |lua, args: Variadic<Value>| {
+                let Some(menu) = args.first().and_then(menu_index) else {
+                    return Ok(Value::Nil);
+                };
+                let text = match args.get(1) {
+                    Some(v) if by_id => {
+                        let id = number(v) as u32;
+                        boot_ref(lua)?.strings.text(id).map(|t| t.to_vec()).unwrap_or_default()
+                    }
+                    Some(Value::String(s)) => code_page(&s.as_bytes()),
+                    Some(v) => number(v).to_string().into_bytes(),
+                    None => Vec::new(),
+                };
+                let items: mlua::Table = lua.named_registry_value("menuitems")?;
+                let handle = items.raw_len() as usize;
+                let table = lua.create_table()?;
+                table.set("__item", handle as i64)?;
+                items.set(handle + 1, table.clone())?;
+                {
+                    let mut boot = boot_mut(lua)?;
+                    let advance = std::mem::take(&mut boot.advance);
+                    if let Some(m) = boot.menus.get_mut(menu) {
+                        m.add(text, handle, |t| width_of(&advance, t));
+                    }
+                    boot.advance = advance;
+                }
+                Ok(Value::Table(table))
+            })?,
+        )?;
+    }
+
+    globals.set(
+        "mdkSetCurrentMenu",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let index = args.first().and_then(menu_index);
+            // 0x413230's second argument: `menu.SwitchDlg` passes 1 unless
+            // it is putting a dialog back, which is what keeps the cursor
+            // where it was
+            let zero = args.get(1).map(number).unwrap_or(1.0) != 0.0;
+            let mut boot = boot_mut(lua)?;
+            boot.menu = index;
+            if zero {
+                if let Some(m) = index.and_then(|i| boot.menus.get_mut(i)) {
+                    m.selected = 0;
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    globals.set(
+        "mdkClearMenu",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            if let Some(i) = args.first().and_then(menu_index) {
+                if let Some(m) = boot_mut(lua)?.menus.get_mut(i) {
+                    m.items.clear();
+                    m.selected = 0;
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    globals.set(
+        "mdkMenuGetItem",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(menu) = args.first().and_then(menu_index) else {
+                return Ok(Value::Nil);
+            };
+            // the scripts count from 1, the way Lua does
+            let nth = args.get(1).map(number).unwrap_or(1.0) as usize;
+            let handle = boot_ref(lua)?
+                .menus
+                .get(menu)
+                .and_then(|m| m.items.get(nth.saturating_sub(1)))
+                .map(|i| i.handle);
+            match handle {
+                Some(h) => lua
+                    .named_registry_value::<mlua::Table>("menuitems")?
+                    .get::<Value>(h + 1),
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+
+    globals.set(
+        "mdkMenuItemEnable",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(handle) = args.first().and_then(item_handle) else { return Ok(()) };
+            let on = args.get(1).map(number).unwrap_or(1.0) != 0.0;
+            let mut boot = boot_mut(lua)?;
+            for m in boot.menus.iter_mut() {
+                if let Some(item) = m.items.iter_mut().find(|i| i.handle == handle) {
+                    item.enabled = on;
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    for (name, by_id) in [("mdkSetMenuItemText", false), ("mdkSetMenuItemTextW", true)] {
+        globals.set(
+            name,
+            lua.create_function(move |lua, args: Variadic<Value>| {
+                let Some(handle) = args.first().and_then(item_handle) else { return Ok(()) };
+                let text = match args.get(1) {
+                    Some(v) if by_id => {
+                        let id = number(v) as u32;
+                        boot_ref(lua)?.strings.text(id).map(|t| t.to_vec()).unwrap_or_default()
+                    }
+                    Some(Value::String(s)) => code_page(&s.as_bytes()),
+                    Some(v) => number(v).to_string().into_bytes(),
+                    None => Vec::new(),
+                };
+                let mut boot = boot_mut(lua)?;
+                let advance = std::mem::take(&mut boot.advance);
+                for m in boot.menus.iter_mut() {
+                    // the justification is of the *new* text, so the item
+                    // has to be placed again and not only relabelled
+                    if let Some(i) = m.items.iter().position(|i| i.handle == handle) {
+                        let offset = match m.justify {
+                            1 => -width_of(&advance, &text) * m.w,
+                            2 => -width_of(&advance, &text) * m.w * 0.5,
+                            _ => 0.0,
+                        };
+                        m.items[i].x = m.x + offset;
+                        m.items[i].text = text.clone();
+                    }
+                }
+                boot.advance = advance;
+                Ok(())
+            })?,
+        )?;
+    }
+
+    globals.set(
+        "mdkMenuSetHighlighted",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(menu) = args.first().and_then(menu_index) else { return Ok(()) };
+            let nth = args.get(1).map(number).unwrap_or(1.0) as usize;
+            if let Some(m) = boot_mut(lua)?.menus.get_mut(menu) {
+                m.selected = nth.saturating_sub(1).min(m.items.len().saturating_sub(1));
+            }
+            Ok(())
+        })?,
+    )?;
+
+    globals.set(
+        "mdkSetMenuTitle",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(menu) = args.first().and_then(menu_index) else { return Ok(()) };
+            let id = args.get(1).map(number).unwrap_or(-1.0);
+            let mut boot = boot_mut(lua)?;
+            let title = if id >= 0.0 { boot.strings.text(id as u32).map(|t| t.to_vec()) } else { None };
+            let advance = std::mem::take(&mut boot.advance);
+            if let Some(m) = boot.menus.get_mut(menu) {
+                m.retitle(title, |t| width_of(&advance, t));
+            }
+            boot.advance = advance;
+            Ok(())
+        })?,
+    )?;
+
+    globals.set(
+        "mdkMenuSelect",
+        lua.create_function(|lua, _: Variadic<Value>| {
+            // `menuinit.lua` binds this to COM_MENUSELECT itself; the engine
+            // only has to find the item under the cursor and fire it
+            let handle = {
+                let boot = boot_ref(lua)?;
+                boot.menu
+                    .and_then(|i| boot.menus.get(i))
+                    .and_then(|m| m.items.get(m.selected))
+                    .filter(|i| i.enabled)
+                    .map(|i| i.handle)
+            };
+            let Some(handle) = handle else { return Ok(()) };
+            let item: mlua::Table =
+                lua.named_registry_value::<mlua::Table>("menuitems")?.get(handle + 1)?;
+            // `item.Select = function(self) ... end`, so it takes itself
+            if let Ok(f) = item.get::<mlua::Function>("Select") {
+                f.call::<()>(item)?;
+            }
+            Ok(())
+        })?,
+    )?;
+
+    globals.set(
+        "mdkShowMouse",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            // 0x43d6c0 takes two integers; every call site passes 0,0 to put
+            // the cursor away and a place to bring it back
+            let (x, y) = (args.first().map(number).unwrap_or(0.0), args.get(1).map(number).unwrap_or(0.0));
+            boot_mut(lua)?.mouse =
+                (x != 0.0 || y != 0.0).then_some([x as f32, y as f32]);
+            Ok(())
         })?,
     )?;
 

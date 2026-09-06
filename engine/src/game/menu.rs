@@ -1,0 +1,208 @@
+//! The menus the scripts build, and where each item lands on screen.
+//!
+//! The whole of the menu *logic* is already in the game's own Lua --
+//! `menu.lua` builds 41 items and `options.lua` 43, each with its own
+//! `Select`, and `menuinit.lua` binds the keys. What the engine owes them is
+//! three things: a record per menu, the geometry of it, and the drawing.
+//!
+//! **The geometry is 0x411aa0 (`mdkCreateMenu`) and 0x411be0
+//! (`mdkCreateMenuItem`), both in `mdkGui.c`.** Everything below is read off
+//! those two and the draw at 0x412090:
+//!
+//! ```text
+//! item i sits at  y + (gap + h) * i
+//! and at          x + justify(text)
+//! the title at    0.5 - width(title) * w * 1.2 * 0.5,  y - h * 1.8
+//! ```
+//!
+//! `JUSTIFY_LEFT` 0 adds nothing, `JUSTIFY_RIGHT` 1 subtracts the whole
+//! width and `JUSTIFY_CENTER` 2 half of it -- the -0.5 is the float at
+//! 0x48f69c. The title's own 1.2 (0x48f698) is the scale it is drawn at, and
+//! the 1.8 (0x48f694) is how far above the first item it stands.
+
+/// The colours 0x412090 picks between, per item, before it draws: warm for
+/// the one under the cursor and cool for the rest.
+pub const SELECTED: [f32; 3] = [1.0, 0.7, 0.3];
+pub const PLAIN: [f32; 3] = [0.25, 0.45, 0.65];
+/// What a disabled item is multiplied by, colour and alpha both — the float
+/// at 0x48f6bc, reached when `item + 0x3c & 2` is clear.
+pub const DISABLED: f32 = 0.7;
+/// The title is drawn this much larger than an item (0x48f698) and this far
+/// above the first one, in item heights (0x48f694).
+pub const TITLE_SCALE: f32 = 1.2;
+pub const TITLE_ABOVE: f32 = 1.8;
+/// Everything the menu centres, it centres on the middle of the screen and
+/// not on its own x — the 0.5 at 0x48f2fc.
+const MIDDLE: f32 = 0.5;
+
+pub struct Item {
+    /// Code-page bytes, the way [`crate::formats::strfile`] hands them over
+    /// and the way the font is indexed.
+    pub text: Vec<u8>,
+    /// Where the text starts, absolute, both already justified.
+    pub x: f32,
+    pub y: f32,
+    /// `item + 0x3c & 2`, which `mdkMenuItemEnable` writes.
+    pub enabled: bool,
+    /// Whatever the caller uses to find the script's own object for this
+    /// item again — the scripts hang `Select` on it, and something has to
+    /// call that. The model here does not care what it means.
+    pub handle: usize,
+}
+
+pub struct Menu {
+    pub x: f32,
+    pub y: f32,
+    /// One cell of the font: an item's width is its advances times this.
+    pub w: f32,
+    pub h: f32,
+    pub gap: f32,
+    pub justify: i64,
+    pub title: Option<Vec<u8>>,
+    pub title_at: [f32; 2],
+    pub items: Vec<Item>,
+    /// The record's `[2]`, which the constructor sets to 0 and the draw
+    /// compares each item against.
+    pub selected: usize,
+}
+
+impl Menu {
+    /// `width` answers how wide a string is in cells — the font's business,
+    /// which is why it arrives as a closure rather than as a dependency.
+    pub fn new(
+        [x, y, w, h, gap]: [f32; 5],
+        justify: i64,
+        title: Option<Vec<u8>>,
+        width: impl Fn(&[u8]) -> f32,
+    ) -> Menu {
+        let title_at = match &title {
+            Some(t) => [
+                MIDDLE - width(t) * w * TITLE_SCALE * MIDDLE,
+                y - h * TITLE_ABOVE,
+            ],
+            None => [x, y],
+        };
+        Menu { x, y, w, h, gap, justify, title, title_at, items: Vec::new(), selected: 0 }
+    }
+
+    /// `mdkSetMenuTitle` — the title again, which has to be placed again
+    /// because the placing is of the title's own width.
+    pub fn retitle(&mut self, title: Option<Vec<u8>>, width: impl Fn(&[u8]) -> f32) {
+        self.title_at = match &title {
+            Some(t) => [
+                MIDDLE - width(t) * self.w * TITLE_SCALE * MIDDLE,
+                self.y - self.h * TITLE_ABOVE,
+            ],
+            None => [self.x, self.y],
+        };
+        self.title = title;
+    }
+
+    pub fn add(&mut self, text: Vec<u8>, handle: usize, width: impl Fn(&[u8]) -> f32) {
+        let offset = match self.justify {
+            1 => -width(&text) * self.w,
+            2 => -width(&text) * self.w * MIDDLE,
+            _ => 0.0,
+        };
+        let y = self.y + (self.gap + self.h) * self.items.len() as f32;
+        self.items.push(Item { text, x: self.x + offset, y, enabled: true, handle });
+    }
+
+    /// Move the cursor, skipping anything disabled and wrapping at the ends.
+    ///
+    /// **Read off the shape of the menus rather than off the code**: the
+    /// pause menu disables its own Save item when the level says you may not
+    /// save, and an item that cannot be chosen but can be landed on would
+    /// leave Enter doing nothing. Not confirmed against 0x413230's family.
+    pub fn step(&mut self, by: i64) {
+        let n = self.items.len();
+        if n == 0 {
+            return;
+        }
+        for _ in 0..n {
+            self.selected = (self.selected as i64 + by).rem_euclid(n as i64) as usize;
+            if self.items[self.selected].enabled {
+                return;
+            }
+        }
+    }
+
+    /// The colour an item is drawn in, alpha included.
+    pub fn colour(&self, index: usize) -> [f32; 4] {
+        let base = if index == self.selected { SELECTED } else { PLAIN };
+        match self.items.get(index).map(|i| i.enabled) {
+            Some(false) => [
+                base[0] * DISABLED,
+                base[1] * DISABLED,
+                base[2] * DISABLED,
+                DISABLED,
+            ],
+            _ => [base[0], base[1], base[2], 1.0],
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every glyph one cell wide, so a width is a length and the arithmetic
+    /// is visible.
+    fn wide(s: &[u8]) -> f32 {
+        s.len() as f32
+    }
+
+    #[test]
+    fn items_stack_by_gap_plus_height() {
+        // the pause menu's own numbers
+        let mut m = Menu::new([0.5, 0.26, 0.06, 0.06, 0.0], 2, None, wide);
+        m.add(b"ab".to_vec(), 0, wide);
+        m.add(b"cd".to_vec(), 1, wide);
+        assert!((m.items[0].y - 0.26).abs() < 1e-6);
+        assert!((m.items[1].y - 0.32).abs() < 1e-6);
+        // centred: half of two cells of 0.06 is 0.06 to the left
+        assert!((m.items[0].x - 0.44).abs() < 1e-6);
+    }
+
+    #[test]
+    fn justify_left_and_right() {
+        let mut left = Menu::new([0.1, 0.0, 0.05, 0.05, 0.0], 0, None, wide);
+        left.add(b"abcd".to_vec(), 0, wide);
+        assert!((left.items[0].x - 0.1).abs() < 1e-6);
+        let mut right = Menu::new([0.9, 0.0, 0.05, 0.05, 0.0], 1, None, wide);
+        right.add(b"abcd".to_vec(), 0, wide);
+        assert!((right.items[0].x - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_title_centres_on_the_screen_not_on_the_menu() {
+        let m = Menu::new([0.065, 0.2, 0.04, 0.04, 0.0], 0, Some(b"abcde".to_vec()), wide);
+        // 0.5 - 5 * 0.04 * 1.2 * 0.5
+        assert!((m.title_at[0] - 0.38).abs() < 1e-6);
+        assert!((m.title_at[1] - (0.2 - 0.04 * 1.8)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_cursor_steps_over_a_disabled_item() {
+        let mut m = Menu::new([0.0, 0.0, 0.05, 0.05, 0.0], 0, None, wide);
+        for _ in 0..3 {
+            m.add(b"x".to_vec(), 0, wide);
+        }
+        m.items[1].enabled = false;
+        m.step(1);
+        assert_eq!(m.selected, 2);
+        m.step(1);
+        assert_eq!(m.selected, 0);
+        m.step(-1);
+        assert_eq!(m.selected, 2);
+    }
+
+    #[test]
+    fn a_menu_of_nothing_but_disabled_items_does_not_spin() {
+        let mut m = Menu::new([0.0, 0.0, 0.05, 0.05, 0.0], 0, None, wide);
+        m.add(b"x".to_vec(), 0, wide);
+        m.items[0].enabled = false;
+        m.step(1);
+        assert_eq!(m.selected, 0);
+    }
+}

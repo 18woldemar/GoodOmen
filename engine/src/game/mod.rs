@@ -4,9 +4,11 @@
 pub mod api;
 pub mod body;
 pub mod install;
+pub mod keys;
 pub mod level;
 pub mod constants;
 pub mod functions;
+pub mod menu;
 pub mod rand;
 pub mod script;
 pub mod world;

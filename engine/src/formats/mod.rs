@@ -8,5 +8,6 @@ pub mod bsp;
 pub mod container;
 pub mod model;
 pub mod omn;
+pub mod strfile;
 pub mod tex;
 pub mod wavc;

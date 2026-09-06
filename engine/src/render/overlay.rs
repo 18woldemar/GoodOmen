@@ -79,8 +79,10 @@ impl Font {
 
     /// How wide a string is, in units of one cell — 0x462d10, which is the
     /// sum of the advances and nothing else.
-    pub fn width(&self, text: &str) -> f32 {
-        text.bytes().map(|b| self.advance[b as usize]).sum()
+    /// **Bytes, not characters.** A string out of `mdk2.str` is code-page
+    /// bytes and the atlas is a code page; see [`crate::formats::strfile`].
+    pub fn width(&self, text: &[u8]) -> f32 {
+        text.iter().map(|&b| self.advance[b as usize]).sum()
     }
 }
 
@@ -179,9 +181,18 @@ impl Overlay {
     /// A string, its top-left corner at `(x, y)`, each cell `w` by `h`.
     /// Answers where the pen ended, which is what a caret and a right-hand
     /// column both need.
-    pub fn text(&mut self, font: &Font, s: &str, x: f32, y: f32, w: f32, h: f32, colour: [f32; 4]) -> f32 {
+    pub fn text(
+        &mut self,
+        font: &Font,
+        s: &[u8],
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        colour: [f32; 4],
+    ) -> f32 {
         let mut pen = x;
-        for b in s.bytes() {
+        for &b in s {
             let (col, row) = ((b % 16) as f32, (b / 16) as f32);
             // a space is blank in the texture as well, so it costs a quad
             // for nothing; skipping it is the one special case worth having
@@ -331,7 +342,7 @@ pub fn selfcheck(font_lua: &str, font_tex: &[u8]) -> Result<String, String> {
             super::scene::upload(gl, &tex).ok_or_else(|| "no texture".to_string())?;
         let font = Font { texture, advance };
         let mut overlay = Overlay::default();
-        let pen = overlay.text(&font, TEXT, X, Y, W, H, [1.0, 1.0, 1.0, 1.0]);
+        let pen = overlay.text(&font, TEXT.as_bytes(), X, Y, W, H, [1.0, 1.0, 1.0, 1.0]);
         gl.clear_color(0.0, 0.0, 0.0, 1.0);
         gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
         overlay.draw(gl)?;
@@ -390,7 +401,7 @@ pub fn selfcheck(font_lua: &str, font_tex: &[u8]) -> Result<String, String> {
         Ok(format!(
             "{TEXT:?} drawn offscreen: {lit} lit pixels, ink x {left}..{right} against a pen at \
              {want_right}, y {top}..{bottom}, width {:.4} cells",
-            font.width(TEXT)
+            font.width(TEXT.as_bytes())
         ))
     }
 }

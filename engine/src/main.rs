@@ -41,6 +41,22 @@ fn main() {
         }
         return;
     }
+    // `--menu` works the menu the scripts put up. No GL.
+    if args.iter().any(|a| a == "--menu") {
+        let root = args
+            .iter()
+            .find(|a| !a.starts_with("--") && a.parse::<u32>().is_err())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(Install::beside_the_binary);
+        match menu_check(&root) {
+            Ok(line) => println!("{line}"),
+            Err(e) => {
+                eprintln!("goodomen: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     // `--font` draws a string offscreen with the game's own font, which is
     // the check for the whole 2-D layer. It needs the installation, so it
     // comes after `--triangle` and before everything that needs a level.
@@ -612,18 +628,146 @@ fn music(root: &std::path::Path, expect: Option<usize>) -> Result<String, String
 /// With `n` and `cp` zero it starts **every** level at **every** checkpoint,
 /// which is `tools/boot.py`'s measure and the one that says the sequence not
 /// only runs but can be satisfied.
-fn boot(
-    root: &std::path::Path,
-    n: u32,
-    cp: u32,
-    work_list: bool,
-    events: bool,
-) -> Result<String, String> {
+/// `--menu` boots the scripts and works the menu they put up, with no window
+/// and no level: `mdk2.lua` ends with `dofile('menuinit')`, which builds the
+/// language chooser and makes it current, so there is always one to work.
+///
+/// It walks the cursor down, checks it came back to the top, and fires the
+/// item under it -- which is a round trip through the scripts' own
+/// `OnLuaCommand`, `comfuncs.menu` and `mdkMenuSelect`, and fails if any
+/// link of that chain is missing.
+fn menu_check(root: &std::path::Path) -> Result<String, String> {
+    use goodomen::game::{api, script::Scripts};
+
     let mut install = Install::open(root).map_err(|e| e.to_string())?;
-    // every script, in one map, so the engine's `dofile` can resolve a bare
-    // resource name the way the original's does
+    let sources = sources_of(&mut install);
+    let scripts = Scripts::new().map_err(|e| e.to_string())?;
+    api::install(&scripts.lua, sources.clone()).map_err(|e| e.to_string())?;
+    if let (Ok(font), Ok(strings)) = (install.read("font.lua"), install.read("mdk2.str")) {
+        let source: String = font.iter().map(|&b| b as char).collect();
+        api::load_text(&scripts.lua, &source, &strings);
+    }
+    let mdk2 = sources.get("mdk2.lua").ok_or("no mdk2.lua")?;
+    scripts.run("mdk2.lua", mdk2).map_err(|e| e.to_string())?;
+    // `mdk2.lua` ends with `dofile('menuinit')` and nothing loads `menu.lua`
+    // from a script: the binary does, by name, and 0x93d6c is where that
+    // name sits. It builds the pause menu, and `dofile('options')` at its
+    // end builds the options tree.
+    if let Some(src) = sources.get("menu.lua") {
+        scripts.run("menu.lua", src).map_err(|e| format!("menu.lua: {e}"))?;
+    }
+
+    let look = |what: &str| -> Result<(usize, usize, String), String> {
+        let boot = scripts
+            .lua
+            .app_data_ref::<api::Boot>()
+            .ok_or_else(|| format!("{what}: no boot state"))?;
+        let index = boot.menu.ok_or_else(|| format!("{what}: no menu is current"))?;
+        let menu = boot.menus.get(index).ok_or_else(|| format!("{what}: menu {index} is gone"))?;
+        let words: Vec<String> = menu
+            .items
+            .iter()
+            .map(|i| i.text.iter().map(|&b| b as char).collect())
+            .collect();
+        Ok((menu.selected, menu.items.len(), words.join(", ")))
+    };
+
+    // the scripts raise the menu themselves — `level0.lua` does exactly
+    // this on the title screen, and `comfuncs.game[COM_PAUSE]` in the game
+    scripts
+        .lua
+        .load("gamecontrol.showmenu = 1; newconscheme = \"menu\"")
+        .exec()
+        .map_err(|e| e.to_string())?;
+    api::set_scheme(&scripts.lua).map_err(|e| e.to_string())?;
+
+    let (selected, count, words) = look("at the start")?;
+    if count < 2 {
+        return Err(format!("the first menu has {count} items"));
+    }
+    if selected != 0 {
+        return Err(format!("the cursor starts on {selected}, not the first item"));
+    }
+    // down the whole menu and one more, which must wrap
+    for step in 0..count + 1 {
+        api::command(&scripts.lua, api::MENU_DOWN).map_err(|e| e.to_string())?;
+        let (now, _, _) = look("stepping")?;
+        let want = (step + 1) % count;
+        if now != want {
+            return Err(format!("after {} downs the cursor is on {now}, not {want}", step + 1));
+        }
+    }
+
+    // COM_MENUSELECT reaches `mdkMenuSelect` only through the scripts' own
+    // dispatcher: `OnLuaCommand` looks it up in `comfuncs.menu`, which
+    // `menuinit.lua` filled. Every item of the language chooser calls
+    // `chSetLanguage`, which nothing implements — so the recorder counting
+    // it once is the whole chain having run.
+    let before = scripts
+        .lua
+        .app_data_ref::<api::Boot>()
+        .and_then(|b| b.unimplemented.get("chSetLanguage").copied())
+        .unwrap_or(0);
+    api::command(&scripts.lua, 62).map_err(|e| e.to_string())?;
+    let after = scripts
+        .lua
+        .app_data_ref::<api::Boot>()
+        .and_then(|b| b.unimplemented.get("chSetLanguage").copied())
+        .unwrap_or(0);
+    if after != before + 1 {
+        return Err(format!(
+            "choosing an item did not reach the script: chSetLanguage went {before} -> {after}"
+        ));
+    }
+    // and the pause key, which is the whole point of a menu existing during
+    // play: `comfuncs.game[COM_PAUSE]` raises `gamecontrol.showmenu`,
+    // switches the scheme and puts up `menu.pause`.
+    //
+    // A level has to be started first, and not for show: `mdk2.lua`'s own
+    // `level()` is where `Save = {}` happens, and the pause handler reads
+    // `Save.disablepausekey` before anything else.
+    api::level(&scripts, 1, 1, "sectionA").map_err(|e| e.to_string())?;
+    scripts
+        .lua
+        .load("gamecontrol.showmenu = 0; conscheme = \"game\"; newconscheme = \"game\"")
+        .exec()
+        .map_err(|e| e.to_string())?;
+    let paused = api::command(&scripts.lua, 51)
+        .map_err(|e| e.to_string())
+        .and_then(|()| {
+            api::set_scheme(&scripts.lua).map_err(|e| e.to_string())?;
+            let current: Option<String> = scripts
+                .lua
+                .globals()
+                .get::<mlua::Table>("menu")
+                .and_then(|t| t.get("current"))
+                .map_err(|e| e.to_string())?;
+            Ok(format!(
+                "{}, showing {}",
+                current.unwrap_or_else(|| "nothing".into()),
+                api::showing_menu(&scripts.lua)
+            ))
+        })
+        .unwrap_or_else(|e| format!("failed: {e}"));
+    if paused != "pause, showing true" {
+        return Err(format!("the pause key did not put up the pause menu: {paused}"));
+    }
+
+    let (menus, items) = scripts
+        .lua
+        .app_data_ref::<api::Boot>()
+        .map(|b| (b.menus.len(), b.menus.iter().map(|m| m.items.len()).sum::<usize>()))
+        .unwrap_or_default();
+    Ok(format!(
+        "{menus} menus of {items} items; the first has {count} -- {words} -- the cursor walked \
+         all of them and wrapped, and choosing one reached the script. \
+         The pause key put up: {paused}"
+    ))
+}
+
+fn sources_of(install: &mut Install) -> std::collections::BTreeMap<String, String> {
     let mut sources = std::collections::BTreeMap::new();
-    for (name, i, j) in entries_named(&install, ".lua") {
+    for (name, i, j) in entries_named(install, ".lua") {
         if let Ok(bytes) = install.containers[i].read_at(j) {
             sources.insert(name, bytes.iter().map(|&b| b as char).collect::<String>());
         }
@@ -640,6 +784,20 @@ fn boot(
             }
         }
     }
+    sources
+}
+
+fn boot(
+    root: &std::path::Path,
+    n: u32,
+    cp: u32,
+    work_list: bool,
+    events: bool,
+) -> Result<String, String> {
+    let mut install = Install::open(root).map_err(|e| e.to_string())?;
+    // every script, in one map, so the engine's `dofile` can resolve a bare
+    // resource name the way the original's does
+    let sources = sources_of(&mut install);
 
     // which checkpoints each level has is what the previous boot found, so
     // the sweep asks each level once and then starts each checkpoint it named
@@ -1028,24 +1186,7 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
     use goodomen::game::world;
 
     let mut install = Install::open(root).map_err(|e| e.to_string())?;
-    let mut sources = std::collections::BTreeMap::new();
-    for (name, i, j) in entries_named(&install, ".lua") {
-        if let Ok(bytes) = install.containers[i].read_at(j) {
-            sources.insert(name, bytes.iter().map(|&b| b as char).collect::<String>());
-        }
-    }
-    if let Some(dir) = install.override_dir.clone() {
-        if let Ok(read) = std::fs::read_dir(&dir) {
-            for e in read.flatten() {
-                let name = e.file_name().to_string_lossy().to_ascii_lowercase();
-                if name.ends_with(".lua") {
-                    if let Ok(bytes) = std::fs::read(e.path()) {
-                        sources.insert(name, bytes.iter().map(|&b| b as char).collect());
-                    }
-                }
-            }
-        }
-    }
+    let sources = sources_of(&mut install);
 
     let scripts = Scripts::new().map_err(|e| e.to_string())?;
     api::install(&scripts.lua, sources.clone()).map_err(|e| e.to_string())?;
@@ -1607,29 +1748,47 @@ const WIDEST: f64 = 60.0;
 /// `OBJ_SNIPERBULLET`, which is what the scope fires.
 const SNIPERBULLET: f64 = 406.0;
 
+/// Queue whatever menu the scripts have made current.
+///
+/// The title is grey 0.85 (0x412090 sets it with 0x3f59999a three times over)
+/// and drawn 1.2 cells tall; the items take their colour from the menu, which
+/// is where the warm and cool of 0x412090 live.
+///
+/// ponytail: no background panel and no highlight box. 0x412090 draws both,
+/// from the record's `[0x11]`..`[0x14]`, and the constructor leaves those at
+/// 1, 1, 0, 1 — which cannot be the values used, so something else writes
+/// them and that has not been read. The box also breathes: a global at
+/// 0x4bb4b4 walks 0 to 0.3 and back, and the box is `(pulse * 1.5 + 1)` menu
+/// heights tall. Selected is orange and the rest are blue without it.
+fn draw_menu(
+    overlay: &mut goodomen::render::overlay::Overlay,
+    font: &goodomen::render::overlay::Font,
+    boot: &goodomen::game::api::Boot,
+) {
+    use goodomen::game::menu::TITLE_SCALE;
+    let Some(menu) = boot.menu.and_then(|i| boot.menus.get(i)) else { return };
+    if let Some(title) = &menu.title {
+        overlay.text(
+            font,
+            title,
+            menu.title_at[0],
+            menu.title_at[1],
+            menu.w * TITLE_SCALE,
+            menu.h * TITLE_SCALE,
+            [0.85, 0.85, 0.85, 1.0],
+        );
+    }
+    for (i, item) in menu.items.iter().enumerate() {
+        overlay.text(font, &item.text, item.x, item.y, menu.w, menu.h, menu.colour(i));
+    }
+}
+
 fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Result<String, String> {
     use goodomen::game::body::EYE;
     use goodomen::render::{scene::Scene, Offscreen};
 
     let mut install = Install::open(root).map_err(|e| e.to_string())?;
-    let mut sources = std::collections::BTreeMap::new();
-    for (name, i, j) in entries_named(&install, ".lua") {
-        if let Ok(bytes) = install.containers[i].read_at(j) {
-            sources.insert(name, bytes.iter().map(|&b| b as char).collect::<String>());
-        }
-    }
-    if let Some(dir) = install.override_dir.clone() {
-        if let Ok(read) = std::fs::read_dir(&dir) {
-            for e in read.flatten() {
-                let name = e.file_name().to_string_lossy().to_ascii_lowercase();
-                if name.ends_with(".lua") {
-                    if let Ok(bytes) = std::fs::read(e.path()) {
-                        sources.insert(name, bytes.iter().map(|&b| b as char).collect());
-                    }
-                }
-            }
-        }
-    }
+    let sources = sources_of(&mut install);
 
     let mut video = Video::open("goodomen", 1024, 768, show)?;
     let version = video.version();
@@ -1646,6 +1805,29 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         )
         .map_err(|e| e.to_string())?
     };
+    // the 2-D layer, and the font it draws with. Both are wanted whether or
+    // not a menu is up: the same layer carries the HUD and the subtitles.
+    // `--press 51,59,62` sends those commands, one on each of the first
+    // frames, the way keys would arrive
+    let to_press: Vec<i64> = std::env::args()
+        .position(|a| a == "--press")
+        .and_then(|i| std::env::args().nth(i + 1))
+        .iter()
+        .flat_map(|v| v.split(','))
+        .filter_map(|v| v.trim().parse::<i64>().ok())
+        .collect();
+    let mut pressed = 0usize;
+    let mut overlay = goodomen::render::overlay::Overlay::default();
+    let font = install.read("font.tex").ok().and_then(|bytes| {
+        let tex = goodomen::formats::tex::Texture::parse(&bytes).ok()?;
+        // SAFETY: the context Video::open made is current on this thread.
+        let texture = unsafe { goodomen::render::scene::upload(&video.gl, &tex) }?;
+        let lua = install.read("font.lua").ok()?;
+        let source: String = lua.iter().map(|&b| b as char).collect();
+        let advance = goodomen::render::overlay::Font::advances(&source).ok()?;
+        Some(goodomen::render::overlay::Font { texture, advance })
+    });
+
     let goodomen::game::level::Started {
         scripts: level_scripts,
         loaded,
@@ -1895,9 +2077,43 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
             for event in video.events.poll_iter().chain(
                 expired.then_some(Event::Quit { timestamp: 0 }),
             ) {
+                // a menu takes the keyboard while it is up, which is
+                // what makes it a menu. Escape still leaves the window: the
+                // general dispatch of every command to `OnLuaCommand` is
+                // the next piece, and until it is in, COM_PAUSE has nowhere
+                // to go.
+                if let Event::KeyDown { scancode: Some(code), repeat: false, .. } = event {
+                    if let Some(dik) = goodomen::game::keys::dik(code) {
+                        let bound: Vec<i64> = level_scripts
+                            .lua
+                            .app_data_ref::<goodomen::game::api::Boot>()
+                            .map(|b| {
+                                b.input
+                                    .bindings
+                                    .iter()
+                                    .filter(|(_, id)| *id == dik)
+                                    .map(|(c, _)| *c as i64)
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        for id in bound {
+                            if let Err(e) = goodomen::game::api::command(&level_scripts.lua, id) {
+                                eprintln!("goodomen: command {id}: {e}");
+                            }
+                        }
+                    }
+                }
+                // **Escape is the game's pause key**, and the dispatch above
+                // has already sent it: `comfuncs.game[COM_PAUSE]` raises
+                // `gamecontrol.showmenu`. Shift and escape is the way out of
+                // the window, which is the developer's door and not the
+                // game's -- the menu's own Quit is what should close it, and
+                // that item does not work yet.
+                let leaving = matches!(event, Event::Quit { .. })
+                    || matches!(event, Event::KeyDown { keycode: Some(Keycode::Escape), keymod, .. }
+                        if keymod.intersects(sdl2::keyboard::Mod::LSHIFTMOD | sdl2::keyboard::Mod::RSHIFTMOD));
                 match event {
-                    Event::Quit { .. }
-                    | Event::KeyDown { keycode: Some(Keycode::Escape), .. } => {
+                    _ if leaving => {
                         unsafe { scene.delete(&video.gl) };
                         let (fired, survived) = ticking.total();
                         // the same combat numbers a headless run reports, so
@@ -2092,7 +2308,12 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
             last = std::time::Instant::now();
             let keys: std::collections::HashSet<Scancode> =
                 video.events.keyboard_state().pressed_scancodes().collect();
-            let held = |s: Scancode| keys.contains(&s);
+            // a menu takes the keyboard: the player does not walk while one
+            // is up. ponytail: the *world* still runs behind it, because
+            // `mdkPauseGame` is not built and the run clock the checks
+            // expire on is the tick's own. Pausing is its own piece.
+            let menu_up = goodomen::game::api::showing_menu(&level_scripts.lua);
+            let held = |s: Scancode| !menu_up && keys.contains(&s);
             let fast = held(Scancode::LShift);
             let sniping = level_scripts
                 .lua
@@ -2491,6 +2712,34 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                     started.elapsed().as_secs_f64(),
                     from,
                 )?;
+                // `--press 51` sends a command once, on the first frame, the
+                // way a key would. It is how a check can open the pause menu
+                // -- there is no keyboard behind `xvfb`.
+                // **one per frame**, not one burst: a script asks for a
+                // console scheme by setting `newconscheme`, and `SetConScheme`
+                // only promotes it on the next frame. Pressing pause and
+                // select in the same frame sends the select to the scheme the
+                // pause key was still in, which is how three downs moved the
+                // cursor and the fourth key did nothing.
+                if let Some(id) = to_press.get(pressed).copied() {
+                    pressed += 1;
+                    if let Err(e) = goodomen::game::api::command(&level_scripts.lua, id) {
+                        eprintln!("goodomen: --press {id}: {e}");
+                    }
+                }
+                let _ = goodomen::game::api::set_scheme(&level_scripts.lua);
+                let _ = goodomen::game::api::menu_update(&level_scripts.lua);
+                if let Some(font) = &font {
+                    overlay.clear();
+                    if goodomen::game::api::showing_menu(&level_scripts.lua) {
+                        if let Some(boot) =
+                            level_scripts.lua.app_data_ref::<goodomen::game::api::Boot>()
+                        {
+                            draw_menu(&mut overlay, font, &boot);
+                        }
+                    }
+                    overlay.draw(&video.gl)?;
+                }
             }
             // **`--save PATH` writes the frame the session ended on**, as a
             // plain PPM the way `--level` does. Over a terminal it is the only

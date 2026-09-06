@@ -74,10 +74,24 @@ pub unsafe fn start(
 
     let scripts = Scripts::new()?;
     api::install(&scripts.lua, sources.clone())?;
+    // the menus measure themselves as they are built, so the font and the
+    // string file have to be in before `mdk2.lua` runs -- it ends with
+    // `dofile('menuinit')`, which builds the language chooser
+    if let (Ok(font), Ok(strings)) = (install.read("font.lua"), install.read("mdk2.str")) {
+        let source: String = font.iter().map(|&b| b as char).collect();
+        api::load_text(&scripts.lua, &source, &strings);
+    }
     let mdk2 = sources
         .get("mdk2.lua")
         .ok_or_else(|| Error::Pragma("no mdk2.lua".into()))?;
     scripts.run("mdk2.lua", mdk2)?;
+    // `mdk2.lua` ends with `dofile('menuinit')`; nothing in the scripts loads
+    // `menu.lua`, because the binary does it by name -- 0x93d6c is where that
+    // name sits. It defines `BuildPauseMenu` and the pause dialog itself, so
+    // without it the pause key has nowhere to go.
+    if let Some(src) = sources.get("menu.lua") {
+        scripts.run("menu.lua", src)?;
+    }
     api::level(&scripts, number, checkpoint, "sectionA")?;
 
     let boot = scripts
