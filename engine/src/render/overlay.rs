@@ -40,41 +40,62 @@
 use super::{program, scene::GpuTexture};
 use glow::HasContext;
 
-/// The advances of one font, indexed by character code.
+/// The advances of one font, indexed by character code, and the grid its
+/// atlas is cut into.
+///
+/// **The grid is not always 16 by 16.** `font.tex` is, and `dialogfont.tex`
+/// is 16 columns by **24 rows** -- cells 32 by 21.33 -- which is why its
+/// table is 16 by 24 where the menu font's is 16 by 16. The atlas says so:
+/// its ink comes in 24 bands at a pitch of 21.3, and read that way 41 of its
+/// 94 printable advances are exactly its glyphs' inked widths.
 pub struct Font {
     pub texture: GpuTexture,
-    pub advance: [f32; 256],
+    pub advance: Vec<f32>,
+    pub columns: usize,
+    pub rows: usize,
 }
 
 /// What 0x462cf0 answers when the font carries no width table: the float at
 /// 0x48f2f4, which is **1.0** — a whole cell.
 const DEFAULT_ADVANCE: f32 = 1.0;
 
+/// Every atlas this game ships is sixteen glyphs across; only the number of
+/// rows differs.
+pub const COLUMNS: usize = 16;
+
 impl Font {
-    /// Read the 16 x 16 advance table out of a `font.lua`.
+    /// Read the advance table out of a `font.lua`, and say how many rows the
+    /// atlas has from how many numbers there are.
     ///
-    /// The file is a single `dim = { { .. }, .. }` of 256 numbers and
-    /// nothing else, so the numbers in order are the table in order.
-    pub fn advances(source: &str) -> Result<[f32; 256], String> {
-        let mut out = [DEFAULT_ADVANCE; 256];
-        let mut seen = 0usize;
+    /// The file is a single `dim = { { .. }, .. }` of numbers and nothing
+    /// else, sixteen to a line, so the numbers in order are the table in
+    /// order. Sixteen lines of sixteen is the menu font; sixteen of
+    /// twenty-four is the dialogue font, and the extra columns are the rows
+    /// its atlas has beyond the first sixteen.
+    pub fn advances(source: &str) -> Result<(Vec<f32>, usize), String> {
+        let mut flat = Vec::new();
         for token in source.split(|c: char| !(c.is_ascii_digit() || c == '.')) {
             if token.is_empty() {
                 continue;
             }
-            let v: f32 = token.parse().map_err(|_| format!("not a number: {token}"))?;
-            if seen < 256 {
-                // flat is row-major over the file; the code's low nibble
-                // picks the *outer* table. See the module note.
-                let (row, col) = (seen / 16, seen % 16);
-                out[col * 16 + row] = v;
-            }
-            seen += 1;
+            flat.push(token.parse::<f32>().map_err(|_| format!("not a number: {token}"))?);
         }
-        if seen != 256 {
-            return Err(format!("a font table is 256 numbers, this one has {seen}"));
+        if flat.is_empty() || flat.len() % (COLUMNS * COLUMNS) != 0 {
+            return Err(format!(
+                "a font table is a multiple of {} numbers, this one has {}",
+                COLUMNS * COLUMNS,
+                flat.len()
+            ));
         }
-        Ok(out)
+        let rows = flat.len() / COLUMNS;
+        let mut out = vec![DEFAULT_ADVANCE; flat.len()];
+        for (i, v) in flat.iter().enumerate() {
+            // the file is row-major and the *code's* low nibble picks the
+            // outer table, so the two are transposed. See the module note.
+            let (row, column) = (i / rows, i % rows);
+            out[column * COLUMNS + row] = *v;
+        }
+        Ok((out, rows))
     }
 
     /// How wide a string is, in units of one cell — 0x462d10, which is the
@@ -82,7 +103,7 @@ impl Font {
     /// **Bytes, not characters.** A string out of `mdk2.str` is code-page
     /// bytes and the atlas is a code page; see [`crate::formats::strfile`].
     pub fn width(&self, text: &[u8]) -> f32 {
-        text.iter().map(|&b| self.advance[b as usize]).sum()
+        text.iter().map(|&b| self.advance.get(b as usize).copied().unwrap_or(DEFAULT_ADVANCE)).sum()
     }
 }
 
@@ -225,19 +246,20 @@ impl Overlay {
         colour: [f32; 4],
     ) -> f32 {
         let mut pen = x;
+        let (cols, rows) = (font.columns as f32, font.rows as f32);
         for &b in s {
-            let (col, row) = ((b % 16) as f32, (b / 16) as f32);
+            let (col, row) = ((b as usize % font.columns) as f32, (b as usize / font.columns) as f32);
             // a space is blank in the texture as well, so it costs a quad
             // for nothing; skipping it is the one special case worth having
             if b != b' ' {
                 self.quad(
                     Some(font.texture.texture),
                     [pen, y, w, h],
-                    [col / 16.0, row / 16.0, 1.0 / 16.0, 1.0 / 16.0],
+                    [col / cols, row / rows, 1.0 / cols, 1.0 / rows],
                     colour,
                 );
             }
-            pen += font.advance[b as usize] * w;
+            pen += font.advance.get(b as usize).copied().unwrap_or(DEFAULT_ADVANCE) * w;
         }
         pen
     }
@@ -385,7 +407,8 @@ mod tests {
             src.push_str("}\n");
         }
         src.push('}');
-        let a = Font::advances(&src).unwrap();
+        let (a, rows) = Font::advances(&src).unwrap();
+        assert_eq!(rows, 16);
         for code in 0..256usize {
             // the file's outer index is the code's *low* nibble
             let want = (code % 16) as f32 + (code / 16) as f32 / 100.0;
@@ -417,7 +440,7 @@ pub fn selfcheck(font_lua: &str, font_tex: &[u8]) -> Result<String, String> {
     const W: f32 = 0.1;
     const H: f32 = 0.2;
 
-    let advance = Font::advances(font_lua)?;
+    let (advance, rows) = Font::advances(font_lua)?;
     let tex = crate::formats::tex::Texture::parse(font_tex).map_err(|e| e.to_string())?;
     let video = Video::open("goodomen", SIZE as u32, SIZE as u32, false)?;
     let gl = &video.gl;
@@ -427,7 +450,7 @@ pub fn selfcheck(font_lua: &str, font_tex: &[u8]) -> Result<String, String> {
         let target = Offscreen::new(gl, SIZE, SIZE)?;
         let texture =
             super::scene::upload(gl, &tex).ok_or_else(|| "no texture".to_string())?;
-        let font = Font { texture, advance };
+        let font = Font { texture, advance, columns: COLUMNS, rows };
         let mut overlay = Overlay::default();
         let pen = overlay.text(&font, TEXT.as_bytes(), X, Y, W, H, [1.0, 1.0, 1.0, 1.0]);
         gl.clear_color(0.0, 0.0, 0.0, 1.0);

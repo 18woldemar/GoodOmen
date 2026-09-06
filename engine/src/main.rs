@@ -1944,8 +1944,13 @@ fn title(
         let font = picture(&mut install, "font.tex").and_then(|texture| {
             let lua = install.read("font.lua").ok()?;
             let source: String = lua.iter().map(|&b| b as char).collect();
-            let advance = goodomen::render::overlay::Font::advances(&source).ok()?;
-            Some(goodomen::render::overlay::Font { texture, advance })
+            let (advance, rows) = goodomen::render::overlay::Font::advances(&source).ok()?;
+            Some(goodomen::render::overlay::Font {
+                texture,
+                advance,
+                columns: goodomen::render::overlay::COLUMNS,
+                rows,
+            })
         });
         let corners = picture(&mut install, "textbox2.tex");
         let edges = picture(&mut install, "textbox1.tex");
@@ -2063,6 +2068,10 @@ fn title(
                     if let Some(boot) = scripts.lua.app_data_ref::<api::Boot>() {
                         draw_menu(&mut overlay, gui, &boot);
                     }
+                }
+                let fade = api::fade_step(&scripts.lua, dt);
+                if fade[3] > 0.0 {
+                    overlay.fill(fade);
                 }
                 overlay.draw(&video.gl)?;
             }
@@ -2288,8 +2297,13 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         let font = picture(&mut install, "font.tex").and_then(|texture| {
             let lua = install.read("font.lua").ok()?;
             let source: String = lua.iter().map(|&b| b as char).collect();
-            let advance = goodomen::render::overlay::Font::advances(&source).ok()?;
-            Some(goodomen::render::overlay::Font { texture, advance })
+            let (advance, rows) = goodomen::render::overlay::Font::advances(&source).ok()?;
+            Some(goodomen::render::overlay::Font {
+                texture,
+                advance,
+                columns: goodomen::render::overlay::COLUMNS,
+                rows,
+            })
         });
         let corners = picture(&mut install, "textbox2.tex");
         let edges = picture(&mut install, "textbox1.tex");
@@ -3217,6 +3231,11 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                         {
                             draw_menu(&mut overlay, gui, &boot);
                         }
+                    }
+                    // and the fade over all of it, menu included
+                    let fade = goodomen::game::api::fade_step(&level_scripts.lua, dt);
+                    if fade[3] > 0.0 {
+                        overlay.fill(fade);
                     }
                     overlay.draw(&video.gl)?;
                 }

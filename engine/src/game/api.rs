@@ -32,6 +32,69 @@ use crate::game::world::{self, Gob};
 use mlua::{Lua, Value, Variadic};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// The screen fade, which is one colour over everything at an alpha the
+/// scene keeps for itself.
+///
+/// **0x45f680** sets it and **0x45eb60** walks it, and the three modes are
+/// the short at `scene + 0x100`:
+///
+/// ```text
+/// 0  alpha = elapsed / duration, clamped to 1     fade *to* the colour
+/// 1  alpha = 1 - elapsed / duration, floor 0      fade *from* it
+/// 2  half and half: up to duration/2 the first, after it the second
+/// ```
+///
+/// It runs until `elapsed > duration + hold`, and then only the clocks are
+/// cleared -- **the alpha stays where it ended**. That is what makes
+/// `menu.diff.Go`'s `(0.8, 10, 0)` work: black in eight tenths of a second
+/// and black for ten more, which is the level load happening behind it.
+///
+/// A new fade only replaces a running one when that one has finished, or is
+/// disabled, or **the new duration is negative** -- which is how
+/// `comfuncs.game[COM_PAUSE]` forces one with `-1.0`.
+#[derive(Default, Clone)]
+pub struct Fade {
+    pub colour: [f32; 3],
+    pub duration: f64,
+    pub hold: f64,
+    pub mode: i64,
+    pub elapsed: f64,
+    pub enabled: bool,
+    /// What the screen is covered by right now, 0 to 1.
+    pub alpha: f64,
+}
+
+impl Fade {
+    /// One frame of it. 0x45eb60's own arithmetic.
+    pub fn step(&mut self, dt: f64) {
+        if !self.enabled || self.duration <= 0.0 {
+            return;
+        }
+        let half = self.duration * 0.5;
+        self.alpha = match self.mode {
+            0 => (self.elapsed / self.duration).min(1.0),
+            1 => (1.0 - self.elapsed / self.duration).max(0.0),
+            _ if self.elapsed <= half => (self.elapsed / half).min(1.0),
+            _ => (1.0 - (self.elapsed - half) / half).max(0.0),
+        };
+        self.elapsed += dt;
+        if self.elapsed > self.duration + self.hold {
+            // the clocks go, the alpha stays
+            self.duration = 0.0;
+            self.elapsed = 0.0;
+            self.hold = 0.0;
+        }
+    }
+
+    /// Whether a fresh `omSceneFade` may take over.
+    fn free(&self, duration: f64) -> bool {
+        self.duration <= 0.0
+            || !self.enabled
+            || self.duration <= self.elapsed
+            || duration < 0.0
+    }
+}
+
 /// A room, with the box a camera is tested against and the rooms it draws.
 #[derive(Default)]
 pub struct Visibility {
@@ -335,6 +398,10 @@ pub struct Boot {
     /// Where `mdkShowMouse` last put the cursor, and whether it asked for
     /// one at all.
     pub mouse: Option<[f32; 2]>,
+    /// The screen fade — `omSceneFade`, which the movies open and close
+    /// with and which `menu.diff.Go` holds black over a level load. See
+    /// [`Fade`].
+    pub fade: Fade,
     /// The level a script has asked the engine to load next, and where in
     /// it. **`mdkNewGame` does not load anything**: 0x42cc80 parks the level
     /// and the checkpoint and raises a flag at 0x5d1224, and the main loop
@@ -749,8 +816,8 @@ pub fn load_text(lua: &Lua, font_lua: &str, string_file: &[u8]) {
         Some(b) => b,
         None => return,
     };
-    if let Ok(a) = crate::render::overlay::Font::advances(font_lua) {
-        boot.advance = a.to_vec();
+    if let Ok((a, _rows)) = crate::render::overlay::Font::advances(font_lua) {
+        boot.advance = a;
     }
     if let Ok(s) = crate::formats::strfile::Strings::parse(string_file) {
         boot.strings = s;
@@ -829,6 +896,16 @@ pub fn set_video_size(lua: &Lua, width: u32, height: u32) {
     if let Some(mut boot) = lua.app_data_mut::<Boot>() {
         boot.video = [width as i64, height as i64];
     }
+}
+
+/// One frame of the screen fade. It is presentation, not world state, so it
+/// runs whether or not the game is paused — the pause menu's own fade is
+/// the reason.
+pub fn fade_step(lua: &Lua, dt: f64) -> [f32; 4] {
+    let Some(mut boot) = lua.app_data_mut::<Boot>() else { return [0.0; 4] };
+    boot.fade.step(dt);
+    let f = &boot.fade;
+    [f.colour[0], f.colour[1], f.colour[2], f.alpha as f32]
 }
 
 /// Whether a menu is up — `gamecontrol.showmenu`, which the scripts raise
@@ -4144,6 +4221,30 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         lua.create_function(|lua, args: Variadic<Value>| {
             let (x, y) = (args.first().map(number).unwrap_or(0.5), args.get(1).map(number).unwrap_or(0.5));
             boot_mut(lua)?.mouse = Some([x as f32, y as f32]);
+            Ok(())
+        })?,
+    )?;
+
+    globals.set(
+        "omSceneFade",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            // 0x41ef10: (scene, r, g, b, i, duration, hold, mode, enable=1)
+            let f = |i: usize, or: f64| args.get(i).map(number).unwrap_or(or);
+            let duration = f(5, 0.0);
+            let mut boot = boot_mut(lua)?;
+            if !boot.fade.free(duration) {
+                return Ok(());
+            }
+            boot.fade = Fade {
+                colour: [f(1, 0.0) as f32, f(2, 0.0) as f32, f(3, 0.0) as f32],
+                // a negative duration is the *force*, not the length
+                duration: duration.abs(),
+                hold: f(6, 0.0),
+                mode: f(7, 0.0) as i64,
+                elapsed: 0.0,
+                enabled: f(8, 1.0) != 0.0,
+                alpha: boot.fade.alpha,
+            };
             Ok(())
         })?,
     )?;

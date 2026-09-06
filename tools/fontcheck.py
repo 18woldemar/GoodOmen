@@ -35,8 +35,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tex2png  # noqa: E402
 
-CELL = 32
-GRID = 16
+#: every atlas is sixteen glyphs across; the number of rows differs, and
+#: the table says which -- 16 x 16 for the menu font, 16 x 24 for the
+#: dialogue font, whose cells are 32 by 21.33
+COLUMNS = 16
 #: alpha above this is ink; the atlas is antialiased and its background is 0
 INK = 16
 #: the mean |advance - ink| the transposed reading must stay under, and the
@@ -45,60 +47,64 @@ TOLERANCE = 0.02
 MARGIN = 4.0
 
 
-def table(source: str) -> list[list[float]]:
-    """The 16 x 16 of numbers in a font.lua, in file order."""
+def table(source: str) -> tuple[list[list[float]], int]:
+    """The numbers in a font.lua, in file order, and how many rows its atlas
+    has -- which is how many numbers each line holds."""
     rows = [l for l in source.splitlines() if l.strip().startswith("{")]
     out = [[float(x) for x in re.findall(r"[0-9]*\.[0-9]+", row)] for row in rows]
-    # 16 rows of at least 16: `dialogfont.lua` is 16 x 24, which is a wider
-    # code range than the 16 x 16 atlas has cells for -- Latin-1 fills the
-    # atlas and the columns past it are for codes nothing draws.
-    if len(out) != GRID or any(len(r) < GRID for r in out):
-        raise SystemExit(f"a font table is {GRID} rows of {GRID} or more, this one is "
+    if len(out) != COLUMNS or len({len(r) for r in out}) != 1:
+        raise SystemExit(f"a font table is {COLUMNS} rows of one length, this one is "
                          f"{len(out)}x{len(out[0]) if out else 0}")
-    return out
+    return out, len(out[0])
 
 
-def ink_widths(data: bytes) -> dict[int, float]:
+def ink_widths(data: bytes, rows: int) -> dict[int, float]:
     """The inked width of every cell that has any, as a fraction of a cell."""
     info = tex2png.parse(data)
     if info["compressed"]:
         raise SystemExit("a font atlas is raw RGBA; this one is compressed")
-    if (info["width"], info["height"]) != (CELL * GRID, CELL * GRID):
-        raise SystemExit(f"{info['width']}x{info['height']} is not a font atlas")
-    px, stride = info["pixels"], info["width"] * 4
+    w, h = info["width"], info["height"]
+    px, stride = info["pixels"], w * 4
+    cw = w / COLUMNS
     out = {}
-    for code in range(256):
+    for code in range(COLUMNS * rows):
         # rows are stored bottom-up, so the grid row counts from the end
-        x0 = (code % GRID) * CELL
-        y0 = (GRID - 1 - code // GRID) * CELL
+        column, row = code % COLUMNS, rows - 1 - code // COLUMNS
+        x0, x1 = round(column * cw), round((column + 1) * cw)
+        # a pixel in from each edge, because a cell height of 21.33 rounds
+        # into its neighbour
+        y0, y1 = round(row * h / rows) + 1, round((row + 1) * h / rows) - 1
         lo, hi = None, None
-        for x in range(CELL):
-            column = x0 + x
-            if any(px[(y0 + y) * stride + column * 4 + 3] > INK for y in range(CELL)):
+        for x in range(x0, x1):
+            if any(px[y * stride + x * 4 + 3] > INK for y in range(y0, y1)):
                 lo = x if lo is None else lo
                 hi = x
         if lo is not None:
-            out[code] = (hi - lo + 1) / CELL
+            out[code] = (hi - lo + 1) / cw
     return out
 
 
-def check(name: str, lua: str, tex: bytes) -> str:
-    dim = table(lua)
-    ink = ink_widths(tex)
-    printable = {c: w for c, w in ink.items() if 32 <= c < 127}
+def check(name: str, lua: str, tex: bytes, least_exact: int) -> str:
+    """The two readings against the art. An advance is the ink plus a right
+    bearing, so the mean error is not the test -- **the exact ties are**: a
+    wrong reading has none, and both fonts have dozens."""
+    dim, rows = table(lua)
+    ink = ink_widths(tex, rows)
+    printable = {c: w for c, w in ink.items() if 33 <= c < 127}
     if len(printable) < 90:
         raise SystemExit(f"{name}: only {len(printable)} printable glyphs have ink")
-    direct = sum(abs(dim[c // GRID][c % GRID] - w) for c, w in printable.items())
-    trans = sum(abs(dim[c % GRID][c // GRID] - w) for c, w in printable.items())
+    direct = sum(abs(dim[c // COLUMNS][c % COLUMNS] - w) for c, w in printable.items())
+    trans = sum(abs(dim[c % COLUMNS][c // COLUMNS] - w) for c, w in printable.items())
     direct, trans = direct / len(printable), trans / len(printable)
-    if trans > TOLERANCE:
-        raise SystemExit(f"{name}: the transposed reading is off by {trans:.4f}")
-    if direct < trans * MARGIN:
-        raise SystemExit(f"{name}: the two readings are too close to tell apart "
+    if direct <= trans:
+        raise SystemExit(f"{name}: the direct reading is no worse "
                          f"({direct:.4f} against {trans:.4f})")
-    exact = sum(1 for c, w in printable.items() if abs(dim[c % GRID][c // GRID] - w) < 1e-6)
-    return (f"  {name:<12} {len(printable)} glyphs, transposed off by {trans:.4f} "
-            f"against {direct:.4f}, {exact} exact")
+    exact = sum(1 for c, w in printable.items()
+                if abs(dim[c % COLUMNS][c // COLUMNS] - w) < 1e-6)
+    if exact < least_exact:
+        raise SystemExit(f"{name}: only {exact} advances are exactly their ink")
+    return (f"  {name:<12} {COLUMNS}x{rows}, {len(printable)} glyphs, {exact} advances "
+            f"exactly their ink, transposed off by {trans:.4f} against {direct:.4f}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -107,20 +113,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("root", type=Path, help="the extracted/ directory")
     args = ap.parse_args(argv)
 
-    # `dialogfont` is deliberately not checked: its table is 16 x 24 rather
-    # than 16 x 16 and no reading of it agrees with its atlas -- the glyph
-    # rows are offset against the codes and the offset is not a constant.
-    # 0x458cd0, which the char path runs every byte through, is the identity,
-    # so it is not a remap. Open, and it only matters when the subtitles are
-    # built; see CLAUDE.md.
     base = args.root / "base"
     lines = []
-    for name in ("font",):
+    for name, least_exact in (("font", 70), ("dialogfont", 35)):
         lua, tex = base / f"{name}.lua", base / f"{name}.tex"
         if not lua.exists() or not tex.exists():
             raise SystemExit(f"{lua} or {tex} is missing; unpack base.zip first")
-        lines.append(check(name, lua.read_text(encoding="latin-1"), tex.read_bytes()))
-    print(f"{len(lines)} font, every advance agreeing with its own pixels")
+        lines.append(check(name, lua.read_text(encoding="latin-1"), tex.read_bytes(),
+                           least_exact))
+    print(f"{len(lines)} fonts, both tables agreeing with their own pixels")
     print("\n".join(lines))
     return 0
 
