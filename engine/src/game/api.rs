@@ -3573,6 +3573,26 @@ pub fn type_name(kind: f64) -> Option<&'static str> {
 /// enemies — and they disagree with the convention where it matters:
 /// `OBJ_LASERCANNON` wears `lasergatgun.mod`, not `lasercannon.mod`. The
 /// naming convention stays as the fallback for everything else.
+/// **The model an object actually wears**, which is not the same question as
+/// what its *type* wears. The order is the original's own:
+///
+/// 1. a table that names the type -- the walker definitions, the item table,
+///    the shot table, the four characters. A walker's `resource` slot holds a
+///    **waypoint name**, not a model, so asking it first drew nothing at all
+///    for every enemy the levels place with a pen.
+/// 2. the registration's own resource, which is what the object factory's
+///    default case loads.
+/// 3. the `OBJ_*` name, which agrees with the factory wherever it fires.
+pub fn model_of(kind: f64, resource: Option<&str>) -> Option<String> {
+    if let Some(m) = crate::game::world::table_model(kind) {
+        return Some(m.to_string());
+    }
+    if let Some(r) = resource.filter(|r| !r.to_ascii_lowercase().ends_with(".wav")) {
+        return Some(r.to_string());
+    }
+    model_for_type(kind)
+}
+
 pub fn model_for_type(kind: f64) -> Option<String> {
     if let Some(m) = crate::game::world::table_model(kind) {
         return Some(m.to_string());
@@ -3908,6 +3928,26 @@ pub fn stalls(lua: &Lua) -> Vec<(String, String, i64, [f64; 3])> {
         let Ok(script) = stack.get::<mlua::Table>("script") else { continue };
         let Ok(task) = script.get::<mlua::Table>(next) else { continue };
         let Ok(Value::Function(f)) = task.get::<Value>(1) else { continue };
+        // **and what the task was called with**, because "waiting on
+        // `omAnimJustLooped`" is not an answer and "waiting for
+        // `ml10x_allmovgob` to loop animation 77" is
+        let about = task
+            .get::<mlua::Table>(2)
+            .ok()
+            .map(|args| {
+                let who = match args.get::<Value>(1) {
+                    Ok(Value::Table(t)) => t.get::<String>("name").unwrap_or_default(),
+                    Ok(Value::Number(n)) => format!("{n}"),
+                    _ => String::new(),
+                };
+                let what = args.get::<Value>(2).ok().and_then(|v| match v {
+                    Value::Number(n) => Some(format!(" {n}")),
+                    _ => None,
+                });
+                format!("{who}{}", what.unwrap_or_default())
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default();
         let name = named
             .iter()
             .find(|(_, other)| *other == f)
@@ -3917,6 +3957,9 @@ pub fn stalls(lua: &Lua) -> Vec<(String, String, i64, [f64; 3])> {
         // fault from waiting: `StartScript` calls `mdkGobEnableScript`, and
         // an object that is not in that set has a task list nothing runs.
         let mut name = if ticking.contains(&g.name) { name } else { format!("{name} (untouched)") };
+        if !about.is_empty() {
+            name = format!("{name}({about})");
+        }
         // and `script.lua`'s own clock if the object is on one, because
         // "waiting on Wait" and "waiting on Wait with eight seconds still on
         // it every time you look" are different faults
@@ -5544,7 +5587,17 @@ pub fn tick_touching(
             w.iter()
                 .filter(|(_, g)| !g.name.is_empty())
                 .filter_map(|(_, g)| {
-                    Some((g.name.clone(), *boot.playing.get(&g.name)?, model_for_type(g.kind)?))
+                    // **the model it is actually wearing**, not its type's:
+                    // every cutscene actor is an `OBJ_SCENERY` with its own
+                    // model in the resource slot, and asking the type gave
+                    // `scenery`, which has no animation spans -- so the clock
+                    // never wrapped and every movie waiting on
+                    // `omAnimJustLooped` waited for ever.
+                    Some((
+                        g.name.clone(),
+                        *boot.playing.get(&g.name)?,
+                        model_of(g.kind, g.resource.as_deref())?,
+                    ))
                 })
                 .collect()
         };

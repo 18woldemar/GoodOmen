@@ -948,7 +948,9 @@ fn load_animation_keys(install: &mut Install, scripts: &Scripts) -> usize {
         .map(|(_, name, _)| name.to_string())
         .collect();
     if let Some(w) = world::world(&scripts.lua) {
-        wanted.extend(w.iter().filter_map(|(_, g)| api::model_for_type(g.kind)));
+        wanted.extend(
+            w.iter().filter_map(|(_, g)| api::model_of(g.kind, g.resource.as_deref())),
+        );
     }
     let mut found = 0;
     let mut keys = std::collections::BTreeMap::new();
@@ -1330,7 +1332,8 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         // once a second, which is often enough to catch a list that moves
         // and cheap enough to leave on for the whole run
         if stalls && step % 30 == 0 {
-            for (who, what, at, where_) in api::stalls(&scripts.lua) {
+            for (who, what0, at, where_) in api::stalls(&scripts.lua) {
+                let what = format!("{what0} at task {at}");
                 // a list whose index moved is alive, and so is an object that
                 // walked -- level 9's `ch1` runs 89 units, arrives, deletes
                 // itself and is made again, and its index is 1 every time
@@ -1361,7 +1364,9 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         ];
         let stuck: Vec<String> = watched
             .into_iter()
-            .filter(|(_, (what, moved))| !*moved && !TERMINAL.contains(&what.as_str()))
+            .filter(|(_, (what, moved))| {
+                !*moved && !TERMINAL.iter().any(|t| what.starts_with(t))
+            })
             .map(|(who, (what, _))| format!("{who} on {what}"))
             .collect();
         println!(
@@ -2207,7 +2212,10 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                             .filter(|(id, _)| !drawn.contains(id))
                             .filter(|(_, g)| !g.gui)
                             .filter_map(|(id, g)| {
-                                Some((id, goodomen::game::api::model_for_type(g.kind)?))
+                                Some((
+                                    id,
+                                    goodomen::game::api::model_of(g.kind, g.resource.as_deref())?,
+                                ))
                             })
                             .collect()
                     })

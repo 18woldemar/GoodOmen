@@ -137,10 +137,7 @@ pub unsafe fn start(
             // a character's `resource` slot holds a **waypoint name**, and a
             // sound's holds a `.wav`, so neither names a model; the model
             // comes from the object's type instead
-            let named = match gob.resource.clone() {
-                Some(r) if r.to_ascii_lowercase().ends_with(".wav") => None,
-                other => other,
-            };
+            let named = crate::game::api::model_of(gob.kind, gob.resource.as_deref());
             // The type-to-model convention holds for only 67 of the 149
             // `OBJ_*` types, so it is not applied to all of them: it would
             // drag in twenty-one guesses, and `cloak.mod`'s vertices are
@@ -155,8 +152,8 @@ pub unsafe fn start(
             if gob.gui {
                 return None;
             }
-            let from_type = named.is_none();
-            let resource = named.or_else(|| crate::game::api::model_for_type(gob.kind))?;
+            let from_type = gob.resource.is_none();
+            let resource = named?;
             Some((
                 resource,
                 Mat4::translation([

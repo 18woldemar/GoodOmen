@@ -357,13 +357,22 @@ ENGINE = [
       # 47868 -> 49604 with the birdbrain built: level 9 places three and
       # they are the last enemy class the scripts deploy in numbers.
       "--expect-events", "49604", "--expect-survived", "49604"], None),
-    # level 10's zizzy turrets shoot: nine bullets in thirty seconds, each one
-    # carrying its damage, damage type, lifetime and speed out of the shot
-    # table at 0x497388 rather than out of the call.
+    # level 10's zizzy turrets shoot, each bullet carrying its damage, damage
+    # type, lifetime and speed out of the shot table at 0x497388 rather than
+    # out of the call.
+    #
+    # **9 -> 253 when an object started wearing its own model.** `ziz_tur01`
+    # is an `OBJ_SCENERY` whose resource names `ziz_tur01.mod`, and the
+    # animation clock was being looked up under `scenery` -- no span, no wrap,
+    # so each turret's shoot key fired **once in the life of the object**.
+    # Six turrets looping a 0.7-second clip for thirty seconds is 253, and the
+    # arithmetic matches to four. Whether a turret should hold `ANIM_SHOOT`
+    # for ever is a separate question about the engine's looping rule, and
+    # this pins what it does today.
     ("a run fires shots that carry the table's own numbers",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
-      "--run", "10", "1", "30", "--expect-shots", "9",
+      "--run", "10", "1", "30", "--expect-shots", "253",
       "--expect-events", "2751", "--expect-survived", "2751"], None),
     # and a shot reaches the player. `--hunt` steers the driver at the
     # nearest thing with hitpoints instead of holding forwards, which is what
