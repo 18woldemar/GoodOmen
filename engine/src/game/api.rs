@@ -455,6 +455,13 @@ pub struct Boot {
     /// **`(model, animation)` pairs that do not come round again**, out of the
     /// record's `ends` field -- see [`crate::formats::model::Animation::ends`].
     /// 0x4611b0 wraps a 0, reverses a 2 and **clamps everything else**.
+    /// **Where to aim at an object**, `character + 0x08` -- the height a
+    /// sight line is raised by, which every AI adds to a target's z and the
+    /// gun tests against. `mdkGobSetBullseye` (0x43c120 into **0x40f270**,
+    /// one store) is the only writer and the shipped scripts make exactly one
+    /// call: `mdkGobSetBullseye(hanspilot, 3.5)`. He sits high in his
+    /// machine, so a shot at [`crate::game::body::EYE`] passes under him.
+    pub bullseye: BTreeMap<String, f64>,
     pub oneshot: BTreeSet<(String, i64)>,
     /// Objects whose current animation has run to its end and clamped there.
     /// `omAnimIsPlaying` answers 0 for them, which is what `WaitForAnim` in
@@ -1730,6 +1737,17 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             if let Some(mut w) = world::world_mut(lua) {
                 w.set_rotation(id, q);
             }
+            Ok(())
+        })?,
+    )?;
+    // one store, and the only shipped call is on the Hans pilot -- see
+    // [`Boot::bullseye`]
+    globals.set(
+        "mdkGobSetBullseye",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(who) = args.first().and_then(gob_name) else { return Ok(()) };
+            let h = args.get(1).map(number).unwrap_or(0.0);
+            boot_mut(lua)?.bullseye.insert(who, h);
             Ok(())
         })?,
     )?;
@@ -4370,7 +4388,12 @@ pub fn hitscan(lua: &Lua, shooter: &str, mode: i64) -> Option<String> {
     /// Ours: how far off the nose a gob still counts as under the crosshair.
     const CONE: f64 = 0.15;
     let (at, yaw) = stance(lua, shooter)?;
-    let eye = [at[0], at[1], at[2] + crate::game::body::EYE];
+    let aim = boot_ref(lua).map(|b| b.bullseye.clone()).unwrap_or_default();
+    let eye = [
+        at[0],
+        at[1],
+        at[2] + aim.get(shooter).copied().unwrap_or(crate::game::body::EYE),
+    ];
     let solid = lua.app_data_ref::<std::rc::Rc<crate::game::body::Collision>>();
     let victim = {
         let w = world::world(lua)?;
@@ -4387,7 +4410,11 @@ pub fn hitscan(lua: &Lua, shooter: &str, mode: i64) -> Option<String> {
             {
                 continue;
             }
-            let head = [g.position[0], g.position[1], g.position[2] + crate::game::body::EYE];
+            let head = [
+                g.position[0],
+                g.position[1],
+                g.position[2] + aim.get(&g.name).copied().unwrap_or(crate::game::body::EYE),
+            ];
             if solid.as_ref().is_some_and(|c| !c.sees(eye, head)) {
                 continue;
             }
@@ -6860,6 +6887,38 @@ mod tests {
             Some("dr"),
             "0x4084c4, and `doc.mod` is not a file in the game"
         );
+    }
+
+    /// **Where to aim at a thing is its own.** `mdkGobSetBullseye` raises
+    /// the point the gun tests, and the Hans pilot is the one object in the
+    /// game that needs it -- at 3.5 he is above a shot aimed at `EYE`.
+    #[test]
+    fn a_bullseye_is_where_the_shot_looks() {
+        let shoot = |high: bool| {
+            let scripts = Scripts::new().unwrap();
+            install(&scripts.lua, Default::default()).unwrap();
+            scripts
+                .lua
+                .load(
+                    // the target stands three units up, which is over a
+                    // sight line raised by EYE and under one raised by 3.5
+                    "mdkRegisterObject('bob', 100, scene, nil, -1, 0,0,0, \
+                     1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                     mdkRegisterObject('hans', 204, scene, nil, -1, 0,20,3, \
+                     1,0,0,0, nil,0,0,0,0, nil, nil, 0)",
+                )
+                .exec()
+                .unwrap();
+            if high {
+                scripts.lua.load("mdkGobSetBullseye(hans, 3.5)").exec().unwrap();
+            }
+            let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
+            let aim = boot.bullseye.get("hans").copied();
+            drop(boot);
+            (aim, hitscan(&scripts.lua, "bob", 0))
+        };
+        assert_eq!(shoot(false).0, None, "nothing set it");
+        assert_eq!(shoot(true).0, Some(3.5), "and the script did");
     }
 
     /// `mdkGobSetOrientation` composes three axis-angle turns the way
