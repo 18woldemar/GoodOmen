@@ -172,10 +172,15 @@ ENGINE = [
     ("the 2-D layer draws the game's own font",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "--font", "$MDK2_GOG"], None),
-    ("the game's own front door opens",
+    # **The front door opens onto the game.** Eight seconds of the run's own
+    # clock, because the title screen holds its buttons shut for three while
+    # the legal notice fades and the opening animation is 1.45 more; then
+    # select, select, and the 1.2-second timer `menu.diff.Go` arms, which is
+    # what calls `mdkNewGame(1, 9)`.
+    ("the game's own front door opens, and starts a game",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG", "--title",
-      "--for", "0.2"], None),
+      "--for", "8", "--press", "5:62,5.5:62", "--expect-level", "1,9"], None),
     ("the menu the scripts build answers its own keys",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "--menu", "$MDK2_GOG"], None),

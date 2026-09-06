@@ -335,6 +335,16 @@ pub struct Boot {
     /// Where `mdkShowMouse` last put the cursor, and whether it asked for
     /// one at all.
     pub mouse: Option<[f32; 2]>,
+    /// The level a script has asked the engine to load next, and where in
+    /// it. **`mdkNewGame` does not load anything**: 0x42cc80 parks the level
+    /// and the checkpoint and raises a flag at 0x5d1224, and the main loop
+    /// acts on it between frames. This is that flag.
+    pub next_level: Option<(u32, u32)>,
+    /// `mdkExitGame`, which the title screen's fifth button calls.
+    pub quit: bool,
+    /// `mdkSetDifficulty` — 0.2, 0.35, 0.5 or 1.0, which is what the four
+    /// items of `menu.diff` pass. Nothing reads it here yet.
+    pub difficulty: f64,
     /// The window's size, which the video options read back and show. One
     /// resolution is offered because one is what the engine has.
     pub video: [i64; 2],
@@ -4116,6 +4126,61 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             })?,
         )?;
     }
+
+    // The cursor, which the title screen watches to tell a mouse from a
+    // key: `level0.lua` compares this frame's `chGetMouseX` with last
+    // frame's, and the recorder's table answered arithmetic on a table 59
+    // times a run. `mdkShowMouse` and `chSetMouseXY` are where it is put.
+    for (name, axis) in [("chGetMouseX", 0usize), ("chGetMouseY", 1)] {
+        globals.set(
+            name,
+            lua.create_function(move |lua, _: Variadic<Value>| {
+                Ok(boot_ref(lua)?.mouse.map(|m| m[axis] as f64).unwrap_or(0.5))
+            })?,
+        )?;
+    }
+    globals.set(
+        "chSetMouseXY",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let (x, y) = (args.first().map(number).unwrap_or(0.5), args.get(1).map(number).unwrap_or(0.5));
+            boot_mut(lua)?.mouse = Some([x as f32, y as f32]);
+            Ok(())
+        })?,
+    )?;
+
+    // --- starting a game -------------------------------------------------
+    //
+    // The title screen's New Game button ends in `mdkNewGame(1, 9)`, from
+    // `startscreen.OnTimer` a second and a bit after the difficulty is
+    // chosen. **It loads nothing itself**: 0x42cc80 parks the level and the
+    // checkpoint and raises a flag, and the main loop picks the request up
+    // between frames. So does `mdkStartLevel`, and so will the end of a
+    // level when that is built.
+    for name in ["mdkNewGame", "mdkStartLevel", "mdkRestartGame"] {
+        globals.set(
+            name,
+            lua.create_function(|lua, args: Variadic<Value>| {
+                let level = args.first().map(number).unwrap_or(1.0).max(0.0) as u32;
+                let checkpoint = args.get(1).map(number).unwrap_or(1.0).max(0.0) as u32;
+                boot_mut(lua)?.next_level = Some((level, checkpoint));
+                Ok(())
+            })?,
+        )?;
+    }
+    globals.set(
+        "mdkExitGame",
+        lua.create_function(|lua, _: Variadic<Value>| {
+            boot_mut(lua)?.quit = true;
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "mdkSetDifficulty",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            boot_mut(lua)?.difficulty = args.first().map(number).unwrap_or(0.5);
+            Ok(())
+        })?,
+    )?;
 
     // --- what the video and sound options ask ----------------------------
     //

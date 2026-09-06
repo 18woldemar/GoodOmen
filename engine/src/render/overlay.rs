@@ -275,10 +275,10 @@ impl Overlay {
         // the way the sampler does; [`Overlay::quad`] takes them counting
         // down from the top like everything else on this layer. So every v
         // out of 0x462ff0 is turned over on the way in, and only here.
-        let mut piece = |o: &mut Self, texture, place: [f32; 4], [u0, v0, u1, v1]: [f32; 4]| {
+        let piece = |o: &mut Self, texture, place: [f32; 4], [u0, v0, u1, v1]: [f32; 4]| {
             o.quad(texture, place, [u0, 1.0 - v0, u1 - u0, v0 - v1], white);
         };
-        let mut turned = |o: &mut Self, texture, place: [f32; 4], [u0, v0, u1, v1]: [f32; 4]| {
+        let turned = |o: &mut Self, texture, place: [f32; 4], [u0, v0, u1, v1]: [f32; 4]| {
             o.quad_turned(texture, place, [u0, 1.0 - v0, u1 - u0, v0 - v1], white);
         };
 

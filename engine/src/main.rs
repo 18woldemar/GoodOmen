@@ -48,8 +48,38 @@ fn main() {
             .find(|a| !a.starts_with("--") && a.parse::<u32>().is_err())
             .map(std::path::PathBuf::from)
             .unwrap_or_else(Install::beside_the_binary);
-        match title(&root, args.iter().any(|a| a == "--window")) {
-            Ok(line) => println!("{line}"),
+        let show = args.iter().any(|a| a == "--window");
+        match title(&root, show) {
+            Ok((line, asked)) => {
+                println!("{line}");
+                // `--expect-level 1,9` is the check's form: it asserts what
+                // the front door asked for and stops there, rather than
+                // playing the level it named
+                if let Some(want) = args
+                    .iter()
+                    .position(|a| a == "--expect-level")
+                    .and_then(|i| args.get(i + 1))
+                {
+                    let got = asked.map(|(n, cp)| format!("{n},{cp}")).unwrap_or_default();
+                    if &got != want {
+                        eprintln!("goodomen: the front door asked for {got:?}, not {want:?}");
+                        std::process::exit(1);
+                    }
+                    return;
+                }
+                // **and the front door opens onto the game.** `mdkNewGame`
+                // parks a level and a checkpoint; this is the main loop
+                // acting on it, the way 0x5d1224 is acted on there.
+                if let Some((n, cp)) = asked {
+                    match play(&root, n, cp, show) {
+                        Ok(line) => println!("{line}"),
+                        Err(e) => {
+                            eprintln!("goodomen: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
             Err(e) if e.starts_with(goodomen::render::NO_VIDEO) => println!("skip: {e}"),
             Err(e) => {
                 eprintln!("goodomen: {e}");
@@ -1815,11 +1845,15 @@ const SNIPERBULLET: f64 = 406.0;
 /// last digit, so the camera stands off its own plane by exactly far enough
 /// to fill the view. That is checkable against a screenshot of the original
 /// and it follows the field of view if that ever changes.
-fn title(root: &std::path::Path, show: bool) -> Result<String, String> {
+#[allow(clippy::type_complexity)]
+fn title(
+    root: &std::path::Path,
+    show: bool,
+) -> Result<(String, Option<(u32, u32)>), String> {
     use goodomen::game::{api, script::Scripts};
     use goodomen::render::{scene::Scene, Offscreen};
     use sdl2::event::Event;
-    use sdl2::keyboard::{Keycode, Scancode};
+    use sdl2::keyboard::Keycode;
 
     let mut install = Install::open(root).map_err(|e| e.to_string())?;
     let sources = sources_of(&mut install);
@@ -1858,6 +1892,13 @@ fn title(root: &std::path::Path, show: bool) -> Result<String, String> {
         goodomen::game::level::load(&video.gl, &mut install, &mut scene, &graph)
             .map_err(|e| e.to_string())?
     };
+    // **and how long each animation lasts.** The front end waits on one:
+    // `ss_button00.OnAnimLoop` clears `Level.freeze` when `ANIM_OPEN`
+    // finishes, and until the engine knows that animation is 1.45 seconds
+    // long -- its record's rate is 0.6897 -- the buttons never open and the
+    // screen never takes a key.
+    let anim_keys = load_animation_keys(&mut install, &scripts);
+    let _ = anim_keys;
 
     // **the camera stands off the flat face.** `Startscreen.mod` is a flat
     // quad **8.192 by 6.144** -- 4:3 to the last digit -- lying in the world's
@@ -1892,7 +1933,7 @@ fn title(root: &std::path::Path, show: bool) -> Result<String, String> {
 
     let mut overlay = goodomen::render::overlay::Overlay::default();
     let gui = {
-        let mut picture = |install: &mut Install, name: &str| {
+        let picture = |install: &mut Install, name: &str| {
             let bytes = install.read(name).ok()?;
             let tex = goodomen::formats::tex::Texture::parse(&bytes).ok()?;
             // SAFETY: the context Video::open made is current on this thread.
@@ -1921,21 +1962,21 @@ fn title(root: &std::path::Path, show: bool) -> Result<String, String> {
         .position(|a| a == "--for")
         .and_then(|i| std::env::args().nth(i + 1))
         .and_then(|v| v.parse().ok());
-    let to_press: Vec<i64> = std::env::args()
-        .position(|a| a == "--press")
-        .and_then(|i| std::env::args().nth(i + 1))
-        .iter()
-        .flat_map(|v| v.split(','))
-        .filter_map(|v| v.trim().parse::<i64>().ok())
-        .collect();
+    let to_press = presses();
 
     // SAFETY: the context is current on this thread.
     unsafe {
         let target = (!show).then(|| Offscreen::new(&video.gl, 1024, 768)).transpose()?;
         let started = std::time::Instant::now();
+        let mut last = std::time::Instant::now();
+        let mut ticking = api::Ticking::default();
+        // the front end has no rooms; the tick is here for the timers
+        let rooms = api::Visibility::default();
         let mut pressed = 0usize;
         loop {
-            let over = quit_after.is_some_and(|n| started.elapsed().as_secs_f64() >= n);
+            // `--for` counts the run's own clock, the way it does in the
+            // play loop, so a timed `--press` means the same in both
+            let over = quit_after.is_some_and(|n| ticking.clock >= n);
             let mut leaving = over;
             for event in video.events.poll_iter() {
                 if let Event::KeyDown { scancode: Some(code), repeat: false, .. } = event {
@@ -1971,12 +2012,24 @@ fn title(root: &std::path::Path, show: bool) -> Result<String, String> {
                     _ => {}
                 }
             }
-            if let Some(id) = to_press.get(pressed).copied() {
-                pressed += 1;
-                if let Err(e) = api::command(&scripts.lua, id) {
-                    eprintln!("goodomen: --press {id}: {e}");
+            if let Some(&(at, id)) = to_press.get(pressed) {
+                if ticking.clock >= at {
+                    pressed += 1;
+                    if let Err(e) = api::command(&scripts.lua, id) {
+                        eprintln!("goodomen: --press {id}: {e}");
+                    }
                 }
             }
+            // **the title screen has a clock**: `menu.diff.Go` arms
+            // `omGobSetTimer(startscreen, 1.2)` and it is that timer's
+            // `OnTimer` that calls `mdkNewGame`. Without a tick the front
+            // door opens on nothing.
+            let dt = match quit_after {
+                Some(_) => 1.0 / 30.0,
+                None => last.elapsed().as_secs_f64().min(0.1),
+            };
+            last = std::time::Instant::now();
+            let _ = api::tick(&scripts, &rooms, [0.0; 3], 0.0, dt, &mut ticking);
             let _ = api::set_scheme(&scripts.lua);
             let _ = api::menu_update(&scripts.lua);
             // **the buttons are closed until an animation opens them.** At
@@ -2013,6 +2066,11 @@ fn title(root: &std::path::Path, show: bool) -> Result<String, String> {
                 }
                 overlay.draw(&video.gl)?;
             }
+            if let Some(boot) = scripts.lua.app_data_ref::<api::Boot>() {
+                if boot.next_level.is_some() || boot.quit {
+                    leaving = true;
+                }
+            }
             if leaving {
                 if let Some(i) = std::env::args().position(|a| a == "--save") {
                     if let Some(path) = std::env::args().nth(i + 1) {
@@ -2038,11 +2096,40 @@ fn title(root: &std::path::Path, show: bool) -> Result<String, String> {
         }
         scene.delete(&video.gl);
     }
-    Ok(summary)
+    let asked = scripts.lua.app_data_ref::<api::Boot>().and_then(|b| b.next_level);
+    let current: Option<String> = scripts
+        .lua
+        .globals()
+        .get::<mlua::Table>("menu")
+        .and_then(|t| t.get("current"))
+        .unwrap_or(None);
+    let summary = format!(
+        "{summary}, left on {} and asked for {asked:?}",
+        current.unwrap_or_else(|| "no dialog".into())
+    );
+    Ok((summary, asked))
 }
 
 /// The vertical field of view the whole game is drawn at, in radians.
 const FOV: f32 = 1.1;
+
+/// `--press 62` or `--press 4:62,5.5:62`: commands to send as if a key had,
+/// each with the moment on the run's own clock it is due. Without a time an
+/// entry goes on the next frame, which is what a burst of menu keys wants;
+/// with one it can wait for something the game is doing -- the title screen
+/// holds its buttons shut for three seconds while the legal notice is up.
+fn presses() -> Vec<(f64, i64)> {
+    std::env::args()
+        .position(|a| a == "--press")
+        .and_then(|i| std::env::args().nth(i + 1))
+        .iter()
+        .flat_map(|v| v.split(',').map(str::to_string).collect::<Vec<_>>())
+        .filter_map(|v| match v.trim().split_once(':') {
+            Some((at, id)) => Some((at.trim().parse().ok()?, id.trim().parse().ok()?)),
+            None => Some((0.0, v.trim().parse().ok()?)),
+        })
+        .collect()
+}
 
 /// The corner size 0x412090 passes to the frame, and the alpha with it.
 const MENU_CORNER: f32 = 0.04;
@@ -2186,19 +2273,11 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
     };
     // the 2-D layer, and the font it draws with. Both are wanted whether or
     // not a menu is up: the same layer carries the HUD and the subtitles.
-    // `--press 51,59,62` sends those commands, one on each of the first
-    // frames, the way keys would arrive
-    let to_press: Vec<i64> = std::env::args()
-        .position(|a| a == "--press")
-        .and_then(|i| std::env::args().nth(i + 1))
-        .iter()
-        .flat_map(|v| v.split(','))
-        .filter_map(|v| v.trim().parse::<i64>().ok())
-        .collect();
+    let to_press = presses();
     let mut pressed = 0usize;
     let mut overlay = goodomen::render::overlay::Overlay::default();
     let gui = {
-        let mut picture = |install: &mut Install, name: &str| {
+        let picture = |install: &mut Install, name: &str| {
             let bytes = install.read(name).ok()?;
             let tex = goodomen::formats::tex::Texture::parse(&bytes).ok()?;
             // SAFETY: the context Video::open made is current on this thread.
@@ -3120,10 +3199,12 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 // select in the same frame sends the select to the scheme the
                 // pause key was still in, which is how three downs moved the
                 // cursor and the fourth key did nothing.
-                if let Some(id) = to_press.get(pressed).copied() {
-                    pressed += 1;
-                    if let Err(e) = goodomen::game::api::command(&level_scripts.lua, id) {
-                        eprintln!("goodomen: --press {id}: {e}");
+                if let Some(&(at, id)) = to_press.get(pressed) {
+                    if ticking.clock >= at {
+                        pressed += 1;
+                        if let Err(e) = goodomen::game::api::command(&level_scripts.lua, id) {
+                            eprintln!("goodomen: --press {id}: {e}");
+                        }
                     }
                 }
                 let _ = goodomen::game::api::set_scheme(&level_scripts.lua);
