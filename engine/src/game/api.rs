@@ -3702,7 +3702,12 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
     // faithful reading rather than a stub: doing nothing is what the
     // original does. Between them they were the three largest entries on the
     // work list, at ten calls each -- one per level.
-    for name in ["chSndLoadBank", "chSndLoadBankPre", "mdkDumpMenuSounds"] {
+    // **`chControlAnimateImage(icon, frames)` is the fourth of the same
+    // family**, and the plainest: 0x41de90 reads two numbers and calls
+    // 0x450ea0. It animates the **Dreamcast memory card's LCD icon** --
+    // `KURT_ICON_ANIM` and `MDK2_ICON_ANIM` are the two the levels pass --
+    // and a PC has no such thing.
+    for name in ["chSndLoadBank", "chSndLoadBankPre", "mdkDumpMenuSounds", "chControlAnimateImage"] {
         globals.set(name, lua.create_function(|_, _: Variadic<Value>| Ok(()))?)?;
     }
     // **`omUnbindAllCommands()`** (0x41e620) writes -1 into the first two
