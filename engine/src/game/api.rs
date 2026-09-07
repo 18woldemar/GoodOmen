@@ -597,6 +597,9 @@ pub struct Boot {
     /// The one `mdkSetCurrentMenu` last named, which is the one that draws
     /// and the one the menu keys move.
     pub menu: Option<usize>,
+    /// Objects whose task list came round through `LoopScript` this tick --
+    /// see `watch_the_loop`. A list that loops is not a list that is stuck.
+    pub looping: BTreeSet<String>,
     /// `mdkDisableGui`, which is bit 3 of the GUI root's flags at
     /// `omgob + 0xa6` and stops the whole HUD being drawn.
     pub gui_off: bool,
@@ -6890,6 +6893,7 @@ pub fn level(scripts: &Scripts, number: u32, checkpoint: u32, section: &str) -> 
     if let Ok(mut boot) = boot_mut(&scripts.lua) {
         boot.at = (number, checkpoint);
     }
+    watch_the_loop(&scripts.lua)?;
     scripts
         .lua
         .load(&format!(
@@ -6899,6 +6903,37 @@ pub fn level(scripts: &Scripts, number: u32, checkpoint: u32, section: &str) -> 
         .exec()?;
     stream(&scripts.lua, checkpoint as f64)?;
     create(scripts)?;
+    Ok(())
+}
+
+/// **Wrap `LoopScript` so the stall report can tell a loop from a wait.**
+///
+/// `script.lua`'s interpreter runs a task list until a task returns 0, and a
+/// task whose function returns **nil counts as done** -- `if (res == nil ...)
+/// then res = 1`. So a one-step loop like the platform guard's
+/// `{ { Level.GuardTaunt }, { LoopScript } }` runs its step, reaches
+/// `LoopScript`, is sent back to task 1 and yields, **every tick**. Sampled
+/// between ticks its `nexttask` is 1 for ever, which reads exactly like a
+/// list stuck on task 1.
+///
+/// `LoopScript` is what tells them apart: reaching it *is* moving. This
+/// keeps the script's own function and notes the object on the way through,
+/// which is a smaller thing than reimplementing four lines of Lua.
+fn watch_the_loop(lua: &Lua) -> Result<(), Error> {
+    let globals = lua.globals();
+    let Ok(was) = globals.get::<mlua::Function>("LoopScript") else { return Ok(()) };
+    // twice would wrap the wrapper
+    if lua.named_registry_value::<Value>("looping").is_ok_and(|v| !matches!(v, Value::Nil)) {
+        return Ok(());
+    }
+    lua.set_named_registry_value("looping", true)?;
+    let wrapped = lua.create_function(move |lua, args: Variadic<Value>| {
+        if let Some(name) = args.first().and_then(gob_name) {
+            boot_mut(lua)?.looping.insert(name);
+        }
+        was.call::<Value>(args)
+    })?;
+    globals.set("LoopScript", wrapped)?;
     Ok(())
 }
 

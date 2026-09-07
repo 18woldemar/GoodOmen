@@ -1795,7 +1795,16 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
                 // a movie's own camera moves whenever its shot does, so for
                 // one the index alone says whether the list is alive
                 let mark = (at, if movie { [0.0; 3] } else { where_.map(|c| (c * 4.0).round()) });
-                let moved = seen.insert(who.clone(), mark).is_some_and(|was| was != mark);
+                let moved = seen.insert(who.clone(), mark).is_some_and(|was| was != mark)
+                    // **and a list that came round is not a list that is
+                    // stuck.** A one-step loop -- the platform guard's
+                    // `{ { Level.GuardTaunt }, { LoopScript } }` -- runs its
+                    // step and is sent back to task 1 in the same tick, so
+                    // its index reads as 1 for ever. See `watch_the_loop`.
+                    || scripts
+                        .lua
+                        .app_data_ref::<api::Boot>()
+                        .is_some_and(|b| b.looping.contains(&who));
                 let entry = watched.entry(who).or_insert((what.clone(), false));
                 entry.0 = what;
                 entry.1 |= moved;
