@@ -1818,6 +1818,8 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 return Ok(0.0);
             }
             boot.playing.insert(who.clone(), id);
+            // a fresh animation has not looped yet
+            boot.looped.remove(&who);
             boot.done.remove(&who);
             boot.since.insert(who, 0.0);
             Ok(1.0)
@@ -2043,6 +2045,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                     let far = dist >= crate::game::world::shoot_within(kind);
                     boot.playing.insert(who.clone(), if far { ANIM_SHOOT } else { ANIM_SWIPE });
                     boot.since.insert(who.clone(), 0.0);
+                    boot.looped.remove(&who);
                     boot.done.remove(&who);
                     boot.burst.insert(who.clone(), left - 1.0);
                     boot.cooldown.insert(who, if far { AFTER_SHOT } else { AFTER_SWIPE });
@@ -2451,6 +2454,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                             let coin = boot.random.next() <= 0.5;
                             boot.playing.insert(who.clone(), SCARED + coin as i64 as f64);
                             boot.since.insert(who.clone(), 0.0);
+                            boot.looped.remove(&who);
                             boot.done.remove(&who);
                             boot.state.insert(who.clone(), 0x10);
                             boot.cooldown.insert(who, LOOKING);
@@ -2496,6 +2500,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                         let coin = boot.random.next() <= 0.5;
                         boot.playing.insert(who.clone(), SCARED + coin as i64 as f64);
                         boot.since.insert(who.clone(), 0.0);
+                        boot.looped.remove(&who);
                         boot.done.remove(&who);
                         state = 0x10;
                         boot.cooldown.insert(who.clone(), LOOKING);
@@ -2869,7 +2874,10 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                             .unwrap_or(0.0);
                         if span > 0.0 {
                             boot.playing.insert(who.clone(), id);
+            // a fresh animation has not looped yet
+            boot.looped.remove(&who);
                             boot.since.insert(who.clone(), 0.0);
+                            boot.looped.remove(&who);
                             boot.done.remove(&who);
                             boot.cooldown.insert(who.clone(), span);
                             boot.gait.insert(who, 0);
@@ -2900,6 +2908,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                         // ANIM_THROW, and the grenade comes straight out
                         boot.playing.insert(who.clone(), ANIM_THROW);
                         boot.since.insert(who.clone(), 0.0);
+                        boot.looped.remove(&who);
                         boot.done.remove(&who);
                         drop(boot);
                         fire_key_object(lua, &who, DBGRENADE).ok();
@@ -2915,6 +2924,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                     // one of the columns the engine keeps.
                     boot.playing.insert(who.clone(), ANIM_SHOOT);
                     boot.since.insert(who.clone(), 0.0);
+                    boot.looped.remove(&who);
                     boot.done.remove(&who);
                 } else if dist < reach && rounds > 0.0 {
                     boot.burst.insert(who.clone(), rounds);
@@ -3410,6 +3420,7 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 let mut boot = boot_mut(lua)?;
                 boot.playing.insert(name.clone(), id);
                 boot.since.insert(name.clone(), 0.0);
+                boot.looped.remove(&name);
                 boot.done.remove(&name);
                 boot.done.remove(&name);
             }
@@ -5053,7 +5064,7 @@ pub(crate) fn goto_core(
 /// index **and position** both never moved -- level 9's `ch1` runs 89 units,
 /// arrives, deletes itself and is made again, and its index is 1 whenever you
 /// look. The position is what tells the two apart.
-pub fn stalls(lua: &Lua) -> Vec<(String, String, i64, [f64; 3])> {
+pub fn stalls(lua: &Lua) -> Vec<(String, String, i64, [f64; 3], bool)> {
     let globals = lua.globals();
     let mut named: Vec<(String, mlua::Function)> = Vec::new();
     if let Ok(pairs) = globals.clone().pairs::<String, Value>().collect::<mlua::Result<Vec<_>>>() {
@@ -5063,7 +5074,7 @@ pub fn stalls(lua: &Lua) -> Vec<(String, String, i64, [f64; 3])> {
             }
         }
     }
-    let mut out: Vec<(String, String, i64, [f64; 3])> = Vec::new();
+    let mut out: Vec<(String, String, i64, [f64; 3], bool)> = Vec::new();
     let Some(w) = world::world(lua) else { return Vec::new() };
     let (frozen_now, ticking) = match boot_ref(lua) {
         Ok(b) => (b.stasis.clone(), b.scripted.clone()),
@@ -5139,7 +5150,11 @@ pub fn stalls(lua: &Lua) -> Vec<(String, String, i64, [f64; 3])> {
         if let Ok(left) = gob.get::<f64>("waittimer") {
             name = format!("{name} [{left:.2} left]");
         }
-        out.push((g.name.clone(), name, next, g.position));
+        // **and whether it is a movie**, because a cutscene's own camera
+        // moves by definition and the "did it move" test therefore never
+        // calls one stuck. `StartMovie` is what sets the flag.
+        let movie = stack.get::<Value>("movie").is_ok_and(|v| !matches!(v, Value::Nil));
+        out.push((g.name.clone(), name, next, g.position, movie));
     }
     out
 }
@@ -6267,6 +6282,12 @@ pub fn tick_touching(
     if scripts.lua.app_data_ref::<Boot>().is_some_and(|b| b.paused) {
         return Ok(());
     }
+    // **the subtitle's clock is the driver's, not the renderer's.** Every
+    // cutscene steps on `{ mdkDialogIsDone, {} }`, so a panel that never
+    // times out holds the whole movie — which is what a headless run did,
+    // and why level 1's ninth checkpoint sat on the comic book's first
+    // caption for as long as anyone watched.
+    dialog_step(&scripts.lua, dt);
     let globals = scripts.lua.globals();
 
     // **The player's own object has to move with the body.** Everything this
@@ -6991,7 +7012,16 @@ pub fn tick_touching(
             }
             advanced.push((name, now));
         }
-        boot.looped = looped.into_iter().collect();
+        // **the just-looped flag is sticky.** 0x4611b0 sets `instance + 0x20`
+        // when the clock runs off either end and **nothing in it clears the
+        // flag again** — the last thing it does is stop a one-shot from
+        // playing, not lower the flag. So `omAnimJustLooped` means "has this
+        // come round since it was started", not "did it come round on this
+        // very frame", and a task list that asks a few seconds later still
+        // gets its answer. Rebuilding it each tick left the second intro
+        // movie waiting for ever at its ninety-fourth task on an animation
+        // that had ended six seconds before it looked.
+        boot.looped.extend(looped);
         for (name, anim) in stopped {
             boot.done.insert(name, anim);
         }
@@ -7864,6 +7894,7 @@ mod tests {
         // 95 ticks is 3.167 seconds: three wraps, and three passes of a key
         // at 0.3. Not 90, because thirty thirtieths sum to a hair under one
         // and the third wrap would fall outside the loop.
+        let mut was_up = false;
         for _ in 0..95 {
             let before = scripts.lua.app_data_ref::<Boot>().unwrap().keys_fired;
             {
@@ -7875,7 +7906,13 @@ mod tests {
             tick(&scripts, &rooms, [0.0, 0.0, 0.0], 0.0, 1.0 / 30.0, &mut ticking).unwrap();
             let boot = scripts.lua.app_data_ref::<Boot>().unwrap();
             struck += boot.keys_fired - before;
-            loops += boot.looped.contains_key("h") as usize;
+            // **the flag is sticky** -- 0x4611b0 raises it and never lowers
+            // it again, so it goes up on the first wrap and stays up until
+            // something plays the animation afresh. The wraps are counted by
+            // the key instead.
+            let up = boot.looped.contains_key("h");
+            loops += (up && !was_up) as usize;
+            was_up = up;
             // and `omAnimJustLooped` answers **for the animation asked
             // about**: 0x461520 looks the instance up by id and 0x461850
             // returns 0 when there is none. 56 is what is playing; 57 is not.
@@ -7893,8 +7930,9 @@ mod tests {
                 assert_eq!(ask(57.0), 0.0, "and not one that did not");
             }
         }
-        assert_eq!(loops, 3, "three seconds of a one-second loop wraps three times");
-        assert_eq!(struck, 3, "and the key comes round with it");
+        assert_eq!(struck, 3, "three seconds of a one-second loop wraps three times");
+        assert_eq!(loops, 1, "and the just-looped flag goes up once and stays up");
+        assert!(was_up, "and is still up at the end");
     }
 
     /// **A walker will not leave its pen.** `mdkWalkerSetPen(gob, point,

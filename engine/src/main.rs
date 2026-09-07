@@ -1612,12 +1612,14 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
                 now.iter().map(|(w, ..)| w.clone()).collect();
             watched.retain(|k, _| here.contains(k));
             seen.retain(|k, _| here.contains(k));
-            for (who, what0, at, where_) in now {
+            for (who, what0, at, where_, movie) in now {
                 let what = format!("{what0} at task {at}");
                 // a list whose index moved is alive, and so is an object that
                 // walked -- level 9's `ch1` runs 89 units, arrives, deletes
                 // itself and is made again, and its index is 1 every time
-                let mark = (at, where_.map(|c| (c * 4.0).round()));
+                // a movie's own camera moves whenever its shot does, so for
+                // one the index alone says whether the list is alive
+                let mark = (at, if movie { [0.0; 3] } else { where_.map(|c| (c * 4.0).round()) });
                 let moved = seen.insert(who.clone(), mark).is_some_and(|was| was != mark);
                 let entry = watched.entry(who).or_insert((what.clone(), false));
                 entry.0 = what;
@@ -1657,6 +1659,19 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
                 format!("{} stuck -- {}", stuck.len(), stuck.join(", "))
             }
         );
+        // **and where every cutscene stands**, whether or not it is stuck.
+        // A movie is the one list whose progress a person wants to see: it
+        // is what a new game spends its first three minutes in, and the
+        // "did it move" test can never call one stuck because its object is
+        // the camera and the camera moves by definition.
+        let movies: Vec<String> = api::stalls(&scripts.lua)
+            .into_iter()
+            .filter(|(.., movie)| *movie)
+            .map(|(who, what, at, ..)| format!("{who} at task {at} on {what}"))
+            .collect();
+        if !movies.is_empty() {
+            println!("l{number} cp{checkpoint} movies: {}", movies.join("; "));
+        }
     }
 
     // what the scripts actually did to the world while it ran
@@ -2085,7 +2100,6 @@ fn title(
                         draw_menu(&mut overlay, gui, &boot);
                     }
                 }
-                api::dialog_step(&scripts.lua, dt);
                 if let Some(boot) = scripts.lua.app_data_ref::<api::Boot>() {
                     if let Some(d) = &boot.dialog {
                         draw_dialog(&mut overlay, gui, d);
@@ -3499,7 +3513,6 @@ fn play(
                         }
                     }
                     // the subtitle, then the fade over all of it
-                    goodomen::game::api::dialog_step(&level_scripts.lua, dt);
                     if let Some(boot) = level_scripts.lua.app_data_ref::<goodomen::game::api::Boot>() {
                         if let Some(d) = &boot.dialog {
                             draw_dialog(&mut overlay, gui, d);

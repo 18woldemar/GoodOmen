@@ -355,7 +355,12 @@ ENGINE = [
       # a task list that puts up a subtitle now waits for it instead of
       # stepping past, so the lists that used to run off their own end stay
       # alive and go on being ticked.
-      "--expect-events", "64742", "--expect-survived", "64742"], None),
+      # and **-> 61443 when the just-looped flag became sticky**: 0x4611b0
+      # raises it and never lowers it, so a walker whose pose has come round
+      # once is free to change it from then on rather than for one frame, and
+      # two extra `chRand()` rolls a second is a different game from the same
+      # seed.
+      "--expect-events", "61443", "--expect-survived", "61443"], None),
     # **The doors open.** `mdkObject.c` 0x425010: a prox door watches the
     # player and opens inside its own radius, which the scene graph carries in
     # `payload[0]` -- 5, 6, 8, 10, 14, 15, 16 or 20 across the game's 175 of
@@ -419,7 +424,12 @@ ENGINE = [
       # a task list that puts up a subtitle now waits for it instead of
       # stepping past, so the lists that used to run off their own end stay
       # alive and go on being ticked.
-      "--expect-events", "51569", "--expect-survived", "51569"], None),
+      # and **-> 51125 when the just-looped flag became sticky**: 0x4611b0
+      # raises it and never lowers it, so a walker whose pose has come round
+      # once is free to change it from then on rather than for one frame, and
+      # two extra `chRand()` rolls a second is a different game from the same
+      # seed.
+      "--expect-events", "51125", "--expect-survived", "51125"], None),
     # level 10's zizzy turrets shoot, each bullet carrying its damage, damage
     # type, lifetime and speed out of the shot table at 0x497388 rather than
     # out of the call.
@@ -477,7 +487,7 @@ ENGINE = [
       # the player -> 38 (a bif turret does not close, so the doganboys that
       # used to be alone now share the room), the same 20 land, and the player
       # lives to **63s** instead of 49.
-      "--run", "4", "1", "120", "--roam", "--expect-shots", "38",
+      "--run", "4", "1", "120", "--roam", "--expect-shots", "36",
       "--expect-hits", "20", "--expect-health", "0", "--expect-rooms", "6",
       # 40 shots -> 39 and 29206 handler calls -> 28246: the player dies at
       # 47 seconds instead of 49 now that the exact collision test moves the
@@ -486,7 +496,12 @@ ENGINE = [
       # And back to 40 shots at 30026 calls with the leap and the retreat in:
       # he lives three seconds longer because a walker that runs away is not
       # shooting, and dies of the same fire at 50s.
-      "--expect-events", "41498", "--expect-survived", "41498"], None),
+      # and **-> 36130 when the just-looped flag became sticky**: 0x4611b0
+      # raises it and never lowers it, so a walker whose pose has come round
+      # once is free to change it from then on rather than for one frame, and
+      # two extra `chRand()` rolls a second is a different game from the same
+      # seed.
+      "--expect-events", "36130", "--expect-survived", "36130"], None),
     # and the loop closes: the player walks at an enemy, shoots it with the
     # hitscan the original uses, and it dies.
     # and what it kills falls over: the walker's own OnDamage (0x430a60) plays
