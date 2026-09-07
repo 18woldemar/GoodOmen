@@ -3083,7 +3083,8 @@ fn play(
         println!("OpenGL {version}\n{summary}");
         println!(
             "{} -- W A S D, mouse to look, shift to run, space to jump, \
-             left button to shoot, C to turn culling off, escape to leave",
+             left button to shoot, C to turn culling off, escape to pause, \
+             shift-escape to leave",
             if std::env::args().any(|a| a == "--fly") {
                 "flying".to_string()
             } else {
