@@ -190,6 +190,84 @@ impl Credits {
     }
 }
 
+/// Where a script's `save\3.sav` is on this machine, or `None` when the
+/// engine has not been told where the game is — an engine that does not know
+/// must not write beside itself, which is the rule [`Boot::root`] exists for.
+fn saved_at(lua: &Lua, name: Option<&Value>) -> Option<std::path::PathBuf> {
+    let name = match name {
+        Some(Value::String(s)) => s.to_string_lossy().to_string(),
+        _ => return None,
+    };
+    let root = boot_ref(lua).ok()?.root.clone()?;
+    Some(crate::game::save::beside(&root, &name))
+}
+
+/// A message box — 0x407430, which is **the credits' own record** with
+/// different numbers, laid out by the same 0x406ff0 and drawn by the same
+/// 0x4071b0. Eight of them fit, at 0x4bb248.
+///
+/// ```text
+/// +0x00  the left edge, +0x04 the top     the caller's x and y
+/// +0x0c  the width it wraps at            the caller's w
+/// +0x10  the height                       the caller's h
+/// +0x14  0.8 grey, alpha 1.0 at +0x20
+/// +0x24  0.04375  a line      +0x28  0.05  a character cell
+/// +0x38  9        lines to a screen, where the credits say 24
+/// ```
+///
+/// The frame behind it is the menu's own nine quads (0x462ff0 with a border
+/// of **0.04**), drawn only when the sixth argument is true — which is what
+/// `menu.lua` passes for the save-name box.
+pub struct MessageBox {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub text: Vec<u8>,
+    pub framed: bool,
+}
+
+impl MessageBox {
+    /// 0x407430's own, in the order they are written into the record.
+    pub const GREY: [f32; 4] = [0.8, 0.8, 0.8, 1.0];
+    pub const LINE: f32 = 0.043_75;
+    pub const CELL: f32 = 0.05;
+    /// What 0x462ff0 is passed for this frame, where a menu's is its own.
+    pub const BORDER: f32 = 0.04;
+}
+
+/// A line being typed into a message box — `mdkEditString` and the two that
+/// ask how it went.
+///
+/// The whole of it is four globals: the buffer at 0x4bab80, the box at
+/// 0x4bb238, the flag at 0x4bac8c that says typing is happening and the
+/// result at 0x4bb1fc that `mdkGetEditResult` returns. 0x405ea0 runs the
+/// keys: **Return** (0x0d) arms an accept and **Escape** (0x1b) is a cancel
+/// on the spot. The accept waits for commands 0x3e and 0x53 to go up before
+/// it lands, so the Return that finishes the name does not also press the
+/// menu item behind it.
+///
+/// The typing itself never reaches Lua, and the menu keys never reach the
+/// typing: `item.Select` sets `conscheme = "poo"`, a scheme that does not
+/// exist, so nothing is bound while the box is open.
+#[derive(Default)]
+pub struct Edit {
+    /// The box the line is being typed into, and where it draws.
+    pub at: usize,
+    pub text: Vec<u8>,
+    /// 0 while typing, **1** accepted, **2** cancelled. 0x4bb1fc.
+    pub result: i64,
+    /// The caret's blink, which 0x4062c0 walks 0 to 0.5 and wraps, and draws
+    /// an underscore (0x499db0) while it is under **0.25** (0x48f398).
+    pub blink: f64,
+}
+
+impl Edit {
+    pub const CARET: u8 = b'_';
+    pub const PERIOD: f64 = 0.5;
+    pub const LIT: f64 = 0.25;
+}
+
 /// Break text into lines that fit `cells` character cells, on newlines and
 /// on spaces — the shape 0x406ff0 lays the credits out in: it walks the
 /// string adding each glyph's advance until the width is past, and breaks at
@@ -526,6 +604,16 @@ pub struct Boot {
     pub dialog: Option<Dialog>,
     /// The end credits, while they roll. See [`Credits`].
     pub credits: Option<Credits>,
+    /// The message boxes `mdkMessageBoxCreate` has made — a pool of eight in
+    /// the original (0x4bb248, five words a slot), and the index into it is
+    /// what Lua is handed back. See [`MessageBox`].
+    pub boxes: Vec<Option<MessageBox>>,
+    /// The line being typed, while one is. See [`Edit`].
+    pub edit: Option<Edit>,
+    /// Where the game is now, which is what a save writes down: the level
+    /// and the checkpoint [`level`] was started at, moved on by whatever
+    /// `mdkSetAutoSave` says as the player passes each one.
+    pub at: (u32, u32),
     /// Where the installation is, because two of the game's own files live
     /// beside it: `save/auto.sav` and `save/movie.sav`. **`None` until
     /// something says**, and then nothing is written — an engine that does
@@ -1110,6 +1198,53 @@ pub fn menu_update(lua: &Lua) -> mlua::Result<()> {
         f.call::<()>(())?;
     }
     Ok(())
+}
+
+/// What the keyboard can do to a line being typed. 0x405ea0 reads a key at
+/// a time out of the input layer's own queue rather than through a command,
+/// which is why this is fed from the raw events and not from `comfuncs`.
+pub enum Typed<'a> {
+    Text(&'a str),
+    Backspace,
+    /// Return, 0x0d.
+    Accept,
+    /// Escape, 0x1b.
+    Cancel,
+}
+
+/// Whether a line is being typed, which is 0x4bac8c.
+pub fn editing(lua: &Lua) -> bool {
+    boot_ref(lua).is_ok_and(|b| b.edit.as_ref().is_some_and(|e| e.result == 0))
+}
+
+/// Type into the message box that is open, and answer whether there was one.
+///
+/// A `false` says the key is the menu's to deal with; a `true` says the box
+/// swallowed it, which is what keeps the Return that finishes a name from
+/// also pressing the item behind it.
+pub fn typing(lua: &Lua, what: Typed) -> bool {
+    let Ok(mut boot) = boot_mut(lua) else { return false };
+    let Some(edit) = boot.edit.as_mut() else { return false };
+    if edit.result != 0 {
+        return false;
+    }
+    match what {
+        // the file has room for 0x80 bytes and one of them is the terminator
+        Typed::Text(s) => {
+            let room = crate::game::save::DESCRIPTION - 1;
+            for c in s.chars().filter(|c| !c.is_control()) {
+                if edit.text.len() < room {
+                    edit.text.push(if (c as u32) < 256 { c as u8 } else { b'?' });
+                }
+            }
+        }
+        Typed::Backspace => {
+            edit.text.pop();
+        }
+        Typed::Accept => edit.result = 1,
+        Typed::Cancel => edit.result = 2,
+    }
+    true
 }
 
 /// A Lua string as the code-page bytes the font is indexed by.
@@ -3511,6 +3646,10 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         lua.create_function(|lua, args: Variadic<Value>| {
             let level = args.first().map(number).unwrap_or(0.0) as u32;
             let checkpoint = args.get(1).map(number).unwrap_or(0.0) as u32;
+            // **and this is the game moving on**: the autosave is written at
+            // each checkpoint, so it is also what tells a manual save where
+            // the player has got to
+            boot_mut(lua)?.at = (level, checkpoint);
             let boot = boot_ref(lua)?;
             let mut out = Vec::with_capacity(20);
             out.extend_from_slice(&0u32.to_le_bytes());
@@ -3562,6 +3701,174 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             Ok(std::fs::read_to_string(root.join("save/movie.sav"))
                 .map(|s| s.trim_end().to_string())
                 .unwrap_or_default())
+        })?,
+    )?;
+
+    // --- saving and loading from the menu --------------------------------
+    //
+    // `BuildPCSaveMenu` and `BuildPCLoadMenu` in `menu.lua` walk twenty
+    // slots named `save\N.sav`, ask each whether it exists and what it is
+    // called, and hang the whole flow off six engine calls. See
+    // [`crate::game::save`] for what a file holds and where.
+    globals.set(
+        "mdkSaveFileExists",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            // 0x42a3b0, which opens the file and closes it again
+            Ok(saved_at(lua, args.first()).is_some_and(|at| at.exists()) as i64)
+        })?,
+    )?;
+    globals.set(
+        "mdkGetSaveFileDesc",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let text = saved_at(lua, args.first())
+                .and_then(|at| crate::game::save::description(&at))
+                .unwrap_or_default();
+            lua.create_string(&text)
+        })?,
+    )?;
+    // **`mdkStartInstantSave(file, desc)` parks a request in the original**
+    // (0x4026c0 writes 1 to 0x4bab70) because the thumbnail wants a frame of
+    // its own to render into. There is no thumbnail here, so the file is
+    // written where it is asked for.
+    globals.set(
+        "mdkStartInstantSave",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(at) = saved_at(lua, args.first()) else { return Ok(()) };
+            let desc = match args.get(1) {
+                Some(Value::String(s)) => code_page(&s.as_bytes()),
+                _ => Vec::new(),
+            };
+            let difficulty = world::world(lua)
+                .map(|w| w.difficulty())
+                .unwrap_or(world::DEFAULT_DIFFICULTY);
+            let (level, checkpoint) = boot_ref(lua)?.at;
+            let _ = crate::game::save::write(&at, &desc, level, checkpoint, difficulty, None);
+            Ok(())
+        })?,
+    )?;
+    // and loading is `mdkNewGame` at what the file says, which is the same
+    // parked request the front door uses -- 0x402780 writes 2 to the same
+    // 0x4bab70 and the main loop picks it up between frames.
+    globals.set(
+        "mdkStartInstantLoad",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(at) = saved_at(lua, args.first()) else { return Ok(()) };
+            let Some((level, checkpoint, difficulty)) = crate::game::save::resume(&at) else {
+                return Ok(());
+            };
+            if let (Some(d), Some(mut w)) = (difficulty, world::world_mut(lua)) {
+                w.set_difficulty(d);
+            }
+            boot_mut(lua)?.next_level = Some((level, checkpoint));
+            Ok(())
+        })?,
+    )?;
+    // `mdkGetAutoSave(0, 0)` hands its two arguments to 0x42d2e0 as
+    // out-parameters and answers with all three: whether there is one, and
+    // the level and checkpoint in it. `BuildPCLoadMenu`'s Continue item is
+    // string 668 + the level, which is why the level has to come back.
+    globals.set(
+        "mdkGetAutoSave",
+        lua.create_function(|lua, _: Variadic<Value>| {
+            let found = boot_ref(lua)?
+                .root
+                .as_deref()
+                .and_then(crate::game::save::autosave);
+            Ok(match found {
+                Some((level, checkpoint, _)) => (1, level, checkpoint),
+                None => (0, 0, 0),
+            })
+        })?,
+    )?;
+
+    // --- the message box, and the line typed into it ---------------------
+    globals.set(
+        "mdkMessageBoxCreate",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let f = |i: usize| args.get(i).map(number).unwrap_or(0.0) as f32;
+            // the fifth is a string id, -1 for a box that starts empty
+            let text = match args.get(4).map(number).unwrap_or(-1.0) {
+                id if id >= 0.0 => boot_ref(lua)?.strings.text(id as u32).map(|t| t.to_vec()),
+                _ => None,
+            };
+            let framed = args.get(5).map(number).unwrap_or(0.0) != 0.0;
+            let boxed = MessageBox {
+                x: f(0),
+                y: f(1),
+                width: f(2),
+                height: f(3),
+                text: text.unwrap_or_default(),
+                framed,
+            };
+            let mut boot = boot_mut(lua)?;
+            // the original's pool is eight and it hands back -1 when it is
+            // full, which nothing in the scripts checks
+            let free = boot.boxes.iter().position(Option::is_none);
+            Ok(match free {
+                Some(i) => {
+                    boot.boxes[i] = Some(boxed);
+                    i as i64
+                }
+                None if boot.boxes.len() < 8 => {
+                    boot.boxes.push(Some(boxed));
+                    boot.boxes.len() as i64 - 1
+                }
+                None => -1,
+            })
+        })?,
+    )?;
+    globals.set(
+        "mdkMessageBoxDestroy",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let i = args.first().map(number).unwrap_or(-1.0);
+            let mut boot = boot_mut(lua)?;
+            if let Some(slot) = (i >= 0.0).then(|| i as usize).and_then(|i| boot.boxes.get_mut(i)) {
+                *slot = None;
+            }
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "mdkMessageBoxSetText",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let i = args.first().map(number).unwrap_or(-1.0);
+            let id = args.get(1).map(number).unwrap_or(-1.0);
+            let text = match id >= 0.0 {
+                true => boot_ref(lua)?.strings.text(id as u32).map(|t| t.to_vec()),
+                false => None,
+            };
+            let mut boot = boot_mut(lua)?;
+            if let Some(Some(b)) = (i >= 0.0).then(|| i as usize).map(|i| boot.boxes.get_mut(i)) {
+                if let Some(b) = b {
+                    b.text = text.unwrap_or_default();
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "mdkEditString",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let at = args.first().map(number).unwrap_or(0.0).max(0.0) as usize;
+            let text = match args.get(1) {
+                Some(Value::String(s)) => code_page(&s.as_bytes()),
+                _ => Vec::new(),
+            };
+            boot_mut(lua)?.edit = Some(Edit { at, text, result: 0, blink: 0.0 });
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "mdkGetEditResult",
+        lua.create_function(|lua, _: Variadic<Value>| {
+            Ok(boot_ref(lua)?.edit.as_ref().map(|e| e.result).unwrap_or(0))
+        })?,
+    )?;
+    globals.set(
+        "mdkGetEditString",
+        lua.create_function(|lua, _: Variadic<Value>| {
+            let text = boot_ref(lua)?.edit.as_ref().map(|e| e.text.clone()).unwrap_or_default();
+            lua.create_string(&text)
         })?,
     )?;
 
@@ -4525,6 +4832,54 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         })?,
     )?;
 
+    // **A sponge is blank room above an item** — 0x412070 writes it into the
+    // item and adds it to the item's own y, and 0x411be0 sums every existing
+    // item's when it places a new one, so it pushes what follows too. The
+    // save and load menus use it to set Cancel and Continue apart from the
+    // twenty slots.
+    globals.set(
+        "mdkMenuItemSetSponge",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(handle) = args.first().and_then(item_handle) else { return Ok(()) };
+            let room = args.get(1).map(number).unwrap_or(0.0) as f32;
+            let mut boot = boot_mut(lua)?;
+            for m in boot.menus.iter_mut() {
+                if let Some(i) = m.items.iter().position(|i| i.handle == handle) {
+                    m.sponge(i, room);
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+    // and 0x413a00 puts one item in the middle of the *screen* whatever the
+    // menu's own justification says
+    globals.set(
+        "mdkMenuItemCenterInMenu",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(handle) = args.first().and_then(item_handle) else { return Ok(()) };
+            let mut boot = boot_mut(lua)?;
+            for m in boot.menus.iter_mut() {
+                if let Some(i) = m.items.iter().position(|i| i.handle == handle) {
+                    m.center(i);
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+    // 0x411bc0 clears the flag at the record's +0x64, and 0x413650 then
+    // justifies the title like an item instead of centring it on the screen
+    globals.set(
+        "mdkMenuTitleDontStayInCenterPlease",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            if let Some(i) = args.first().and_then(menu_index) {
+                if let Some(m) = boot_mut(lua)?.menus.get_mut(i) {
+                    m.title_off_centre();
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
     for (name, by_id) in [("mdkSetMenuItemText", false), ("mdkSetMenuItemTextW", true)] {
         globals.set(
             name,
@@ -4870,12 +5225,35 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         })?,
     )?;
 
+    // `mdkPauseGameSnap` is 0x40fc40 where `mdkPauseGame` is 0x40fc20 -- the
+    // same pause, taken without the fade the pause menu opens with, which is
+    // why the save flow uses it: the screen behind the box must not dim
+    // between choosing a slot and the file being written.
+    for name in ["mdkPauseGame", "mdkPauseGameSnap"] {
+        globals.set(
+            name,
+            lua.create_function(|lua, args: Variadic<Value>| {
+                boot_mut(lua)?.paused = args.first().map(number).unwrap_or(0.0) != 0.0;
+                Ok(())
+            })?,
+        )?;
+    }
+    // **`mdkCanSaveGameNow` is one test and it is not about the level**:
+    // 0x402840 answers `0x5d1224 == 0`, which is the flag `mdkNewGame` sets
+    // -- you may save when the engine is not already on its way somewhere.
     globals.set(
-        "mdkPauseGame",
-        lua.create_function(|lua, args: Variadic<Value>| {
-            boot_mut(lua)?.paused = args.first().map(number).unwrap_or(0.0) != 0.0;
-            Ok(())
+        "mdkCanSaveGameNow",
+        lua.create_function(|lua, _: Variadic<Value>| {
+            Ok(boot_ref(lua)?.next_level.is_none() as i64)
         })?,
+    )?;
+    // and `mdkDeathIsEnabled` (0x442630 into 0x40fe20) asks whether a death
+    // sequence is running. **Nothing here starts one**, so the answer is no
+    // -- which is what `CanSaveGameNow` and `comfuncs.game[COM_PAUSE]` both
+    // need to hear before they will do anything at all.
+    globals.set(
+        "mdkDeathIsEnabled",
+        lua.create_function(|_, _: Variadic<Value>| Ok(0i64))?,
     )?;
 
     // the two ends of a cutscene's camera. See `Boot::movie_camera`.
@@ -6359,6 +6737,10 @@ pub fn fire_events(
 /// without them `doloadingscreen` takes neither branch and half of starting a
 /// level is skipped in silence.
 pub fn level(scripts: &Scripts, number: u32, checkpoint: u32, section: &str) -> Result<(), Error> {
+    // where the game is, which is what a save writes down
+    if let Ok(mut boot) = boot_mut(&scripts.lua) {
+        boot.at = (number, checkpoint);
+    }
     scripts
         .lua
         .load(&format!(
@@ -6585,6 +6967,10 @@ pub fn tick_touching(
             if c.speed > 0.0 {
                 c.y -= c.speed * dt;
             }
+        }
+        // and so does the caret, which 0x4062c0 walks and wraps at 0.5
+        if let Some(e) = boot.edit.as_mut() {
+            e.blink = (e.blink + dt) % Edit::PERIOD;
         }
     }
     let globals = scripts.lua.globals();

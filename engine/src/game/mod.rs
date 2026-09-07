@@ -10,5 +10,6 @@ pub mod constants;
 pub mod functions;
 pub mod menu;
 pub mod rand;
+pub mod save;
 pub mod script;
 pub mod world;

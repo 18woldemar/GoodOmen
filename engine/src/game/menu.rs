@@ -81,6 +81,11 @@ pub struct Item {
     /// `mdkMenuItemGetWidgitValue` and its setter: a checkbox's 0 or 1, a
     /// slider's 0..1, a combo's index.
     pub value: f64,
+    /// `mdkMenuItemSetSponge` — blank room above this item, and above every
+    /// item made after it. The record's `+0x38`, and 0x411be0 sums it over
+    /// every existing item when it places a new one, which is what makes it
+    /// a spacer rather than a nudge.
+    pub sponge: f32,
 }
 
 pub struct Menu {
@@ -142,7 +147,8 @@ impl Menu {
             2 => -width(&text) * self.w * MIDDLE,
             _ => 0.0,
         };
-        let y = self.y + (self.gap + self.h) * self.items.len() as f32;
+        let sponges: f32 = self.items.iter().map(|i| i.sponge).sum();
+        let y = self.y + (self.gap + self.h) * self.items.len() as f32 + sponges;
         let width = width(&text) * self.w;
         self.items.push(Item {
             text,
@@ -154,7 +160,41 @@ impl Menu {
             widget: Widget::None,
             extra: 0.0,
             value: 0.0,
+            sponge: 0.0,
         });
+    }
+
+    /// `mdkMenuItemSetSponge(item, room)` — 0x412070, which writes the room
+    /// into the item and adds it to the item's own y. Items made afterwards
+    /// pick it up through [`Menu::add`]'s sum.
+    pub fn sponge(&mut self, index: usize, room: f32) {
+        if let Some(item) = self.items.get_mut(index) {
+            item.y += room - item.sponge;
+            item.sponge = room;
+        }
+    }
+
+    /// `mdkMenuItemCenterInMenu(item)` — 0x413a00. The original's item x is
+    /// relative to the menu's, and it writes `0.5 - menu.x - width * 0.5`;
+    /// ours is absolute, so the menu's x cancels and what is left is the
+    /// item centred **on the screen** rather than on the menu.
+    pub fn center(&mut self, index: usize) {
+        let middle = MIDDLE;
+        if let Some(item) = self.items.get_mut(index) {
+            item.x = middle - item.width * middle;
+        }
+    }
+
+    /// `mdkMenuTitleDontStayInCenterPlease(menu)` — 0x411bc0, which clears
+    /// the flag at the record's `+0x64`. Set, 0x413650 puts the title at
+    /// `0.5 - width * 1.2 * 0.5`, centred on the screen; clear, the title is
+    /// justified like an item and lands on the menu's own x.
+    pub fn title_off_centre(&mut self) {
+        self.title_at[0] = match self.justify {
+            1 => self.x - self.title_width * TITLE_SCALE,
+            2 => self.x - self.title_width * TITLE_SCALE * MIDDLE,
+            _ => self.x,
+        };
     }
 
     /// How much room an item's widget wants beside its words — the switch

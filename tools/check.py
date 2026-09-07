@@ -198,7 +198,7 @@ ENGINE = [
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
       "--play", "1", "9", "--window", "--for", "4",
       "--expect-filming", "l0a_animgob"], None),
-    ("the menu the scripts build answers its own keys",
+    ("the menu the scripts build answers its own keys, and a game saves and loads",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "--menu", "$MDK2_GOG"], None),
     ("the font's advances agree with its own pixels",

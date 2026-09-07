@@ -797,6 +797,27 @@ fn menu_check(root: &std::path::Path) -> Result<String, String> {
         return Err(format!("the pause key did not put up the pause menu: {paused}"));
     }
 
+    // **and out through Save and back in through Load**, which is the whole
+    // of the save flow: twenty slots built from the files that are there, a
+    // name typed into a message box, a file written, and the same name read
+    // back out of it by the load menu that resumes the game.
+    //
+    // It writes, so it needs somewhere to write -- and somewhere that is not
+    // the installation, which a measurement must leave alone.
+    let saved = {
+        let scratch = std::env::temp_dir().join(format!("goodomen-menu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        if let Some(mut boot) = scripts.lua.app_data_mut::<api::Boot>() {
+            boot.root = Some(scratch.clone());
+        }
+        let out = save_check(&scripts, &scratch);
+        if let Some(mut boot) = scripts.lua.app_data_mut::<api::Boot>() {
+            boot.root = None;
+        }
+        let _ = std::fs::remove_dir_all(&scratch);
+        out?
+    };
+
     // a subtitle, which is the same panel a movie puts up
     let said = {
         scripts
@@ -816,11 +837,40 @@ fn menu_check(root: &std::path::Path) -> Result<String, String> {
     };
     scripts.lua.load("mdkDialogPanel(-1, 0, 0, 0)").exec().ok();
 
-    // and down into Options -> Video, where the widgets are: three downs and
-    // a select each time, one command per step because `SetConScheme` only
-    // promotes a scheme between frames
+    // and down into Options -> Video, where the widgets are: one command per
+    // step, because `SetConScheme` only promotes a scheme between frames.
+    //
+    // **The cursor is walked to Options by name, not by counting.** How many
+    // downs it takes depends on which items are enabled, and the pause menu
+    // enables its own Save item or not depending on whether the game can be
+    // saved -- so a count that was right while `mdkCanSaveGameNow` answered
+    // nothing was wrong the day it answered.
     let widgets = (|| -> Result<String, String> {
-        for id in [api::MENU_DOWN, api::MENU_DOWN, api::MENU_DOWN, 62, 62] {
+        let options: Vec<u8> = {
+            let id: u32 = scripts
+                .lua
+                .globals()
+                .get::<mlua::Table>("strings")
+                .and_then(|t| t.get("options"))
+                .map_err(|e| e.to_string())?;
+            let boot = scripts.lua.app_data_ref::<api::Boot>().ok_or("no boot state")?;
+            boot.strings.text(id).map(|t| t.to_vec()).ok_or("no word for Options")?
+        };
+        let on_options = |scripts: &Scripts| -> bool {
+            let Some(boot) = scripts.lua.app_data_ref::<api::Boot>() else { return false };
+            let Some(menu) = boot.menu.and_then(|i| boot.menus.get(i)) else { return false };
+            menu.items.get(menu.selected).is_some_and(|i| i.text == options)
+        };
+        let mut steps = 0;
+        while !on_options(&scripts) {
+            steps += 1;
+            if steps > 20 {
+                return Err("the pause menu has no Options in it".into());
+            }
+            api::command(&scripts.lua, api::MENU_DOWN).map_err(|e| e.to_string())?;
+            api::set_scheme(&scripts.lua).map_err(|e| e.to_string())?;
+        }
+        for id in [62, 62] {
             api::command(&scripts.lua, id).map_err(|e| e.to_string())?;
             api::set_scheme(&scripts.lua).map_err(|e| e.to_string())?;
         }
@@ -834,6 +884,18 @@ fn menu_check(root: &std::path::Path) -> Result<String, String> {
                 .count();
             (kinds, menu.items.first().map(|i| i.value).unwrap_or(-1.0))
         };
+        // **and it really is the video options.** Counting downs used to
+        // reach whatever was three items along; naming the menu is what
+        // says the walk arrived.
+        let where_: Option<String> = scripts
+            .lua
+            .globals()
+            .get::<mlua::Table>("menu")
+            .and_then(|t| t.get("current"))
+            .map_err(|e| e.to_string())?;
+        if where_.as_deref() != Some("optvideo") {
+            return Err(format!("the walk ended on {where_:?}, not the video options"));
+        }
         if kinds < 3 {
             return Err(format!("the video options carry {kinds} widgets"));
         }
@@ -859,8 +921,100 @@ fn menu_check(root: &std::path::Path) -> Result<String, String> {
     Ok(format!(
         "{menus} menus of {items} items; the first has {count} -- {words} -- the cursor walked \
          all of them and wrapped, and choosing one reached the script. \
-         The pause key put up: {paused}, {widgets}, and a subtitle reads {said:?}"
+         The pause key put up: {paused}, {widgets}, and a subtitle reads {said:?}. \
+         {saved}"
     ))
+}
+
+/// Save a game from the menu and load it back, which is the whole flow the
+/// scripts drive: `BuildPCSaveMenu` walks twenty slots asking the engine
+/// which of them are files, choosing one opens a message box to type a name
+/// into, the accept writes the file, and `BuildPCLoadMenu` finds it again by
+/// the name that went in.
+fn save_check(
+    scripts: &goodomen::game::script::Scripts,
+    scratch: &std::path::Path,
+) -> Result<String, String> {
+    use goodomen::game::api::{self, Typed};
+    const NAME: &str = "a name to read back";
+
+    let run = |src: &str| scripts.lua.load(src).exec().map_err(|e| format!("{src}: {e}"));
+    let items = |what: &str| -> Result<Vec<String>, String> {
+        let boot = scripts.lua.app_data_ref::<api::Boot>().ok_or("no boot state")?;
+        let menu = boot.menu.and_then(|i| boot.menus.get(i)).ok_or(format!("{what}: no menu"))?;
+        Ok(menu.items.iter().map(|i| i.text.iter().map(|&b| b as char).collect()).collect())
+    };
+
+    run("BuildPCSaveMenu() menu.SwitchDlg(\"pcsave\")")?;
+    api::set_scheme(&scripts.lua).map_err(|e| e.to_string())?;
+    // twenty slots and a Cancel -- `NUMSAVESLOTS` in `menu.lua`
+    let slots = items("the save menu")?;
+    if slots.len() != 21 {
+        return Err(format!("the save menu has {} items, not 21", slots.len()));
+    }
+    // choosing one opens the box, and the box takes the keyboard
+    api::command(&scripts.lua, 62).map_err(|e| e.to_string())?;
+    if !api::editing(&scripts.lua) {
+        return Err("choosing a slot did not open a box to type in".into());
+    }
+    if !api::typing(&scripts.lua, Typed::Text(NAME)) {
+        return Err("the box would not take a name".into());
+    }
+    api::typing(&scripts.lua, Typed::Accept);
+    // `menu.pcsave.Update` is what watches for the accept and writes the file
+    api::menu_update(&scripts.lua).map_err(|e| e.to_string())?;
+    let at = scratch.join("save/0.sav");
+    if !at.exists() {
+        return Err(format!("accepting the name wrote no {}", at.display()));
+    }
+    // and the name is where the load menu will look for it -- offset 4, the
+    // way 0x42a2a0 reads it
+    let desc = goodomen::game::save::description(&at).unwrap_or_default();
+    let desc: String = desc.iter().map(|&b| b as char).collect();
+    if desc != NAME {
+        return Err(format!("the file is called {desc:?}, not {NAME:?}"));
+    }
+
+    // **and the scheme has to come back with it.** `menu.pause.Cancel` --
+    // which the accept above ran -- asks for `"game"`, and a menu key only
+    // reaches `comfuncs.menu` while the scheme is `"menu"`.
+    run(
+        "BuildPCLoadMenu() menu.SwitchDlg(\"pcload\") \
+         newconscheme = \"menu\" gamecontrol.showmenu = 1",
+    )?;
+    api::set_scheme(&scripts.lua).map_err(|e| e.to_string())?;
+    let listed = items("the load menu")?;
+    // twenty slots, Quick, Continue and Cancel
+    if listed.len() != 23 {
+        return Err(format!("the load menu has {} items, not 23", listed.len()));
+    }
+    if !listed[0].starts_with(&NAME[..15]) {
+        return Err(format!("the load menu calls the first slot {:?}", listed[0]));
+    }
+    // and choosing it asks for the level the save was taken in
+    if let Some(mut boot) = scripts.lua.app_data_mut::<api::Boot>() {
+        boot.next_level = None;
+    }
+    api::command(&scripts.lua, 62).map_err(|e| e.to_string())?;
+    let asked = scripts
+        .lua
+        .app_data_ref::<api::Boot>()
+        .and_then(|b| b.next_level)
+        .ok_or("loading the save asked for no level")?;
+    if asked != (1, 1) {
+        return Err(format!("loading the save asked for level {asked:?}, not (1, 1)"));
+    }
+    // put the menu back where it was found, because what comes after this
+    // walks down from the pause menu
+    if let Some(mut boot) = scripts.lua.app_data_mut::<api::Boot>() {
+        boot.next_level = None;
+    }
+    run(
+        "BuildPauseMenu() menu.SwitchDlg(\"pause\") \
+         newconscheme = \"menu\" gamecontrol.showmenu = 1",
+    )?;
+    api::set_scheme(&scripts.lua).map_err(|e| e.to_string())?;
+    Ok(format!("a game saved as {desc:?} loads back at level {}, checkpoint {}", asked.0, asked.1))
 }
 
 fn sources_of(install: &mut Install) -> std::collections::BTreeMap<String, String> {
@@ -2027,6 +2181,13 @@ fn title(
             let over = quit_after.is_some_and(|n| ticking.clock >= n);
             let mut leaving = over;
             for event in video.events.poll_iter() {
+                // **a box with the keyboard keeps it.** `item.Select` sets
+                // `conscheme = "poo"`, a scheme nothing is bound in, so the
+                // original's menu is deaf while a name is typed; here the
+                // events simply stop at the box.
+                if edit_event(&scripts.lua, &event) {
+                    continue;
+                }
                 if let Event::KeyDown { scancode: Some(code), repeat: false, .. } = event {
                     if let Some(dik) = goodomen::game::keys::dik(code) {
                         let bound: Vec<i64> = scripts
@@ -2111,6 +2272,9 @@ fn title(
                     if let Some(boot) = scripts.lua.app_data_ref::<api::Boot>() {
                         draw_menu(&mut overlay, gui, &boot);
                     }
+                }
+                if let Some(boot) = scripts.lua.app_data_ref::<api::Boot>() {
+                    draw_boxes(&mut overlay, gui, &boot);
                 }
                 if let Some(boot) = scripts.lua.app_data_ref::<api::Boot>() {
                     if let Some(d) = &boot.dialog {
@@ -2457,6 +2621,65 @@ fn draw_menu(
     }
 }
 
+/// The message boxes that are up, and the line being typed into one of them.
+///
+/// 0x4062c0 draws each box the same way it draws the credits — same record,
+/// same layout — with the menu's own nine-quad frame behind it when the
+/// caller asked for one. The caret is an underscore drawn after the text
+/// while the blink is in its first quarter-second.
+fn draw_boxes(
+    overlay: &mut goodomen::render::overlay::Overlay,
+    gui: &Gui,
+    boot: &goodomen::game::api::Boot,
+) {
+    use goodomen::game::api::{Edit, MessageBox};
+    for (i, boxed) in boot.boxes.iter().enumerate() {
+        let Some(boxed) = boxed else { continue };
+        if boxed.framed {
+            let box_ = [boxed.x, boxed.y, boxed.width, boxed.height];
+            overlay.frame(&gui.corners, &gui.edges, box_, MessageBox::BORDER, 1.0);
+        }
+        // the line being typed replaces the box's own words, which is what
+        // a box made with a string id of -1 has none of
+        let typed = boot.edit.as_ref().filter(|e| e.at == i);
+        let mut text = match typed {
+            Some(e) => e.text.clone(),
+            None => boxed.text.clone(),
+        };
+        if typed.is_some_and(|e| e.blink < Edit::LIT) {
+            text.push(Edit::CARET);
+        }
+        let cells = (boxed.width / MessageBox::CELL).max(1.0);
+        for (n, line) in goodomen::game::api::wrap(&boot.advance, &text, cells).iter().enumerate() {
+            let y = boxed.y + MessageBox::LINE * n as f32;
+            let size = (MessageBox::CELL, MessageBox::LINE);
+            overlay.text(&gui.font, line, boxed.x, y, size.0, size.1, MessageBox::GREY);
+        }
+    }
+}
+
+/// The keyboard while a name is being typed, which is the input layer's own
+/// queue in the original (0x480eb0) and not a command — see
+/// [`goodomen::game::api::typing`]. Answers whether the box took the event,
+/// because a Return that finishes a name must not also press the menu item
+/// behind it.
+fn edit_event(lua: &mlua::Lua, event: &sdl2::event::Event) -> bool {
+    use goodomen::game::api::{typing, Typed};
+    use sdl2::event::Event;
+    use sdl2::keyboard::Keycode;
+    match event {
+        Event::TextInput { text, .. } => typing(lua, Typed::Text(text)),
+        Event::KeyDown { keycode: Some(Keycode::Backspace), .. } => typing(lua, Typed::Backspace),
+        Event::KeyDown { keycode: Some(Keycode::Return), .. } => typing(lua, Typed::Accept),
+        Event::KeyDown { keycode: Some(Keycode::KpEnter), .. } => typing(lua, Typed::Accept),
+        Event::KeyDown { keycode: Some(Keycode::Escape), .. } => typing(lua, Typed::Cancel),
+        // a key going up is nobody's business, but it must not fall through
+        // to the menu while a box has the keyboard
+        Event::KeyUp { .. } => goodomen::game::api::editing(lua),
+        _ => false,
+    }
+}
+
 /// Play the level the game asked for, and then the one *that* asks for, for
 /// as long as it keeps asking.
 ///
@@ -2520,6 +2743,10 @@ fn play(
     // the 2-D layer, and the font it draws with. Both are wanted whether or
     // not a menu is up: the same layer carries the HUD and the subtitles.
     let to_press = presses();
+    let to_type: Option<String> = std::env::args()
+        .position(|a| a == "--type")
+        .and_then(|i| std::env::args().nth(i + 1));
+    let mut typed: Option<f64> = None;
     let mut pressed = 0usize;
     let mut said = false;
     let mut overlay = goodomen::render::overlay::Overlay::default();
@@ -2818,6 +3045,10 @@ fn play(
             for event in video.events.poll_iter().chain(
                 expired.then_some(Event::Quit { timestamp: 0 }),
             ) {
+                // a name being typed takes it before the menu does
+                if edit_event(&level_scripts.lua, &event) {
+                    continue;
+                }
                 // a menu takes the keyboard while it is up, which is
                 // what makes it a menu. Escape still leaves the window: the
                 // general dispatch of every command to `OnLuaCommand` is
@@ -3570,6 +3801,31 @@ fn play(
                         }
                     }
                 }
+                // `--type WORDS` is `--press` for a message box: the keys a
+                // name is made of never become commands, so a driven run has
+                // no other way to put one in. It types once, when a box
+                // opens, and leaves the accept to `--press`.
+                if let Some(words) = &to_type {
+                    let open = goodomen::game::api::editing(&level_scripts.lua);
+                    match typed {
+                        None if open => {
+                            typed = Some(ticking.clock);
+                            goodomen::game::api::typing(
+                                &level_scripts.lua,
+                                goodomen::game::api::Typed::Text(words),
+                            );
+                        }
+                        // a second later, so a run can be cut short to
+                        // photograph the box before the name is taken
+                        Some(at) if open && ticking.clock > at + 1.0 => {
+                            goodomen::game::api::typing(
+                                &level_scripts.lua,
+                                goodomen::game::api::Typed::Accept,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
                 let _ = goodomen::game::api::set_scheme(&level_scripts.lua);
                 let _ = goodomen::game::api::menu_update(&level_scripts.lua);
                 if let Some(gui) = &gui {
@@ -3580,6 +3836,11 @@ fn play(
                         {
                             draw_menu(&mut overlay, gui, &boot);
                         }
+                    }
+                    if let Some(boot) =
+                        level_scripts.lua.app_data_ref::<goodomen::game::api::Boot>()
+                    {
+                        draw_boxes(&mut overlay, gui, &boot);
                     }
                     // `--say ID` puts a subtitle up on the first frame, the
                     // way `--press` sends a key: it is how a person looks at
