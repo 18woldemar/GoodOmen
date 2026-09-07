@@ -271,8 +271,14 @@ class Model:
         return verts, tris
 
     def animations(self) -> list[dict]:
+        # cached: `_node_world` needs animation 0 as its baseline on every
+        # call, and re-parsing the whole table each time costs more than the
+        # posing does
+        if getattr(self, "_animations", None) is not None:
+            return self._animations
         o = self._sec(1)
         if o is None:
+            self._animations = []
             return []
         oc, ot, ok = self._sec(2), self._sec(3), self._sec(4)
         out = []
@@ -291,6 +297,7 @@ class Model:
                         for k in range(count) if first + k < self.counts[3]]
                 channels.append({"kind": kind, "node": node, "keys": keys})
             out.append({"id": rec[0], "length": length, "channels": channels})
+        self._animations = out
         return out
 
     def _value(self, index: int) -> tuple[float, float, float, float]:
@@ -346,16 +353,29 @@ class Model:
         n = len(self.nodes)
         trans = [list(node["translation"]) for node in self.nodes]
         quat = [(1.0, 0.0, 0.0, 0.0)] * n   # (w, x, y, z)
-        for ch in anim["channels"]:
-            if ch["node"] >= n:
-                continue
-            v = self.sample(ch, t)
-            if v is None:
-                continue
-            if ch["kind"] == KIND_TRANSLATION:
-                trans[ch["node"]] = list(v[:3])
-            elif ch["kind"] == KIND_ROTATION:
-                quat[ch["node"]] = v
+        # **The pose persists across an animation change.** In the original it
+        # lives on the model *instance* and `omAnimPlay` only overwrites the
+        # channels the new animation carries, so animation 0 -- the one that
+        # runs at load -- is the baseline every other one starts from.
+        # `L0a_AnimGOB` says so twice: its `L0A_COMICDUMMY` has an
+        # uninitialised translation (0xCDCDCDCD, -4.3e8) that only animation 0
+        # places, and its cover is lifted 0.095 off the backdrop by animation
+        # 0 and by nothing in animation 77, so without this the intro movie's
+        # comic book is either nowhere or coplanar with the wall behind it.
+        setup = self.animations()[0] if self.animations() else None
+        sources = [(anim, t)] if setup is None or setup is anim \
+            else [(setup, 0.0), (anim, t)]
+        for source, at in sources:
+            for ch in source["channels"]:
+                if ch["node"] >= n:
+                    continue
+                v = self.sample(ch, at)
+                if v is None:
+                    continue
+                if ch["kind"] == KIND_TRANSLATION:
+                    trans[ch["node"]] = list(v[:3])
+                elif ch["kind"] == KIND_ROTATION:
+                    quat[ch["node"]] = v
 
         def rot(q, p):
             # component order is (w, x, y, z): the rest pose stores

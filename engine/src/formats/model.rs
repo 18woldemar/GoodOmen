@@ -75,6 +75,17 @@ pub const KIND_ROTATION: u8 = 2;
 pub const KIND_CAMERA: u8 = 0x68;
 pub const KIND_FOV: u8 = 0x5c;
 
+/// **A node can be shown and hidden by its own animation.** 0x478800's cases
+/// 0x0e and 0x0f are the two: 0x0e writes bit 2 of the runtime slot's flags
+/// at +0x96 — the same bit `omGobGMSetSltVisible` (0x462a20) writes and the
+/// draw at 0x464630 tests before it emits a strip — and 0x0f writes the
+/// slot's alpha at +0x64, clamped to [0, 1].
+///
+/// This is how the comic book in the intro movie shows one panel at a time:
+/// `L0a_AnimGOB` carries both on every one of its twenty panel nodes.
+pub const KIND_VISIBLE: u8 = 0x0e;
+pub const KIND_ALPHA: u8 = 0x0f;
+
 /// What a camera node with no [`KIND_FOV`] channel would be filmed at. Ours,
 /// and unreachable in the shipped data — **all 102 name one** — so it is a
 /// fallback for a file this engine has not seen, not a reading of anything.
@@ -83,6 +94,11 @@ pub const DEFAULT_FOV_DEGREES: f64 = 33.0;
 
 /// A node draws nothing when its resource byte is this.
 pub const NO_RESOURCE: u8 = 0xFF;
+
+/// MSVC's debug fill for heap nobody wrote, read as a float: -431602080.
+/// Six models store it as a node's translation, and animation 0 is what puts
+/// them somewhere. See [`Model::node_world`].
+pub const UNWRITTEN: f32 = f32::from_bits(0xCDCD_CDCD);
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
@@ -116,6 +132,26 @@ pub struct Node {
     /// Index into [`Model::refs`] — the *whole* table, sounds included, not
     /// a texture table. [`NO_RESOURCE`] means the node draws nothing.
     pub resource: u8,
+    /// Whether the node is drawn at all before any animation says otherwise.
+    /// **Bit 0 of the byte at 0x83**: the slot builder at 0x460a20 shifts it
+    /// into flag bit 2, which the draw tests. 3824 of the corpus's 28712
+    /// nodes start hidden and 655 of those carry geometry, so this is real
+    /// and small — the comic's panels are most of it.
+    pub visible: bool,
+    /// **Self-illumination**, the float at 0x58 (slot +0x60). 0x464ab6
+    /// branches on it: at or below zero the node is drawn lit, with a
+    /// `glMaterialfv` diffuse and per-vertex normals; above zero its colour
+    /// is multiplied by it, `GL_LIGHTING` is switched **off**, and the strip
+    /// is drawn flat with no normals at all. 4370 of the 28712 nodes carry
+    /// 1.0 and 23630 carry zero — which is why the intro movie's comic book
+    /// is at full texture brightness and the level around it is not.
+    pub glow: f32,
+    /// The node's own opacity, the float at 0x5c (slot +0x64) — the same
+    /// field animation kind [`KIND_ALPHA`] writes. 1.0 on 27755 of the
+    /// 28712, and `ML1a_camera.mod` settles the reading by example: its three
+    /// TV-static frames are identical but for this, 1.0 on the first and 0.0
+    /// on the other two.
+    pub alpha: f32,
 }
 
 /// A run of consecutive vertices, which is a triangle strip.
@@ -274,6 +310,9 @@ impl Model {
                     group_count: u16le(data, o + 0x72)?,
                     translation: vec3(data, o + 0x34)?,
                     resource: *data.get(o + 0x87).ok_or(Error::Truncated)?,
+                    visible: data.get(o + 0x83).is_none_or(|b| b & 1 != 0),
+                    glow: f32le(data, o + 0x58).unwrap_or(0.0),
+                    alpha: f32le(data, o + 0x5c).unwrap_or(1.0),
                 });
             }
         }
@@ -404,6 +443,79 @@ impl Model {
         Some((node, fov.to_radians()))
     }
 
+    /// Which nodes are drawn at `t`: each node's own bit, and the
+    /// animation's [`KIND_VISIBLE`] channels over it.
+    ///
+    /// **A visibility key is an integer, not a float.** 0x478800 takes the
+    /// low bit of the value's first byte, and the pool holds a plain 0 or 1
+    /// there — read as a float that is a denormal, so anything that samples
+    /// it as one gets a number that is not zero and not one either.
+    pub fn visible_at(&self, anim: &Animation, t: f64) -> Vec<bool> {
+        let mut out: Vec<bool> = self.nodes.iter().map(|n| n.visible).collect();
+        for (source, at) in self.over(anim, t) {
+            for c in &source.channels {
+                if c.kind != KIND_VISIBLE || c.node as usize >= out.len() {
+                    continue;
+                }
+                // a step, not a ramp: the value in force is the last key at
+                // or before `t`, and the first key if `t` is before them all
+                let key =
+                    c.keys.iter().take_while(|k| k.0 as f64 <= at).last().or(c.keys.first());
+                if let Some(k) = key {
+                    out[c.node as usize] = self.raw_value(k.1) & 1 != 0;
+                }
+            }
+        }
+        out
+    }
+
+    /// Animation 0 and then the one asked for — **state persists across an
+    /// animation change**, because in the original it lives on the model
+    /// instance and `omAnimPlay` only overwrites the channels the new
+    /// animation has. Animation 0 is what ran at load, so it is the baseline
+    /// every other animation starts from. Without it the intro movie's comic
+    /// book goes invisible the moment its first shot begins: animation 0
+    /// turns the cover's opacity to 1 and animation 77 does not mention it.
+    fn over<'a>(&'a self, anim: &'a Animation, t: f64) -> Vec<(&'a Animation, f64)> {
+        match self.animations.first() {
+            Some(setup) if !std::ptr::eq(setup, anim) => vec![(setup, 0.0), (anim, t)],
+            _ => vec![(anim, t)],
+        }
+    }
+
+    /// Each node's opacity at `t` — its own, and the animation's
+    /// [`KIND_ALPHA`] channels over it, interpolated and clamped the way
+    /// 0x478800 clamps them.
+    pub fn alpha_at(&self, anim: &Animation, t: f64) -> Vec<f32> {
+        let mut out: Vec<f32> = self.nodes.iter().map(|n| n.alpha).collect();
+        for (source, when) in self.over(anim, t) {
+            for c in &source.channels {
+                if c.kind != KIND_ALPHA || c.node as usize >= out.len() || c.keys.is_empty() {
+                    continue;
+                }
+                let at = |k: &(f32, u32)| self.value(k.1)[0] as f32;
+                let v = match c.keys.iter().position(|k| k.0 as f64 > when) {
+                    None => at(c.keys.last().unwrap()),
+                    Some(0) => at(&c.keys[0]),
+                    Some(i) => {
+                        let (a, b) = (&c.keys[i - 1], &c.keys[i]);
+                        let span = (b.0 - a.0).max(f32::EPSILON);
+                        at(a) + (at(b) - at(a)) * ((when as f32 - a.0) / span)
+                    }
+                };
+                out[c.node as usize] = v.clamp(0.0, 1.0);
+            }
+        }
+        out
+    }
+
+    /// One entry of the value pool as it is stored, for a channel whose
+    /// values are not floats — see [`Model::visible_at`].
+    fn raw_value(&self, index: u32) -> u32 {
+        let base = self.offsets[5] as usize + index as usize * VALUE_STRIDE;
+        u32le(&self.data, base).unwrap_or(0)
+    }
+
     /// Node translations accumulated down the parent chain.
     fn world_offsets(&self) -> Vec<[f64; 3]> {
         let mut out = vec![None; self.nodes.len()];
@@ -514,16 +626,31 @@ impl Model {
             .collect();
         let mut quat = vec![[1.0f64, 0.0, 0.0, 0.0]; n];
 
-        for ch in &anim.channels {
-            let node = ch.node as usize;
-            if node >= n {
-                continue;
-            }
-            let Some(v) = self.sample(ch, t) else { continue };
-            match ch.kind {
-                KIND_TRANSLATION => trans[node] = [v[0], v[1], v[2]],
-                KIND_ROTATION => quat[node] = v,
-                _ => {} // 32..36 drive a sound, not a transform
+        // **The pose persists across an animation change**, because in the
+        // original it lives on the model *instance* and `omAnimPlay` only
+        // overwrites the channels the new animation carries. Animation 0 is
+        // what ran at load, so it is the baseline every other one starts
+        // from, and it is applied first.
+        //
+        // The intro movie is what says so twice over. `L0A_COMICDUMMY` is one
+        // of the six nodes in the corpus whose stored translation is
+        // [`UNWRITTEN`] and only animation 0 places it, so without this the
+        // whole comic book stands at -4.3e8; and `L0A_COVRFLIP01`'s cover is
+        // lifted off the backdrop by 0.095 in animation 0 and by nothing in
+        // animation 77, so without this the MDK2 cover is coplanar with the
+        // wall behind it and loses the depth test.
+        for (source, at) in self.over(anim, t) {
+            for ch in &source.channels {
+                let node = ch.node as usize;
+                if node >= n {
+                    continue;
+                }
+                let Some(v) = self.sample(ch, at) else { continue };
+                match ch.kind {
+                    KIND_TRANSLATION => trans[node] = [v[0], v[1], v[2]],
+                    KIND_ROTATION => quat[node] = v,
+                    _ => {} // 32..36 drive a sound, not a transform
+                }
             }
         }
 

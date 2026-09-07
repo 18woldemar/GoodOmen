@@ -32,6 +32,7 @@ layout (location = 0) in vec3 position;
 layout (location = 1) in vec2 uv;
 layout (location = 2) in float node;
 layout (location = 3) in vec3 normal;
+layout (location = 4) in float glow;
 uniform mat4 view_projection;
 uniform mat4 model;
 uniform vec4 node_rotation[128];
@@ -40,6 +41,11 @@ out vec2 vary_uv;
 out float vary_depth;
 out vec3 vary_world;
 out vec3 vary_normal;
+out float vary_glow;
+// the node's own opacity, which rides in `node_offset`'s spare w rather than
+// in an array of its own: the two vec4[128] already there are 1024 floats of
+// vertex uniform, which is exactly the GL 3.3 minimum
+out float vary_alpha;
 
 // (w, x, y, z), the order the models store one in
 vec3 turn(vec4 q, vec3 p) {
@@ -56,6 +62,8 @@ void main() {
     // alone carries the normal -- no inverse transpose needed
     vary_normal = mat3(model) * turn(node_rotation[i], normal);
     vary_uv = uv;
+    vary_glow = glow;
+    vary_alpha = node_offset[i].w;
     gl_Position = view_projection * world;
     vary_depth = gl_Position.w;
 }
@@ -79,6 +87,8 @@ in vec2 vary_uv;
 in float vary_depth;
 in vec3 vary_world;
 in vec3 vary_normal;
+in float vary_glow;
+in float vary_alpha;
 uniform sampler2D albedo;
 uniform float alpha_test;
 uniform float opacity;
@@ -93,6 +103,11 @@ out vec4 fragment;
 void main() {
     vec4 texel = texture(albedo, vary_uv);
     if (texel.a < alpha_test) discard;
+    // ponytail: a node's opacity is a threshold here, not a blend. The pass
+    // an object goes in is chosen per object, so a model with one faded node
+    // would have to be split; the data is 0 or 1 on 27755 of 28712 nodes and
+    // the fades in between last a twentieth of a second.
+    if (vary_alpha < 0.5) discard;
     vec3 n = normalize(vary_normal);
     // **The lighting is the original's, read at 0x4644c0.** omPolyhedron.c
     // hands each light to `glLightfv` as a GL_POSITION with w = 1 and a
@@ -116,8 +131,11 @@ void main() {
     // playable level has lights (112 in level 1, 197 in level 4), so this
     // only ever fires on the front end. Hypothesis, not a reading: the call
     // that would switch lighting off has not been found.
-    vec3 lit = unlit ? vec3(1.0) : vec3(0.2);
-    for (int i = 0; i < light_count; i++) {
+    // **A self-illuminated node is not lit at all.** 0x464ab6 branches on
+    // the slot's own float at +0x60: above zero it multiplies the colour by
+    // it, switches `GL_LIGHTING` off and draws the strip with no normals.
+    vec3 lit = vary_glow > 0.0 ? vec3(vary_glow) : (unlit ? vec3(1.0) : vec3(0.2));
+    for (int i = 0; i < light_count && vary_glow <= 0.0; i++) {
         vec3 to = light_position[i] - vary_world;
         float d = length(to);
         float r = max(light_radius[i], 0.001);
@@ -130,7 +148,7 @@ void main() {
     // `chFogStartEnd`, the colour through `chFogColor`. GL 3.3 core has no
     // fixed-function fog, so the same arithmetic is done here.
     float f = clamp((fog.y - vary_depth) / max(fog.y - fog.x, 0.001), 0.0, 1.0);
-    fragment = vec4(mix(fog_colour, colour, mix(1.0, f, fog.z)), opacity);
+    fragment = vec4(mix(fog_colour, colour, mix(1.0, f, fog.z)), opacity * vary_alpha);
 }
 "#;
 
@@ -287,18 +305,31 @@ fn face_normal(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> [f32; 3] {
 /// argument, not a length: 99 of 5165 records are negative and
 /// `omAnimSetSpeed(door, ANIM_OPEN, -1)` is how `elevators.lua` shuts a door
 /// it opened.
-fn node_pose(model: &Model, chosen: Option<f64>, clock: f64) -> (Vec<f32>, Vec<f32>) {
+fn node_pose(
+    model: &Model,
+    chosen: Option<f64>,
+    clock: f64,
+) -> (Vec<f32>, Vec<f32>, Vec<bool>) {
     let mut rotation = vec![0.0f32; MAX_NODES * 4];
     let mut offset = vec![0.0f32; MAX_NODES * 4];
     for i in 0..MAX_NODES {
         rotation[i * 4] = 1.0;
+        // an opacity of 1 by default, so a model with no animation at all is
+        // drawn rather than discarded
+        offset[i * 4 + 3] = 1.0;
     }
     // the animation `omAnimPlay` named, by its id, or animation 0 -- which
     // is the game's own default and is an animation, not a bind pose
     let anim = chosen
         .and_then(|id| model.animations.iter().find(|a| a.id as f64 == id))
         .or_else(|| model.animations.first());
-    let Some(anim) = anim else { return (rotation, offset) };
+    let Some(anim) = anim else {
+        let shown = model.nodes.iter().map(|n| n.visible).collect();
+        for (i, n) in model.nodes.iter().enumerate().take(MAX_NODES) {
+            offset[i * 4 + 3] = n.alpha;
+        }
+        return (rotation, offset, shown);
+    };
     let t = (clock * anim.loop_rate() as f64).fract();
     for (i, (q, o)) in model.node_world(anim, t).into_iter().enumerate().take(MAX_NODES) {
         for c in 0..4 {
@@ -308,7 +339,10 @@ fn node_pose(model: &Model, chosen: Option<f64>, clock: f64) -> (Vec<f32>, Vec<f
             offset[i * 4 + c] = o[c] as f32;
         }
     }
-    (rotation, offset)
+    for (i, a) in model.alpha_at(anim, t).into_iter().enumerate().take(MAX_NODES) {
+        offset[i * 4 + 3] = a;
+    }
+    (rotation, offset, model.visible_at(anim, t))
 }
 
 /// Turn a decoded BGRA level into the RGBA GL expects.
@@ -400,7 +434,7 @@ impl Scene {
             self.refused += 1;
             return;
         }
-        let mut data: Vec<f32> = Vec::with_capacity(mesh.triangles.len() * 3 * 9);
+        let mut data: Vec<f32> = Vec::with_capacity(mesh.triangles.len() * 3 * 10);
         let mut parts: Vec<Part> = Vec::new();
 
         for tri in &mesh.triangles {
@@ -423,7 +457,7 @@ impl Scene {
                 _ => parts.push(Part {
                     texture,
                     node,
-                    first: (data.len() / 9) as i32,
+                    first: (data.len() / 10) as i32,
                     count: 3,
                 }),
             }
@@ -440,10 +474,18 @@ impl Scene {
                 let p = mesh.positions[v as usize];
                 let uv = mesh.uvs[v as usize];
                 let node = if here { mesh.node[v as usize] as f32 } else { 0.0 };
+                // the self-illumination is the node's own and never animated,
+                // so it rides in the buffer rather than in a uniform
+                let glow = model
+                    .nodes
+                    .get(mesh.node[v as usize] as usize)
+                    .map(|n| n.glow)
+                    .unwrap_or(0.0);
                 data.extend_from_slice(&[
                     p[0] as f32, p[1] as f32, p[2] as f32,
                     uv[0], uv[1], node,
                     face[0], face[1], face[2],
+                    glow,
                 ]);
             }
         }
@@ -457,7 +499,7 @@ impl Scene {
             std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(&data[..])),
             glow::STATIC_DRAW,
         );
-        let stride = 9 * std::mem::size_of::<f32>() as i32;
+        let stride = 10 * std::mem::size_of::<f32>() as i32;
         gl.enable_vertex_attrib_array(0);
         gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, stride, 0);
         gl.enable_vertex_attrib_array(1);
@@ -466,6 +508,8 @@ impl Scene {
         gl.vertex_attrib_pointer_f32(2, 1, glow::FLOAT, false, stride, 20);
         gl.enable_vertex_attrib_array(3);
         gl.vertex_attrib_pointer_f32(3, 3, glow::FLOAT, false, stride, 24);
+        gl.enable_vertex_attrib_array(4);
+        gl.vertex_attrib_pointer_f32(4, 1, glow::FLOAT, false, stride, 36);
 
         self.models.insert(
             name.to_ascii_lowercase(),
@@ -618,8 +662,8 @@ impl Scene {
         for (name, _) in &self.draws {
             let Some(m) = self.models.get(name) else { continue };
             let Some(source) = &m.posed_here else { continue };
-            let (ra, oa) = node_pose(source, None, a);
-            let (rb, ob) = node_pose(source, None, b);
+            let (ra, oa, _) = node_pose(source, None, a);
+            let (rb, ob, _) = node_pose(source, None, b);
             total += ra.iter().zip(&rb).map(|(x, y)| (x - y).abs() as f64).sum::<f64>();
             total += oa.iter().zip(&ob).map(|(x, y)| (x - y).abs() as f64).sum::<f64>();
         }
@@ -727,7 +771,12 @@ impl Scene {
             .take(MAX_NODES)
             .flatten()
             .collect();
-        let zero = vec![0.0f32; MAX_NODES * 4];
+        // no offset, and **an opacity of one in the spare w** — a model that
+        // is not posed here still has to be drawn
+        let zero: Vec<f32> = std::iter::repeat([0.0f32, 0.0, 0.0, 1.0])
+            .take(MAX_NODES)
+            .flatten()
+            .collect();
         let alpha_at = gl.get_uniform_location(shader, "alpha_test");
         gl.uniform_4_f32(
             gl.get_uniform_location(shader, "fog").as_ref(),
@@ -784,6 +833,7 @@ impl Scene {
 
         let mut drawn = 0usize;
         let mut unposed = false;
+        let mut drawn_nodes: Vec<bool> = Vec::new();
         let opacity_at = gl.get_uniform_location(shader, "opacity");
         // **two passes, and only when there is something to put in the
         // second.** Anything the scripts have faded is drawn after everything
@@ -818,21 +868,29 @@ impl Scene {
             // models are static and want the same identity every time
             match &model.posed_here {
                 Some(source) => {
-                    let (rotation, offset) = node_pose(source, self.playing[i], clock);
+                    let (rotation, offset, shown) =
+                        node_pose(source, self.playing[i], clock);
                     gl.uniform_4_f32_slice(rotation_at.as_ref(), &rotation);
                     gl.uniform_4_f32_slice(offset_at.as_ref(), &offset);
                     unposed = false;
+                    drawn_nodes = shown;
                 }
                 None if !unposed => {
                     gl.uniform_4_f32_slice(rotation_at.as_ref(), &identity);
                     gl.uniform_4_f32_slice(offset_at.as_ref(), &zero);
                     unposed = true;
+                    drawn_nodes.clear();
                 }
-                None => {}
+                None => drawn_nodes.clear(),
             }
             gl.bind_vertex_array(Some(model.vao));
             for part in &model.parts {
                 if self.hidden[i].contains(&part.node) {
+                    continue;
+                }
+                // and the node's own visibility bit, and whatever its
+                // animation has done to it -- see `Model::visible_at`
+                if drawn_nodes.get(part.node as usize) == Some(&false) {
                     continue;
                 }
                 let bound = part
