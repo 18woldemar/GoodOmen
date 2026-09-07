@@ -72,6 +72,12 @@ pub unsafe fn start(
     // Whether the game may write its own files beside the installation —
     // `save/auto.sav` is written during this call, by the level script.
     beside: bool,
+    // **Shown while the rest of this call runs.** `mdk2.lua` asks for the
+    // level's own picture from inside `level()`, before the scene graph is
+    // applied, so the driver is handed it at the same point the original
+    // starts drawing it -- and everything after this line is the loading it
+    // covers. A driver with no window passes something that does nothing.
+    showing: &mut dyn FnMut(&mut Install, &str),
 ) -> Result<Started, Error> {
     use crate::game::api;
 
@@ -100,6 +106,9 @@ pub unsafe fn start(
         scripts.run("menu.lua", src)?;
     }
     api::level(&scripts, number, checkpoint, "sectionA")?;
+    if let Some(picture) = scripts.lua.app_data_ref::<api::Boot>().and_then(|b| b.loading.clone()) {
+        showing(install, &picture);
+    }
 
     let boot = scripts
         .lua

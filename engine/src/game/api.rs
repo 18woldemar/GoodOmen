@@ -597,6 +597,14 @@ pub struct Boot {
     /// The one `mdkSetCurrentMenu` last named, which is the one that draws
     /// and the one the menu keys move.
     pub menu: Option<usize>,
+    /// The picture `mdkShowLoadingScreen` asked for, which is
+    /// `Level.loadscreen` -- `loadscreen1` through `loadscreen10`, one per
+    /// level, and every level names one.
+    pub loading: Option<String>,
+    /// Where a script has asked the player to be put -- see
+    /// `mdkGobSyncSetPosition`. The driver takes it and moves the body,
+    /// because moving the gob alone is undone on the next tick.
+    pub warp: Option<[f64; 3]>,
     /// `mode -> the GUI gob that mode is worn with`, from
     /// `mdkSetPlayModeGobs`'s third argument. See [`Boot::mode`].
     pub gui_gobs: BTreeMap<i64, String>,
@@ -1213,6 +1221,13 @@ pub enum Typed<'a> {
     Accept,
     /// Escape, 0x1b.
     Cancel,
+}
+
+/// Take the place a script asked the player to be put, if any -- see
+/// `mdkGobSyncSetPosition`. It is the driver that owns the body, so it is the
+/// driver that has to do the moving.
+pub fn take_warp(lua: &Lua) -> Option<[f64; 3]> {
+    boot_mut(lua).ok()?.warp.take()
 }
 
 /// Whether a line is being typed, which is 0x4bac8c.
@@ -3645,6 +3660,60 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             Ok(())
         })?,
     )?;
+    // **`mdkShowLoadingScreen(picture, memory, clear, string)`** -- 0x439d60
+    // into **0x42c3c0**, which is a loop: while the resource queue at
+    // 0x5d27c0 has anything in it, draw the picture, fade it in at 0.1333 a
+    // step, and pump the message boxes. `mdk2.lua` calls it from `level()`
+    // between reading the level script and applying the scene graph, which
+    // is exactly the gap the loading takes.
+    //
+    // Nothing here loads in the background, so there is no loop to run: the
+    // driver draws the picture once, at the same point, and then does the
+    // loading behind it.
+    globals.set(
+        "mdkShowLoadingScreen",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let name = match args.first() {
+                Some(Value::String(s)) => s.to_string_lossy().to_string(),
+                _ => String::new(),
+            };
+            // an empty name is a section change with no picture of its own,
+            // and 0x42c3c0 then loads nothing and shows black
+            boot_mut(lua)?.loading = (!name.is_empty()).then_some(name);
+            Ok(())
+        })?,
+    )?;
+
+    // **`mdkGobSyncSetPosition(gob, "waypoint")` is how a script warps the
+    // player.** 0x442b60 into **0x411420**, which queues the move rather than
+    // making it: a pool of nine at 0x4bb3a8 takes the gob, 0x4bb318 the
+    // position 0x42c730 resolved the name to, and 0x4bb3d4 the facing that
+    // came out of the same call. Something later in the frame applies them,
+    // which is what the "sync" is.
+    //
+    // Here it is `mdkGobSetPosition` plus **the body**, because moving the
+    // player's gob alone is undone on the next tick: the driver writes the
+    // gob's position from the body it is walking. Levels 3, 6 and 9 use it
+    // for their scripted warps -- `l3_kitchenwp`, `l6r7_docboss`, and every
+    // one of level 9's room warps -- and without the body the player stays
+    // where he was and the script waits forever.
+    globals.set(
+        "mdkGobSyncSetPosition",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let at = match args.get(1) {
+                Some(Value::String(_)) => point_at(lua, args.get(1)),
+                other => position(other),
+            };
+            let (Some(Value::Table(gob)), Some(at)) = (args.first(), at) else { return Ok(()) };
+            place(lua, gob, at)?;
+            let who = gob.get::<Option<String>>("name")?;
+            if who.is_some() && who == boot_ref(lua)?.player {
+                boot_mut(lua)?.warp = Some(at);
+            }
+            Ok(())
+        })?,
+    )?;
+
     // **The two files the game writes beside itself, and both are read.**
     //
     // `save/auto.sav` is **twenty bytes** — 0x42d250 writes a zero dword
@@ -9626,6 +9695,42 @@ mod tests {
         let fog = scripts.lua.app_data_ref::<Boot>().unwrap().fog;
         assert!(!fog.on);
         assert_eq!((fog.near, fog.far), (50.0, 200.0));
+    }
+
+    /// **A script picks the player up and puts him on a waypoint**, and the
+    /// body has to follow or the next tick puts the gob back where the body
+    /// still is. Levels 3, 6 and 9 do this to move between rooms.
+    #[test]
+    fn a_scripted_warp_moves_the_player_and_the_driver_is_told() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        scripts
+            .lua
+            .load(
+                "points = { l3_kitchenwp = { x = 12, y = -3, z = 40, f = 0 } }\n\
+                 mdkRegisterObject('kurt', OBJ_KURT, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkSetPlayModeGobs(PLAYMODE_KURT, kurt, nil)\n\
+                 mdkRegisterObject('other', OBJ_NONE, scene, nil, -1, 0,0,0, \
+                 1,0,0,0, nil,0,0,0,0, nil, nil, 0)\n\
+                 mdkGobSyncSetPosition(other, 'l3_kitchenwp')",
+            )
+            .exec()
+            .unwrap();
+        // somebody else moving is not the driver's business
+        assert_eq!(scripts.lua.app_data_ref::<Boot>().unwrap().warp, None);
+
+        scripts.lua.load("mdkGobSyncSetPosition(kurt, 'l3_kitchenwp')").exec().unwrap();
+        assert_eq!(
+            scripts.lua.app_data_ref::<Boot>().unwrap().warp,
+            Some([12.0, -3.0, 40.0])
+        );
+        // and the gob itself went too, waypoint fields and all
+        let x: f64 = scripts.lua.load("return kurt.position.x").eval().unwrap();
+        assert_eq!(x, 12.0);
+        // taking it clears it: one warp is one move
+        assert_eq!(take_warp(&scripts.lua), Some([12.0, -3.0, 40.0]));
+        assert_eq!(take_warp(&scripts.lua), None);
     }
 
     /// A grunt is 40 hitpoints on Hard and `DAMAGE_GOODGUY` is 1, which is

@@ -1750,6 +1750,15 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
         )
         .map_err(|e| e.to_string())?;
 
+        // **and a script can pick the player up and put him somewhere.**
+        // `mdkGobSyncSetPosition` is level 3, 6 and 9 warping him between
+        // rooms; the gob has already moved, and the body has to follow or
+        // the next tick puts the gob back.
+        if let Some(at) = api::take_warp(&scripts.lua) {
+            body.position = [at[0], at[1], at[2] + EYE];
+            body.velocity_z = 0.0;
+        }
+
         // ponytail: a dead player stops the run. The original respawns him at
         // the checkpoint -- the class's damage handler off the table at
         // 0x49bc58 does it -- and until that is built, walking a corpse for
@@ -2799,6 +2808,33 @@ fn play(
     let mut video = Video::open("goodomen", 1024, 768, show)?;
     let version = video.version();
     let mut scene = Scene::default();
+    // **the level's own loading screen**, drawn once at the point `mdk2.lua`
+    // asks for it and left on the window while the models and the collision
+    // trees are read. The original loops on it because it loads in the
+    // background; this draws it and gets on with the loading.
+    let mut show_loading = |install: &mut Install, name: &str| {
+        let Ok(bytes) = install.read(&format!("{name}.tex")) else { return };
+        let Ok(tex) = goodomen::formats::tex::Texture::parse(&bytes) else { return };
+        // SAFETY: the context Video::open made is current on this thread.
+        unsafe {
+            let Some(picture) = goodomen::render::scene::upload(&video.gl, &tex) else { return };
+            let mut layer = goodomen::render::overlay::Overlay::default();
+            layer.quad(
+                Some(picture.texture),
+                [0.0, 0.0, 1.0, 1.0],
+                [0.0, 0.0, 1.0, 1.0],
+                [1.0, 1.0, 1.0, 1.0],
+            );
+            let (w, h) = video.window.drawable_size();
+            video.gl.viewport(0, 0, w as i32, h as i32);
+            video.gl.clear_color(0.0, 0.0, 0.0, 1.0);
+            video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+            let _ = layer.draw(&video.gl);
+        }
+        if show {
+            video.window.gl_swap_window();
+        }
+    };
     // SAFETY: the context Video::open made is current on this thread.
     let started_level = unsafe {
         goodomen::game::level::start(
@@ -2813,6 +2849,7 @@ fn play(
             // checks, and the checks play all ten levels: without this every
             // run of `check.py` would overwrite the player's own autosave.
             !std::env::args().any(|a| a == "--for"),
+            &mut show_loading,
         )
         .map_err(|e| e.to_string())?
     };
@@ -3510,6 +3547,13 @@ fn play(
                 )
             {
                 eprintln!("goodomen: {e}");
+            }
+
+            // and a script can pick the player up and put him somewhere --
+            // see `mdkGobSyncSetPosition`
+            if let Some(to) = goodomen::game::api::take_warp(&level_scripts.lua) {
+                body.position = [to[0], to[1], to[2] + EYE];
+                body.velocity_z = 0.0;
             }
 
             // dead? back to the checkpoint, whole. See `deaths`.
