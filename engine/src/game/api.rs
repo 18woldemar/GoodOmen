@@ -3660,6 +3660,41 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             Ok(())
         })?,
     )?;
+    // --- three names that are `return;` in this build ----------------------
+    //
+    // **`chSndLoadBank(name, section)` and `chSndLoadBankPre(name, 0)` load
+    // nothing here and nothing there.** 0x41d020 and 0x41d090 read their two
+    // arguments, call **0x450ea0 -- which is one `ret`** -- and come back.
+    // The banks they name (`level1snd0` and its kin) are not in the shipped
+    // data either: there is no file of that name in any of the four
+    // containers. They are the Dreamcast build's memory management, left
+    // registered on the PC so the scripts do not have to know which machine
+    // they are on.
+    //
+    // **`mdkDumpMenuSounds()`** is 0x442a90 into **0x411a00**, which frees
+    // six resources the menu was holding and clears the pointers. Nothing is
+    // held here that a level change does not drop anyway.
+    //
+    // So all three are bound to nothing **on purpose**, and that is the
+    // faithful reading rather than a stub: doing nothing is what the
+    // original does. Between them they were the three largest entries on the
+    // work list, at ten calls each -- one per level.
+    for name in ["chSndLoadBank", "chSndLoadBankPre", "mdkDumpMenuSounds"] {
+        globals.set(name, lua.create_function(|_, _: Variadic<Value>| Ok(()))?)?;
+    }
+    // **`omUnbindAllCommands()`** (0x41e620) writes -1 into the first two
+    // words of every binding in the table at 0x5f6800, stride 0x28. The only
+    // caller is the first line of `defaultkeys.lua`, which then rebinds
+    // everything -- so it is the "replace" in a rebind, and without it a
+    // second `dofile('defaultkeys')` would leave the first set in place.
+    globals.set(
+        "omUnbindAllCommands",
+        lua.create_function(|lua, _: Variadic<Value>| {
+            boot_mut(lua)?.input.bindings.clear();
+            Ok(())
+        })?,
+    )?;
+
     // **`mdkShowLoadingScreen(picture, memory, clear, string)`** -- 0x439d60
     // into **0x42c3c0**, which is a loop: while the resource queue at
     // 0x5d27c0 has anything in it, draw the picture, fade it in at 0.1333 a
