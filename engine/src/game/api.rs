@@ -597,6 +597,9 @@ pub struct Boot {
     /// The one `mdkSetCurrentMenu` last named, which is the one that draws
     /// and the one the menu keys move.
     pub menu: Option<usize>,
+    /// `mode -> the GUI gob that mode is worn with`, from
+    /// `mdkSetPlayModeGobs`'s third argument. See [`Boot::mode`].
+    pub gui_gobs: BTreeMap<i64, String>,
     /// Where `mdkShowMouse` last put the cursor, and whether it asked for
     /// one at all.
     pub mouse: Option<[f32; 2]>,
@@ -3497,8 +3500,22 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
                 lua.set_named_registry_value("player", gob.clone())?;
                 if let Some(name) = gob.get::<Option<String>>("name")? {
                     let mode = args.first().map(number).unwrap_or(0.0) as i64;
+                    // **and the third argument is the mode's own HUD.**
+                    // `CreateKurt` says `(PLAYMODE_KURT, bob, kurtinventory)`
+                    // and then `(PLAYMODE_SNIPER, bob, kurtsnipe)`: one
+                    // player, two inventories, and only the mode being
+                    // played wears its own. Every character's is registered
+                    // into the same GUI scene, so without this the sniper
+                    // scope hangs over ordinary play.
+                    let gui = match args.get(2) {
+                        Some(Value::Table(t)) => t.get::<Option<String>>("name")?,
+                        _ => None,
+                    };
                     let mut boot = boot_mut(lua)?;
                     boot.play_modes.insert(mode, name.clone());
+                    if let Some(gui) = gui {
+                        boot.gui_gobs.insert(mode, gui);
+                    }
                     boot.player = Some(name);
                 }
             }

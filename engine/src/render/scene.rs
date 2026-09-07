@@ -746,14 +746,32 @@ impl Scene {
     ///
     /// # Safety
     /// A GL context must be current on this thread.
+    /// The GUI pass. `visible` is which draws to take -- the current play
+    /// mode's own inventory tree and nothing else, because every character's
+    /// inventory is registered into the same scene and only one is worn.
     pub unsafe fn draw_gui(
         &mut self,
         gl: &glow::Context,
         view_projection: &Mat4,
+        visible: Option<&std::collections::BTreeSet<usize>>,
         clock: f64,
         eye: [f32; 3],
     ) -> Result<usize, String> {
-        self.draw_scene(gl, view_projection, Fog::default(), None, clock, eye, true)
+        self.draw_scene(gl, view_projection, Fog::default(), visible, clock, eye, true)
+    }
+
+    /// Which draws belong to these objects, for a caller that knows the
+    /// objects and not the indices.
+    pub fn drawn_by(
+        &self,
+        who: &std::collections::BTreeSet<crate::game::world::Id>,
+    ) -> std::collections::BTreeSet<usize> {
+        self.owners
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| o.is_some_and(|id| who.contains(&id)))
+            .map(|(i, _)| i)
+            .collect()
     }
 
     #[allow(clippy::too_many_arguments)]

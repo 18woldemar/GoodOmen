@@ -75,6 +75,46 @@ pub const KIND_ROTATION: u8 = 2;
 pub const KIND_CAMERA: u8 = 0x68;
 pub const KIND_FOV: u8 = 0x5c;
 
+/// **A camera carries its own frame of the screen, and whether it is flat.**
+/// 0x46d910 builds the projection out of the camera record: `+0x18`..`+0x24`
+/// go straight to `glViewport` as fractions of the window, `+0x00` is the
+/// size, and `+0x64` chooses between `gluPerspective(size, aspect, 0.3,
+/// 5000)` and `glOrtho` at `(size, aspect, 1, 100)` -- and the aspect is the
+/// viewport's own `w / h` times the window's.
+///
+/// The corpus splits the 102 cameras cleanly in two, which is what says the
+/// reading is right rather than merely possible:
+///
+/// - **29 cutscene cameras** (`ML*_camera.mod` and their kin) name a
+///   viewport of **(0, 0.2, 1, 0.6)**. That is the letterbox: a movie is
+///   drawn into the middle three fifths of the window and the bars are the
+///   window showing through. Nothing has to draw them.
+/// - **8 name [`KIND_ORTHO`] = 1**, and every one of them is a flat overlay:
+///   `Startscreen`, `dialog`, `dialogtop` and the four inventories. For
+///   those [`KIND_FOV`] is not an angle at all but the ortho box's half
+///   height -- 4.8 for Kurt's inventory, 3.25 for a subtitle panel.
+///
+/// The other 65 are perspective at a full-window viewport, which is what the
+/// defaults here are.
+pub const KIND_ORTHO: u8 = 0x66;
+pub const KIND_VIEWPORT_X: u8 = 0x5d;
+pub const KIND_VIEWPORT_Y: u8 = 0x5e;
+pub const KIND_VIEWPORT_W: u8 = 0x5f;
+pub const KIND_VIEWPORT_H: u8 = 0x60;
+
+/// A camera node and the frame it films in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Camera {
+    pub node: usize,
+    /// Radians of vertical field of view for a perspective camera, and the
+    /// ortho box's half height for a flat one.
+    pub size: f64,
+    pub ortho: bool,
+    /// `x, y, w, h` as fractions of the window, bottom-left origin, the way
+    /// `glViewport` wants them.
+    pub viewport: [f32; 4],
+}
+
 /// **A node can be shown and hidden by its own animation.** 0x478800's cases
 /// 0x0e and 0x0f are the two: 0x0e writes bit 2 of the runtime slot's flags
 /// at +0x96 — the same bit `omGobGMSetSltVisible` (0x462a20) writes and the
@@ -432,15 +472,29 @@ impl Model {
     /// on the `ANIM_ACTION*` the script plays, so both tables are searched:
     /// `L0a_AnimGOB.mod` names the node and its 21 degrees in animation 0 and
     /// moves it in animation 77.
-    pub fn camera(&self) -> Option<(usize, f64)> {
+    pub fn camera(&self) -> Option<Camera> {
         let channels = || self.animations.iter().flat_map(|a| &a.channels);
         let node = channels().find(|c| c.kind == KIND_CAMERA)?.node as usize;
-        let fov = channels()
-            .find(|c| c.kind == KIND_FOV && c.node as usize == node)
-            .and_then(|c| c.keys.first())
-            .map(|k| self.value(k.1)[0])
-            .unwrap_or(DEFAULT_FOV_DEGREES);
-        Some((node, fov.to_radians()))
+        let of = |kind: u8| {
+            channels()
+                .find(|c| c.kind == kind && c.node as usize == node)
+                .and_then(|c| c.keys.first())
+                .map(|k| self.value(k.1)[0])
+        };
+        let size = of(KIND_FOV).unwrap_or(DEFAULT_FOV_DEGREES);
+        // the mode is an integer in the pool, the way a visibility key is
+        let ortho = of(KIND_ORTHO).map(|v| (v as f32).to_bits()) == Some(1);
+        Some(Camera {
+            node,
+            size: if ortho { size } else { size.to_radians() },
+            ortho,
+            viewport: [
+                of(KIND_VIEWPORT_X).unwrap_or(0.0) as f32,
+                of(KIND_VIEWPORT_Y).unwrap_or(0.0) as f32,
+                of(KIND_VIEWPORT_W).unwrap_or(1.0) as f32,
+                of(KIND_VIEWPORT_H).unwrap_or(1.0) as f32,
+            ],
+        })
     }
 
     /// Which nodes are drawn at `t`: each node's own bit, and the

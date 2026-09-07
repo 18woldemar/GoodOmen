@@ -79,6 +79,19 @@ impl Mat4 {
         m
     }
 
+    /// A flat box, the way 0x469110 sets one up for the eight cameras that
+    /// name [`crate::formats::model::KIND_ORTHO`]: `size` is the box's half
+    /// height and the width follows from the aspect.
+    pub fn ortho(size: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
+        let mut m = Mat4([0.0; 16]);
+        m.0[0] = 1.0 / (size * aspect);
+        m.0[5] = 1.0 / size;
+        m.0[10] = -2.0 / (far - near);
+        m.0[14] = -(far + near) / (far - near);
+        m.0[15] = 1.0;
+        m
+    }
+
     /// Look from `eye` at `at`, with `up` deciding the roll.
     pub fn look_at(eye: [f32; 3], at: [f32; 3], up: [f32; 3]) -> Mat4 {
         let f = normalise(sub(at, eye));

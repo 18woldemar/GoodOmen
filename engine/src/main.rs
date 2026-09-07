@@ -2369,12 +2369,73 @@ const MENU_CORNER: f32 = 0.04;
 /// modelling package looks, points the intro movie sideways off its own page.
 struct Shot {
     view: Mat4,
-    fov: f32,
+    /// What the node says about the frame: the size, whether it is flat, and
+    /// the part of the window it fills.
+    camera: goodomen::formats::model::Camera,
     /// The gob whose model carried the camera, for the session's summary.
     who: String,
     /// Where it stands — the lights the shader gets are the sixteen nearest
     /// to the **camera**, and during a cutscene that is not the player.
     eye: [f32; 3],
+}
+
+impl Shot {
+    /// The projection this shot is drawn with and the pixels it goes in --
+    /// 0x46d910, which takes the viewport straight out of the camera record
+    /// and makes the aspect the viewport's own times the window's.
+    fn lens(&self, w: u32, h: u32) -> (Mat4, [i32; 4]) {
+        let [vx, vy, vw, vh] = self.camera.viewport;
+        let pixels = [
+            (vx * w as f32) as i32,
+            (vy * h as f32) as i32,
+            (vw * w as f32) as i32,
+            (vh * h as f32) as i32,
+        ];
+        let aspect = (vw / vh.max(1e-6)) * (w as f32 / h.max(1) as f32);
+        let size = self.camera.size as f32;
+        let projection = match self.camera.ortho {
+            // **a flat camera ignores the window.** 0x469110 halves the size
+            // for the box's half height and takes the half width from the
+            // **4/3 at 0x490368** -- a constant, not the aspect it is handed,
+            // which it stores and never reads. So a HUD keeps its shape on a
+            // wide window and the world around it does not.
+            true => Mat4::ortho(size * 0.5, 4.0 / 3.0, 1.0, 100.0),
+            false => Mat4::perspective(size, aspect, 0.05, 4000.0),
+        };
+        (projection, pixels)
+    }
+}
+
+/// The HUD: the shot the current play mode's inventory is seen through, and
+/// which draws belong to it.
+///
+/// `mdkSetPlayModeGobs` names one GUI gob per mode and every character's is
+/// registered into the same scene, so the filter is what keeps Kurt's sniper
+/// scope off the screen while he is walking around.
+fn hud_shot(
+    scene: &goodomen::render::scene::Scene,
+    world: &goodomen::game::world::World,
+    boot: &goodomen::game::api::Boot,
+    clock: f64,
+) -> Option<(Shot, std::collections::BTreeSet<usize>)> {
+    let root = boot.gui_gobs.get(&boot.mode)?;
+    let shot = cutscene_camera_of(scene, world, boot, clock, true, Some(root))?;
+    // the tree under it, because an inventory's slots and health are gobs of
+    // their own parented to it
+    let mut who: std::collections::BTreeSet<_> =
+        world.iter().filter(|(_, g)| &g.name == root).map(|(id, _)| id).collect();
+    loop {
+        let more: Vec<_> = world
+            .iter()
+            .filter(|(id, g)| !who.contains(id) && g.parent.is_some_and(|p| who.contains(&p)))
+            .map(|(id, _)| id)
+            .collect();
+        if more.is_empty() {
+            break;
+        }
+        who.extend(more);
+    }
+    Some((shot, scene.drawn_by(&who)))
 }
 
 fn cutscene_camera(
@@ -2384,16 +2445,31 @@ fn cutscene_camera(
     clock: f64,
     in_gui: bool,
 ) -> Option<Shot> {
+    cutscene_camera_of(scene, world, boot, clock, in_gui, None)
+}
+
+fn cutscene_camera_of(
+    scene: &goodomen::render::scene::Scene,
+    world: &goodomen::game::world::World,
+    boot: &goodomen::game::api::Boot,
+    clock: f64,
+    in_gui: bool,
+    only: Option<&str>,
+) -> Option<Shot> {
     use goodomen::formats::model::rotate;
     for (id, gob) in world.iter() {
         if gob.gui != in_gui || goodomen::game::api::frozen(world, &boot.stasis, id) {
+            continue;
+        }
+        if only.is_some_and(|want| gob.name != want) {
             continue;
         }
         let Some(name) = goodomen::game::api::model_of(gob.kind, gob.resource.as_deref()) else {
             continue;
         };
         let Some(model) = scene.model(&name) else { continue };
-        let Some((node, fov)) = model.camera() else { continue };
+        let Some(camera) = model.camera() else { continue };
+        let node = camera.node;
         let chosen = boot.playing.get(&gob.name).copied();
         let anim = chosen
             .and_then(|a| model.animations.iter().find(|m| m.id as f64 == a))
@@ -2431,7 +2507,7 @@ fn cutscene_camera(
         ];
         return Some(Shot {
             view: Mat4::look_at(eye, at, [up[0] as f32, up[1] as f32, up[2] as f32]),
-            fov: fov as f32,
+            camera,
             who: gob.name.clone(),
             eye,
         });
@@ -3703,7 +3779,7 @@ fn play(
                 a.listen(from, yaw, pitch);
             }
             if let Some(shot) = &filming {
-                filmed = Some((shot.who.clone(), shot.fov.to_degrees()));
+                filmed = Some((shot.who.clone(), (shot.camera.size as f32).to_degrees()));
             }
             // and the frame is drawn from the shot: its view, its field of
             // view, and its own place, so the sixteen lights the shader gets
@@ -3719,20 +3795,32 @@ fn play(
                 None => Mat4::look_at(from, ahead, [0.0, 0.0, 1.0]),
             };
             let (w, h) = video.window.drawable_size();
-            let projection = Mat4::perspective(
-                match (&filming, sniping) {
-                    (Some(shot), _) => shot.fov,
-                    (None, true) => (zoom as f32).to_radians(),
-                    (None, false) => 1.1,
-                },
-                w as f32 / h.max(1) as f32,
-                0.05,
-                4000.0,
-            );
+            // **the letterbox is the camera's own.** Twenty-nine of the
+            // hundred and two camera nodes name a viewport of (0, 0.2, 1,
+            // 0.6), and every one of them is a cutscene: a movie is drawn
+            // into the middle three fifths of the window and the black bars
+            // are the window showing through. `chDoWideScreen` draws two
+            // quads over the top of that; nothing here has to.
+            let (projection, port) = match &filming {
+                Some(shot) => shot.lens(w, h),
+                None => (
+                    Mat4::perspective(
+                        match sniping {
+                            true => (zoom as f32).to_radians(),
+                            false => 1.1,
+                        },
+                        w as f32 / h.max(1) as f32,
+                        0.05,
+                        4000.0,
+                    ),
+                    [0, 0, w as i32, h as i32],
+                ),
+            };
             unsafe {
                 video.gl.viewport(0, 0, w as i32, h as i32);
                 video.gl.clear_color(0.05, 0.06, 0.09, 1.0);
                 video.gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+                video.gl.viewport(port[0], port[1], port[2], port[3]);
                 scene.draw(
                     &video.gl,
                     &projection.times(&view),
@@ -3741,48 +3829,39 @@ fn play(
                     started.elapsed().as_secs_f64(),
                     from,
                 )?;
-                // **and then the HUD, behind `--hud`**, which is a scene of
-                // its own: `mdk2.lua` registers `kurtinventory`,
-                // `kurthealth` and `kurtinv_active` into `mdkGetGuiScene()`,
-                // and the model carries the camera to look at them with --
-                // node 11 of `kurtinventory.mod` is `KURTINV_CAMERA`, one of
-                // the 102 the kind-0x68 rule finds. The depth buffer is
-                // cleared first, so it sits over the world rather than in it.
+                // **and then the HUD**, which is a scene of its own:
+                // `mdk2.lua` registers `kurtinventory`, `kurthealth` and
+                // `kurtinv_active` into `mdkGetGuiScene()`, and the model
+                // carries the camera to look at them with -- node 11 of
+                // `kurtinventory.mod` is `KURTINV_CAMERA`, one of the 102 the
+                // kind-0x68 rule finds. The depth buffer is cleared first, so
+                // it sits over the world rather than in it.
                 //
-                // **It is not on by default, and the reason is a number that
-                // does not work out.** That camera stands at (0, 0, 10) with
-                // a field of view of 4.8 degrees, which sees 0.84 units at
-                // that range -- and `kurthealth` is 0.8 across, so the health
-                // ring fills the screen where the original has it small in a
-                // corner. `mdkKurtSetGuiGobs` (0x43dd90 into 0x4190c0) only
-                // files five gob handles on Kurt's own block at +0x94, +0xb4,
-                // +0x80, +0xe8 and +0x100 and positions nothing, so what
-                // scales the GUI scene is somewhere else and is not found.
-                if hud {
+                // **It is flat, and that was the number that would not work
+                // out.** 4.8 is not an angle: the node names
+                // `KIND_ORTHO` and 0x46d910 then calls `glOrtho` with the
+                // 4.8 as the box's half height, so the inventory is a
+                // metre-and-a-bit-wide thing in a ten-metre-wide box and
+                // lands small in the corner, where the original has it.
                 if let (Some(arena), Some(boot)) = (
                     goodomen::game::world::world(&level_scripts.lua),
                     level_scripts.lua.app_data_ref::<goodomen::game::api::Boot>(),
                 ) {
-                    let shot =
-                        cutscene_camera(&scene, &arena, &boot, started.elapsed().as_secs_f64(), true);
+                    let worn = hud_shot(&scene, &arena, &boot, started.elapsed().as_secs_f64());
                     drop(boot);
                     drop(arena);
-                    if let Some(shot) = shot {
+                    if let Some((shot, mine)) = worn.filter(|_| hud) {
+                        let (lens, port) = shot.lens(w, h);
+                        video.gl.viewport(port[0], port[1], port[2], port[3]);
                         video.gl.clear(glow::DEPTH_BUFFER_BIT);
-                        let lens = Mat4::perspective(
-                            shot.fov,
-                            w as f32 / h.max(1) as f32,
-                            0.05,
-                            4000.0,
-                        );
                         scene.draw_gui(
                             &video.gl,
                             &lens.times(&shot.view),
+                            Some(&mine),
                             started.elapsed().as_secs_f64(),
                             shot.eye,
                         )?;
                     }
-                }
                 }
                 // `--press 51` sends a command once, on the first frame, the
                 // way a key would. It is how a check can open the pause menu
@@ -4651,6 +4730,7 @@ fn meshes(install: &mut Install, list: bool) -> usize {
     let found = entries_named(install, ".mod");
     let (mut nodes, mut tris, mut animated) = (0usize, 0usize, 0usize);
     let (mut posed, mut moving, mut posing) = (0usize, 0usize, 0usize);
+    let (mut cameras, mut flat, mut letterboxed) = (0usize, 0usize, 0usize);
 
     for (name, i, j) in &found {
         let data = match install.containers[*i].read_at(*j) {
@@ -4735,6 +4815,15 @@ fn meshes(install: &mut Install, list: bool) -> usize {
             }
         }
 
+        // **the camera families**, which is what says the frame is being
+        // read and not guessed: 102 models carry a camera node, 8 of them
+        // are flat overlays and 29 name the letterbox.
+        if let Some(camera) = model.camera() {
+            cameras += 1;
+            flat += camera.ortho as usize;
+            letterboxed += (camera.viewport == [0.0, 0.2, 1.0, 0.6]) as usize;
+        }
+
         nodes += model.nodes.len();
         tris += mesh.triangles.len();
         animated += model.animated() as usize;
@@ -4759,8 +4848,16 @@ fn meshes(install: &mut Install, list: bool) -> usize {
         "{} models, {animated} animated, {nodes} nodes, {tris} triangles, \
          {posed} checked against the shader's own posing, \
          {moving} animations with a moving transform channel, none of them \
-         animation 0, and {posing} that pose differently at two times",
+         animation 0, and {posing} that pose differently at two times; \
+         {cameras} carry a camera, {flat} of them flat and {letterboxed} \
+         letterboxed",
         found.len()
     );
+    // the two families are the reading, so a change in either is a change
+    // in what a camera node means -- see `formats::model::KIND_ORTHO`
+    if (cameras, flat, letterboxed) != (102, 8, 29) {
+        eprintln!("goodomen: the camera families are {cameras}/{flat}/{letterboxed}, not 102/8/29");
+        std::process::exit(1);
+    }
     found.len()
 }
