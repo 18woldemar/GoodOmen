@@ -2180,12 +2180,22 @@ const MENU_CORNER: f32 = 0.04;
 /// **A camera node faces its own +Y with +Z up**, the frame every model in
 /// this game is authored in. Reading it as −Z, the way a camera in a
 /// modelling package looks, points the intro movie sideways off its own page.
+struct Shot {
+    view: Mat4,
+    fov: f32,
+    /// The gob whose model carried the camera, for the session's summary.
+    who: String,
+    /// Where it stands — the lights the shader gets are the sixteen nearest
+    /// to the **camera**, and during a cutscene that is not the player.
+    eye: [f32; 3],
+}
+
 fn cutscene_camera(
     scene: &goodomen::render::scene::Scene,
     world: &goodomen::game::world::World,
     boot: &goodomen::game::api::Boot,
     clock: f64,
-) -> Option<(Mat4, f32, String)> {
+) -> Option<Shot> {
     use goodomen::formats::model::rotate;
     for (id, gob) in world.iter() {
         if gob.gui || goodomen::game::api::frozen(world, &boot.stasis, id) {
@@ -2205,8 +2215,13 @@ fn cutscene_camera(
         // what the renderer does for every other model -- puts the camera
         // anywhere in the dive. `Boot::since` is when this object's
         // animation started, which is what `omAnimPlay` resets.
+        // and a one-shot stops at its last frame while a looping one comes
+        // round, which is the record's own `ends` — 0x4611b0's switch
         let t = match boot.since.get(&gob.name) {
-            Some(&since) => (since * anim.loop_rate() as f64).min(1.0),
+            Some(&since) => {
+                let t = since * anim.loop_rate() as f64;
+                if anim.repeats() { t.fract() } else { t.min(1.0) }
+            }
             None => (clock * anim.loop_rate() as f64).fract(),
         };
         let (q, offset) = *model.node_world(anim, t).get(node)?;
@@ -2226,11 +2241,12 @@ fn cutscene_camera(
             eye[1] + ahead[1] as f32,
             eye[2] + ahead[2] as f32,
         ];
-        return Some((
-            Mat4::look_at(eye, at, [up[0] as f32, up[1] as f32, up[2] as f32]),
-            fov as f32,
-            gob.name.clone(),
-        ));
+        return Some(Shot {
+            view: Mat4::look_at(eye, at, [up[0] as f32, up[1] as f32, up[2] as f32]),
+            fov: fov as f32,
+            who: gob.name.clone(),
+            eye,
+        });
     }
     None
 }
@@ -3356,17 +3372,26 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
             if let Some(a) = &heard {
                 a.listen(from, yaw, pitch);
             }
-            if let Some((_, fov, who)) = &filming {
-                filmed = Some((who.clone(), fov.to_degrees()));
+            if let Some(shot) = &filming {
+                filmed = Some((shot.who.clone(), shot.fov.to_degrees()));
             }
+            // and the frame is drawn from the shot: its view, its field of
+            // view, and its own place, so the sixteen lights the shader gets
+            // are the ones around the set rather than around the player --
+            // who, at level 1's ninth checkpoint, is a thousand units below
+            // it and falling
+            let from = match &filming {
+                Some(shot) => shot.eye,
+                None => from,
+            };
             let view = match &filming {
-                Some((v, ..)) => *v,
+                Some(shot) => shot.view,
                 None => Mat4::look_at(from, ahead, [0.0, 0.0, 1.0]),
             };
             let (w, h) = video.window.drawable_size();
             let projection = Mat4::perspective(
                 match (&filming, sniping) {
-                    (Some((_, fov, _)), _) => *fov,
+                    (Some(shot), _) => shot.fov,
                     (None, true) => (zoom as f32).to_radians(),
                     (None, false) => 1.1,
                 },

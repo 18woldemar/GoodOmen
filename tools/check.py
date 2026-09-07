@@ -351,7 +351,11 @@ ENGINE = [
       # digit -- each one's task list now runs to the end instead of falling
       # off a recorder.
       "--run", "2", "1", "120", "--roam", "--expect-rooms", "25",
-      "--expect-events", "61202", "--expect-survived", "61202"], None),
+      # and **-> 64742 when `mdkDialogIsDone` stopped answering a constant 1**:
+      # a task list that puts up a subtitle now waits for it instead of
+      # stepping past, so the lists that used to run off their own end stay
+      # alive and go on being ticked.
+      "--expect-events", "64742", "--expect-survived", "64742"], None),
     # **The doors open.** `mdkObject.c` 0x425010: a prox door watches the
     # player and opens inside its own radius, which the scene graph carries in
     # `payload[0]` -- 5, 6, 8, 10, 14, 15, 16 or 20 across the game's 175 of
@@ -411,7 +415,11 @@ ENGINE = [
       # instead of falling off `mdkConeheadCivUpdate` as a recorder.
       # 47868 -> 49604 with the birdbrain built: level 9 places three and
       # they are the last enemy class the scripts deploy in numbers.
-      "--expect-events", "50672", "--expect-survived", "50672"], None),
+      # and **-> 51569 when `mdkDialogIsDone` stopped answering a constant 1**:
+      # a task list that puts up a subtitle now waits for it instead of
+      # stepping past, so the lists that used to run off their own end stay
+      # alive and go on being ticked.
+      "--expect-events", "51569", "--expect-survived", "51569"], None),
     # level 10's zizzy turrets shoot, each bullet carrying its damage, damage
     # type, lifetime and speed out of the shot table at 0x497388 rather than
     # out of the call.

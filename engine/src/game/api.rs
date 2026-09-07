@@ -3176,10 +3176,31 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
     // held no inventory. It holds one now and the real binding is above; a
     // constant left in this list would have quietly won, since this loop runs
     // later, and it did for exactly one test run.
+    // **`mdkDialogIsDone` is the movie's own pacing**, and answering a
+    // constant 1 raced every cutscene in the game through its subtitles:
+    // `Level.PlayIntroMovieA` holds nine panels for 4 to 15.3 seconds each
+    // and steps past each one with a `{ mdkDialogIsDone, {} }`. It answers
+    // out of the panel now — 1 when there is none up, or when its own
+    // seconds have run out and `dialog_step` has taken it down.
+    globals.set(
+        "mdkDialogIsDone",
+        lua.create_function(|lua, _: Variadic<Value>| {
+            Ok(if boot_ref(lua)?.dialog.is_some() { 0.0 } else { 1.0 })
+        })?,
+    )?;
+    // and `mdkDialogDestroy` takes one down at once, which is how a movie
+    // that is cut short leaves nothing on the screen
+    globals.set(
+        "mdkDialogDestroy",
+        lua.create_function(|lua, _: Variadic<Value>| {
+            boot_mut(lua)?.dialog = None;
+            Ok(())
+        })?,
+    )?;
+
     for (name, answer) in [
         ("mdkIsCutSceneAllowed", 1.0),
         ("chIsLoadingResources", 0.0),
-        ("mdkDialogIsDone", 1.0),
     ] {
         globals.set(name, lua.create_function(move |_, _: Variadic<Value>| Ok(answer))?)?;
     }

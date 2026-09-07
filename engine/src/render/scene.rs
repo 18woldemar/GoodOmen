@@ -426,7 +426,15 @@ impl Scene {
         // bind pose does, and only a *static* model takes it. The guard is
         // there for a static model with the same defect, which the corpus
         // does not happen to contain.
-        const SANE: f64 = 1.0e4;
+        //
+        // **1e4 was too tight and it cost the intro movie its set.**
+        // `ml1a_lounge` is static and honestly stands at -12147.78, which is
+        // the furthest any model in the corpus legitimately reaches;
+        // `ml8z_palace` at 8507 is the next. The garbage starts three orders
+        // of magnitude further out, at the 4.3e8 of the 0xCDCDCDCD family,
+        // and runs to 9.2e32. So the line goes between them with room on
+        // both sides.
+        const SANE: f64 = 1.0e5;
         let ok = mesh.positions.iter().all(|p| {
             p.iter().all(|c| c.is_finite() && c.abs() < SANE)
         });
