@@ -253,6 +253,12 @@ pub struct Scene {
     /// The room each draw belongs to, or `None` for an object in no room at
     /// all — which is **never culled**, as the original does not cull it.
     rooms: Vec<Option<usize>>,
+    /// Whether each draw belongs to the **GUI scene** rather than the world.
+    /// `mdk2.lua` swaps the global `scene` to `mdkGetGuiScene()` around each
+    /// character's inventory, so the third argument of a registration says
+    /// which of the two an object lives in — and the two are drawn in
+    /// separate passes, through separate cameras.
+    gui: Vec<bool>,
     pub missing: usize,
 }
 
@@ -590,6 +596,7 @@ impl Scene {
         &mut self,
         name: &str,
         transform: Mat4,
+        gui: bool,
         room: Option<usize>,
         owner: Option<crate::game::world::Id>,
     ) {
@@ -598,6 +605,7 @@ impl Scene {
         self.owners.push(owner);
         self.playing.push(None);
         self.hidden.push(Vec::new());
+        self.gui.push(gui);
         self.opacity.push(1.0);
     }
 
@@ -729,6 +737,36 @@ impl Scene {
         clock: f64,
         eye: [f32; 3],
     ) -> Result<usize, String> {
+        self.draw_scene(gl, view_projection, fog, visible, clock, eye, false)
+    }
+
+    /// The **GUI scene** — the HUD and the inventory, which `mdk2.lua`
+    /// registers into `mdkGetGuiScene()` and which is drawn through its own
+    /// model's own camera, over the world.
+    ///
+    /// # Safety
+    /// A GL context must be current on this thread.
+    pub unsafe fn draw_gui(
+        &mut self,
+        gl: &glow::Context,
+        view_projection: &Mat4,
+        clock: f64,
+        eye: [f32; 3],
+    ) -> Result<usize, String> {
+        self.draw_scene(gl, view_projection, Fog::default(), None, clock, eye, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_scene(
+        &mut self,
+        gl: &glow::Context,
+        view_projection: &Mat4,
+        fog: Fog,
+        visible: Option<&std::collections::BTreeSet<usize>>,
+        clock: f64,
+        eye: [f32; 3],
+        gui: bool,
+    ) -> Result<usize, String> {
         let shader = match self.shader {
             Some(s) => s,
             None => {
@@ -859,6 +897,11 @@ impl Scene {
             }
         for (i, (name, transform)) in self.draws.iter().enumerate() {
             if (self.opacity[i] < 1.0) != (pass == 1) {
+                continue;
+            }
+            // the world and the GUI are two scenes and two cameras, so a
+            // draw belongs to one pass or the other
+            if self.gui[i] != gui {
                 continue;
             }
             // the authored cull list: a room draws the rooms it names, and

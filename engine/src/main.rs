@@ -2213,10 +2213,11 @@ fn cutscene_camera(
     world: &goodomen::game::world::World,
     boot: &goodomen::game::api::Boot,
     clock: f64,
+    in_gui: bool,
 ) -> Option<Shot> {
     use goodomen::formats::model::rotate;
     for (id, gob) in world.iter() {
-        if gob.gui || goodomen::game::api::frozen(world, &boot.stasis, id) {
+        if gob.gui != in_gui || goodomen::game::api::frozen(world, &boot.stasis, id) {
             continue;
         }
         let Some(name) = goodomen::game::api::model_of(gob.kind, gob.resource.as_deref()) else {
@@ -2721,6 +2722,8 @@ fn play(
                 .unwrap_or(100.0)
         };
         let mut cull = true;
+        // `--hud` draws the GUI scene; see the note beside the draw
+        let hud = std::env::args().any(|a| a == "--hud");
         // **The sniper's field of view, in degrees.** 0x41ad00 is the whole
         // zoom: `fov += (fov * 0.4 + 1) * dt * step` with the step **-5 on
         // COM_SMZOOMIN and +5 on COM_SMZOOMOUT** (0x41a302 and 0x41a343), and
@@ -3211,31 +3214,31 @@ fn play(
             // bullet, a spawner's grunt, an explosion — existed in the arena
             // and was never on screen. That is most of why a fight could be
             // happening and look like nothing at all.
-            let fresh: Vec<(goodomen::game::world::Id, String)> = {
+            let fresh: Vec<(goodomen::game::world::Id, String, bool)> = {
                 let drawn = scene.drawn();
                 goodomen::game::world::world(&level_scripts.lua)
                     .map(|w| {
                         w.iter()
                             .filter(|(id, _)| !drawn.contains(id))
-                            .filter(|(_, g)| !g.gui)
                             .filter_map(|(id, g)| {
                                 Some((
                                     id,
                                     goodomen::game::api::model_of(g.kind, g.resource.as_deref())?,
+                                    g.gui,
                                 ))
                             })
                             .collect()
                     })
                     .unwrap_or_default()
             };
-            for (id, resource) in fresh {
+            for (id, resource, in_gui) in fresh {
                 if unsafe { scene.load(&video.gl, &mut install, &resource) } {
                     // it takes its transform from the arena on the same frame,
                     // in `follow` below, so identity is only where it starts
-                    scene.place(&resource, Mat4::IDENTITY, None, Some(id));
+                    scene.place(&resource, Mat4::IDENTITY, in_gui, None, Some(id));
                 } else {
                     // remember it as drawn anyway, or every frame retries it
-                    scene.place("", Mat4::IDENTITY, None, Some(id));
+                    scene.place("", Mat4::IDENTITY, in_gui, None, Some(id));
                 }
             }
 
@@ -3258,7 +3261,7 @@ fn play(
                 level_scripts.lua.app_data_ref::<goodomen::game::api::Boot>(),
             ) {
                 (Some(w), Some(boot)) if boot.movie_camera => {
-                    let c = cutscene_camera(&scene, &w, &boot, started.elapsed().as_secs_f64());
+                    let c = cutscene_camera(&scene, &w, &boot, started.elapsed().as_secs_f64(), false);
                     if c.is_none() { eprintln!("DBG movie on, no camera"); }
                     c
                 }
@@ -3476,6 +3479,49 @@ fn play(
                     started.elapsed().as_secs_f64(),
                     from,
                 )?;
+                // **and then the HUD, behind `--hud`**, which is a scene of
+                // its own: `mdk2.lua` registers `kurtinventory`,
+                // `kurthealth` and `kurtinv_active` into `mdkGetGuiScene()`,
+                // and the model carries the camera to look at them with --
+                // node 11 of `kurtinventory.mod` is `KURTINV_CAMERA`, one of
+                // the 102 the kind-0x68 rule finds. The depth buffer is
+                // cleared first, so it sits over the world rather than in it.
+                //
+                // **It is not on by default, and the reason is a number that
+                // does not work out.** That camera stands at (0, 0, 10) with
+                // a field of view of 4.8 degrees, which sees 0.84 units at
+                // that range -- and `kurthealth` is 0.8 across, so the health
+                // ring fills the screen where the original has it small in a
+                // corner. `mdkKurtSetGuiGobs` (0x43dd90 into 0x4190c0) only
+                // files five gob handles on Kurt's own block at +0x94, +0xb4,
+                // +0x80, +0xe8 and +0x100 and positions nothing, so what
+                // scales the GUI scene is somewhere else and is not found.
+                if hud {
+                if let (Some(arena), Some(boot)) = (
+                    goodomen::game::world::world(&level_scripts.lua),
+                    level_scripts.lua.app_data_ref::<goodomen::game::api::Boot>(),
+                ) {
+                    let shot =
+                        cutscene_camera(&scene, &arena, &boot, started.elapsed().as_secs_f64(), true);
+                    drop(boot);
+                    drop(arena);
+                    if let Some(shot) = shot {
+                        video.gl.clear(glow::DEPTH_BUFFER_BIT);
+                        let lens = Mat4::perspective(
+                            shot.fov,
+                            w as f32 / h.max(1) as f32,
+                            0.05,
+                            4000.0,
+                        );
+                        scene.draw_gui(
+                            &video.gl,
+                            &lens.times(&shot.view),
+                            started.elapsed().as_secs_f64(),
+                            shot.eye,
+                        )?;
+                    }
+                }
+                }
                 // `--press 51` sends a command once, on the first frame, the
                 // way a key would. It is how a check can open the pause menu
                 // -- there is no keyboard behind `xvfb`.

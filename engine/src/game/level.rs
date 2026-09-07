@@ -145,7 +145,7 @@ pub unsafe fn start(
         .map(|(_, g)| crate::render::scene::Light::from_payload(g.position, g.payload))
         .collect();
 
-    let placements: Vec<(String, Mat4, Option<usize>, world::Id, bool)> = w
+    let placements: Vec<(String, Mat4, Option<usize>, world::Id, bool, bool)> = w
         .iter()
         .filter_map(|(id, gob)| {
             // a character's `resource` slot holds a **waypoint name**, and a
@@ -162,10 +162,11 @@ pub unsafe fn start(
             // renderer refuses the two whose vertices are not sane, so it is
             // applied to everything now rather than to the player alone:
             // it is what puts the characters and the pickups in the world.
-            // nothing in the GUI scene is in the world
-            if gob.gui {
-                return None;
-            }
+            // **the GUI scene is placed too, and marked.** `mdk2.lua` swaps
+            // the global `scene` to `mdkGetGuiScene()` around each
+            // character's inventory, and those objects are the HUD: they are
+            // drawn in their own pass through their own model's own camera,
+            // over the world, rather than left out of the draw list.
             let from_type = gob.resource.is_none();
             let resource = named?;
             Some((
@@ -184,6 +185,7 @@ pub unsafe fn start(
                 room_of(id),
                 id,
                 from_type,
+                gob.gui,
             ))
         })
         .collect();
@@ -201,7 +203,7 @@ pub unsafe fn start(
     let mut placed = 0;
     let mut without_a_model = 0;
     let mut by_type = 0;
-    for (resource, transform, room, id, from_type) in placements {
+    for (resource, transform, room, id, from_type, gui) in placements {
         if !scene.load(gl, install, &resource) {
             without_a_model += 1;
             continue;
@@ -210,6 +212,7 @@ pub unsafe fn start(
         scene.place(
             &resource,
             if animated { transform } else { Mat4::IDENTITY },
+            gui,
             room,
             Some(id),
         );
@@ -290,7 +293,7 @@ pub unsafe fn load(
         }
         // static models are already in the world; only animated ones move
         let animated = scene.is_animated(&resource);
-        scene.place(&resource, if animated { transform } else { Mat4::IDENTITY }, None, None);
+        scene.place(&resource, if animated { transform } else { Mat4::IDENTITY }, false, None, None);
         placed += 1;
     }
     let _ = before;
