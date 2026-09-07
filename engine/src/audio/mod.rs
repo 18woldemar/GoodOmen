@@ -799,6 +799,8 @@ pub struct Ambience {
     /// tried again every time it is fired.
     cache: std::collections::HashMap<String, Option<Sound>>,
     shots: Vec<Voice>,
+    /// Sounds something is **holding down** — see [`Ambience::hold`].
+    held: std::collections::HashMap<String, Voice>,
     /// One-shots asked for that no free voice could take.
     pub dropped: usize,
 }
@@ -855,7 +857,64 @@ impl Ambience {
             silent,
             cache: Default::default(),
             shots,
+            held: Default::default(),
             dropped: 0,
+        })
+    }
+
+    /// **A sound something is holding down**, at its place, started once and
+    /// kept until [`Ambience::release`].
+    ///
+    /// Kurt's chaingun is one and the original says so: 0x4178e0 is the fire
+    /// handler, `kurt`'s block `+0x114` is the handle `omGobAddSound` put
+    /// there, and the not-firing branch calls **0x46e030** on it while the
+    /// firing branch calls **0x46dfe0**. One is stop and the other is play,
+    /// so the gun is a held loop rather than a sound per shot.
+    pub fn hold(
+        &mut self,
+        name: &str,
+        at: [f32; 3],
+        read: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+    ) -> bool {
+        if let Some(&v) = self.held.get(name) {
+            self.audio.place(v, at, SHOT_NEAR, SHOT_FAR);
+            return true;
+        }
+        let Some(sound) = self.decoded(name, read) else { return false };
+        let Ok(v) = self.audio.voice_without_a_sound() else { return false };
+        self.audio.attach(v, sound);
+        self.audio.looping(v, true);
+        self.audio.place(v, at, SHOT_NEAR, SHOT_FAR);
+        self.audio.gain(v, 1.0);
+        self.audio.play(v);
+        self.held.insert(name.to_string(), v);
+        true
+    }
+
+    /// Let a held sound go. Quiet when it was never held.
+    pub fn release(&mut self, name: &str) {
+        if let Some(v) = self.held.remove(name) {
+            self.audio.stop(v);
+        }
+    }
+
+    /// Decode a sound once and keep it — the scripts name one the way the
+    /// scene graph does, without an extension.
+    fn decoded(
+        &mut self,
+        name: &str,
+        read: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+    ) -> Option<Sound> {
+        let file = if name.contains('.') {
+            name.to_ascii_lowercase()
+        } else {
+            format!("{}.wav", name.to_ascii_lowercase())
+        };
+        let audio = &mut self.audio;
+        *self.cache.entry(file.clone()).or_insert_with(|| {
+            let bytes = read(&file)?;
+            let (samples, channels, rate) = pcm(&bytes).ok()?;
+            audio.sound(&samples, channels, rate).ok()
         })
     }
 
@@ -869,20 +928,7 @@ impl Ambience {
         at: [f32; 3],
         read: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
     ) -> bool {
-        // the scripts name a sound the way the scene graph does, without an
-        // extension
-        let file = if name.contains('.') {
-            name.to_ascii_lowercase()
-        } else {
-            format!("{}.wav", name.to_ascii_lowercase())
-        };
-        let audio = &mut self.audio;
-        let sound = *self.cache.entry(file.clone()).or_insert_with(|| {
-            let bytes = read(&file)?;
-            let (samples, channels, rate) = pcm(&bytes).ok()?;
-            audio.sound(&samples, channels, rate).ok()
-        });
-        let Some(sound) = sound else { return false };
+        let Some(sound) = self.decoded(name, read) else { return false };
 
         let Some(&free) = self.shots.iter().find(|&&v| !self.audio.playing(v)) else {
             self.dropped += 1;
@@ -1077,5 +1123,50 @@ mod tests {
         assert_eq!(attenuation(400.0, 10.0, 40.0), 0.25);
         // far below near is not a silent divide by zero
         assert_eq!(attenuation(5.0, 10.0, 1.0), 1.0);
+    }
+
+    /// A held sound takes **one** voice however long it is held, and letting
+    /// it go stops it. Kurt's chaingun is held for as long as the trigger is
+    /// down, so a voice per frame would be four thousand voices a minute.
+    #[test]
+    fn a_held_sound_takes_one_voice_and_stops_when_it_is_let_go() {
+        // sixteen-bit mono PCM, which is what every `.wav` in the game is
+        let mut wav = Vec::new();
+        let samples: Vec<i16> = (0..2000).map(|i| if (i / 40) % 2 == 0 { 8000 } else { -8000 }).collect();
+        let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36u32 + data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+        wav.extend_from_slice(&22050u32.to_le_bytes());
+        wav.extend_from_slice(&(22050u32 * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&data);
+
+        // no OpenAL on this machine is not a failed mixer
+        let Ok(audio) = Audio::loopback(44100) else { return };
+        let mut read = |_: &str| Some(wav.clone());
+        let Ok(mut room) = Ambience::open(audio, &[], &mut read) else { return };
+
+        assert!(room.hold("kurt_gun", [0.0; 3], &mut read));
+        let voice = room.held["kurt_gun"];
+        // held again, and again: still the one voice, and still playing
+        for _ in 0..8 {
+            assert!(room.hold("kurt_gun", [1.0, 0.0, 0.0], &mut read));
+        }
+        assert_eq!(room.held.len(), 1);
+        assert_eq!(room.held["kurt_gun"], voice);
+        assert!(room.audio.playing(voice), "a held sound loops rather than running out");
+
+        room.release("kurt_gun");
+        assert!(room.held.is_empty());
+        assert!(!room.audio.playing(voice));
+        // and letting go of what was never held is quiet
+        room.release("kurt_laser");
     }
 }
