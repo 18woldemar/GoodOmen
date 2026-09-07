@@ -71,12 +71,9 @@ fn main() {
                 // parks a level and a checkpoint; this is the main loop
                 // acting on it, the way 0x5d1224 is acted on there.
                 if let Some((n, cp)) = asked {
-                    match play(&root, n, cp, show) {
-                        Ok(line) => println!("{line}"),
-                        Err(e) => {
-                            eprintln!("goodomen: {e}");
-                            std::process::exit(1);
-                        }
+                    if let Err(e) = play_on(&root, n, cp, show) {
+                        eprintln!("goodomen: {e}");
+                        std::process::exit(1);
                     }
                 }
             }
@@ -248,8 +245,8 @@ fn main() {
             })
             .map(|(a, _)| std::path::PathBuf::from(a))
             .unwrap_or_else(Install::beside_the_binary);
-        match play(&root, n, cp, args.iter().any(|a| a == "--window")) {
-            Ok(line) => println!("{line}"),
+        match play_on(&root, n, cp, args.iter().any(|a| a == "--window")) {
+            Ok(()) => {}
             Err(e) if e.starts_with(goodomen::render::NO_VIDEO) => println!("skip: {e}"),
             Err(e) => {
                 eprintln!("goodomen: {e}");
@@ -2412,7 +2409,40 @@ fn draw_menu(
     }
 }
 
-fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Result<String, String> {
+/// Play the level the game asked for, and then the one *that* asks for, for
+/// as long as it keeps asking.
+///
+/// Level 1's opening is three in a row: the comic book at checkpoint 9 ends
+/// on `mdkNewGame(1, 12)`, the skydive at 12 on `mdkNewGame(1, 1)`, and 1 is
+/// the tutorial you play. **Each is a fresh session**, window and all, which
+/// is where the original shows a loading screen; see `mdkShowLoadingScreen`,
+/// which is still a recorder.
+fn play_on(root: &std::path::Path, mut n: u32, mut cp: u32, show: bool) -> Result<(), String> {
+    // a level that asked for itself would spin
+    let mut seen = std::collections::BTreeSet::new();
+    loop {
+        let (line, asked) = play(root, n, cp, show)?;
+        println!("{line}");
+        seen.insert((n, cp));
+        match asked {
+            Some(next) if !seen.contains(&next) => (n, cp) = next,
+            _ => return Ok(()),
+        }
+    }
+}
+
+/// Play a level, and answer with **the next one the game asked for**.
+///
+/// `mdkNewGame` parks a level and a checkpoint and raises a flag the main
+/// loop acts on (0x5d1224); this is that flag reaching a caller. Level 1's
+/// opening is three of them in a row -- the comic book at checkpoint 9 asks
+/// for 12, the skydive at 12 asks for 1, and 1 is the tutorial.
+fn play(
+    root: &std::path::Path,
+    number: u32,
+    checkpoint: u32,
+    show: bool,
+) -> Result<(String, Option<(u32, u32)>), String> {
     use goodomen::game::body::EYE;
     use goodomen::render::{scene::Scene, Offscreen};
 
@@ -2723,7 +2753,13 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
             .and_then(|i| std::env::args().nth(i + 1))
             .and_then(|v| v.parse::<f64>().ok());
         loop {
-            let expired = quit_after.is_some_and(|n| ticking.clock >= n);
+            let expired = quit_after.is_some_and(|n| ticking.clock >= n)
+                // and a level that asks for another one is over -- the movie
+                // at level 1's ninth checkpoint ends on `mdkNewGame(1, 12)`
+                || level_scripts
+                    .lua
+                    .app_data_ref::<goodomen::game::api::Boot>()
+                    .is_some_and(|b| b.next_level.is_some() || b.quit);
             for event in video.events.poll_iter().chain(
                 expired.then_some(Event::Quit { timestamp: 0 }),
             ) {
@@ -2816,7 +2852,12 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                                 return Err(format!("filmed through {got}, expected {want}"));
                             }
                         }
-                        return Ok(format!(
+                        // and what the game asked for next, if anything
+                        let asked = level_scripts
+                            .lua
+                            .app_data_ref::<goodomen::game::api::Boot>()
+                            .and_then(|b| b.next_level);
+                        return Ok((format!(
                             "{summary}, ran {:.0}s: {} rooms entered, \
                              {survived} of {fired} handler calls ran to the end, \
                              {} shot by you and {died} killed, \
@@ -2852,7 +2893,10 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                             Some((who, fov)) =>
                                 format!(", filmed through {who} at {fov:.0} degrees"),
                             None => String::new(),
-                        });
+                        } + &match asked {
+                            Some((n, cp)) => format!(", asked for {n},{cp}"),
+                            None => String::new(),
+                        }, asked));
                     }
                     Event::KeyDown { keycode: Some(Keycode::C), .. } => cull = !cull,
                     // **the sniper scope**, which is a play mode and not a
@@ -3562,10 +3606,11 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 ));
             }
         }
-        Ok(format!(
+        // one frame offscreen, so nothing has had time to ask for a level
+        Ok((format!(
             "OpenGL {version}: {summary}, drew {culled} of {all} triangles ({:.1}%)",
             100.0 * culled as f64 / all.max(1) as f64
-        ))
+        ), None))
     }
 }
 
