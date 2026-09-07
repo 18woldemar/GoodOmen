@@ -70,6 +70,17 @@ fn u32_at(data: &[u8], at: usize) -> Result<u32, Error> {
 }
 
 impl Strings {
+    /// A table made here rather than read, for a test that needs text and
+    /// not a file.
+    pub fn synthetic(entries: &[(u32, &str)]) -> Strings {
+        Strings {
+            entries: entries
+                .iter()
+                .map(|(id, text)| (*id, (text.as_bytes().to_vec(), None)))
+                .collect(),
+        }
+    }
+
     pub fn parse(data: &[u8]) -> Result<Strings, Error> {
         let tag = u32_at(data, 0)?;
         if tag != TYPE_STR {

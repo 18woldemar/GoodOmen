@@ -131,6 +131,94 @@ impl Dialog {
     }
 }
 
+/// **The end credits**, which are six strings of `mdk2.str` concatenated and
+/// scrolled up the screen.
+///
+/// 0x407c80 builds them: `mdkGetString` on **552, 553, 562, 563, 554 and
+/// 555** in that order, and **622 — "THE END" — when `mdkShowCredits` is
+/// passed a true `theend`**, which is what level 11 and level 12 pass and
+/// level 13's own `Level.Init` does not. Every number below is that
+/// function's own, out of the 0x44-byte record it allocates at 0x4bb1ec:
+///
+/// ```text
+/// +0x00  0.1        the left edge
+/// +0x0c  0.8        the width it wraps at
+/// +0x10  1.0        the height, and where the roll starts
+/// +0x14  0.7 grey   the colour, alpha 1.0 at +0x20
+/// +0x24  1/24       a line's height, so 24 lines fill the screen
+/// +0x28  0.0476     a character cell's width
+/// +0x2c  the roll's own y, set to +0x10 by the layout at 0x406ff0
+/// +0x30  the speed, -1 until `mdkCreditsSetSpeed`, and the script says 0.04
+/// +0x34  how many lines the layout made
+/// ```
+///
+/// **The arithmetic checks out against the script's own clock**, which is
+/// what says the reading is right. `mdkCreditsIsDone` (0x407ec0) answers
+/// while `-(lines / 24 - 1) <= y`, and `PlayCreditsMovie` waits
+/// 133 + 131 + 57 = **321 seconds** before it asks — so the roll has to fit
+/// inside that. Wrapped at this width with `font.lua`'s own advances the six
+/// strings come to **308 lines**, which is 11.83 screens, which at 0.04
+/// screens a second is **296 seconds**. It fits, with the twenty-five
+/// seconds of slack the fade and the last `Wait` need.
+#[derive(Default)]
+pub struct Credits {
+    pub lines: Vec<Vec<u8>>,
+    /// Where the top of the roll is, in screens. Starts at 1.0 — one screen
+    /// below the bottom — and falls.
+    pub y: f64,
+    /// Screens a second. **-1 until a script says otherwise**, which is what
+    /// the record is built with, so nothing moves until `mdkCreditsSetSpeed`.
+    pub speed: f64,
+}
+
+/// The credits' own numbers, all of them 0x407c80's.
+impl Credits {
+    pub const LEFT: f32 = 0.1;
+    pub const WIDE: f32 = 0.8;
+    pub const LINE: f32 = 1.0 / 24.0;
+    pub const CELL: f32 = 0.0476;
+    pub const GREY: [f32; 4] = [0.7, 0.7, 0.7, 1.0];
+    /// The string ids, in the order 0x407c80 fetches them.
+    pub const PARTS: [u32; 6] = [552, 553, 562, 563, 554, 555];
+    /// And the one it adds for `theend`.
+    pub const END: u32 = 622;
+
+    /// Whether the last line has passed the top — 0x407ec0's own test.
+    pub fn done(&self) -> bool {
+        let total = (self.lines.len() as f64 * Self::LINE as f64 - 1.0).max(0.0);
+        -total > self.y
+    }
+}
+
+/// Break text into lines that fit `cells` character cells, on newlines and
+/// on spaces — the shape 0x406ff0 lays the credits out in: it walks the
+/// string adding each glyph's advance until the width is past, and breaks at
+/// the last space it saw, or at the newline if one came first.
+pub fn wrap(advance: &[f32], text: &[u8], cells: f32) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    for paragraph in text.split(|&b| b == b'\n') {
+        let mut line: Vec<u8> = Vec::new();
+        let mut wide = 0.0f32;
+        for word in paragraph.split(|&b| b == b' ') {
+            let w = width_of(advance, word);
+            let space = if line.is_empty() { 0.0 } else { width_of(advance, b" ") };
+            if !line.is_empty() && wide + space + w > cells {
+                out.push(std::mem::take(&mut line));
+                wide = 0.0;
+            }
+            if !line.is_empty() {
+                line.push(b' ');
+                wide += space;
+            }
+            line.extend_from_slice(word);
+            wide += w;
+        }
+        // an empty paragraph is a blank line, and the credits are full of them
+        out.push(line);
+    }
+    out
+}
+
 /// A room, with the box a camera is tested against and the rooms it draws.
 #[derive(Default)]
 pub struct Visibility {
@@ -436,6 +524,8 @@ pub struct Boot {
     pub mouse: Option<[f32; 2]>,
     /// The subtitle a movie is showing, if any. See [`Dialog`].
     pub dialog: Option<Dialog>,
+    /// The end credits, while they roll. See [`Credits`].
+    pub credits: Option<Credits>,
     /// The screen fade — `omSceneFade`, which the movies open and close
     /// with and which `menu.diff.Go` holds black over a level load. See
     /// [`Fade`].
@@ -3398,6 +3488,56 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             Ok(())
         })?,
     )?;
+    // **The end credits.** Six strings of `mdk2.str` concatenated, wrapped at
+    // the record's own width and rolled up the screen — see [`Credits`].
+    globals.set(
+        "mdkShowCredits",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let theend = args.first().map(number).unwrap_or(0.0) != 0.0;
+            let mut boot = boot_mut(lua)?;
+            let mut text: Vec<u8> = Vec::new();
+            let ids = Credits::PARTS
+                .iter()
+                .copied()
+                .chain(theend.then_some(Credits::END));
+            for id in ids {
+                if let Some(part) = boot.strings.text(id) {
+                    text.extend_from_slice(part);
+                }
+            }
+            let advance = std::mem::take(&mut boot.advance);
+            let lines = wrap(&advance, &text, Credits::WIDE / Credits::CELL);
+            boot.advance = advance;
+            boot.credits = Some(Credits { lines, y: 1.0, speed: -1.0 });
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "mdkHideCredits",
+        lua.create_function(|lua, _: Variadic<Value>| {
+            boot_mut(lua)?.credits = None;
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "mdkCreditsSetSpeed",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let v = args.first().map(number).unwrap_or(0.0);
+            if let Some(c) = boot_mut(lua)?.credits.as_mut() {
+                c.speed = v;
+            }
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "mdkCreditsIsDone",
+        lua.create_function(|lua, _: Variadic<Value>| {
+            // 1 when there is no roll at all, which is what an engine with
+            // nothing on screen has to say
+            Ok(boot_ref(lua)?.credits.as_ref().is_none_or(Credits::done) as i64 as f64)
+        })?,
+    )?;
+
     // **`mdkGetSlotPositionLua(gob, "SLOT")` — where a named node of a model
     // stands, in the world.** 15 sites over six scripts, and level 1's
     // skydive minigame is one: `kurtgame.OnTimer` puts a missile at
@@ -6369,6 +6509,14 @@ pub fn tick_touching(
     // and why level 1's ninth checkpoint sat on the comic book's first
     // caption for as long as anyone watched.
     dialog_step(&scripts.lua, dt);
+    // and the credits roll on the same clock
+    if let Ok(mut boot) = boot_mut(&scripts.lua) {
+        if let Some(c) = boot.credits.as_mut() {
+            if c.speed > 0.0 {
+                c.y -= c.speed * dt;
+            }
+        }
+    }
     let globals = scripts.lua.globals();
 
     // **The player's own object has to move with the body.** Everything this
@@ -7937,6 +8085,54 @@ mod tests {
             boot.probe_at["d"] > 1.0,
             "and waits a second or more before looking again"
         );
+    }
+
+    /// **The credits roll, and the arithmetic is checked against the
+    /// script's own clock.** `PlayCreditsMovie` waits 133 + 131 + 57 = 321
+    /// seconds before it asks `mdkCreditsIsDone`, so the roll has to fit
+    /// inside that — and the game's own six strings wrap to 308 lines, which
+    /// is 296 seconds at the 0.04 screens a second the script sets. This
+    /// checks the same law on a short text: nothing moves until the speed is
+    /// set, and the roll ends when the last line is past the top.
+    #[test]
+    fn the_credits_roll_for_as_long_as_the_script_waits() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        {
+            // the font's advances, all one cell wide -- the real ones come
+            // from `font.lua` and only change where a line breaks
+            let mut boot = scripts.lua.app_data_mut::<Boot>().unwrap();
+            boot.advance = vec![1.0; 256];
+            boot.strings = crate::formats::strfile::Strings::synthetic(&[
+                (552, "Produced and Designed by\nCameron Tofer - Greg Zeschuk"),
+                (622, "THE END"),
+            ]);
+        }
+        scripts.lua.load("mdkShowCredits(1)").exec().unwrap();
+        let ask = || {
+            scripts.lua.load("answer = mdkCreditsIsDone()").exec().unwrap();
+            scripts.lua.globals().get::<f64>("answer").unwrap()
+        };
+        // **nothing moves until a script sets the speed**: the record is
+        // built with -1 and `mdkCreditsSetSpeed` is a separate task
+        // no rooms: the roll is presentation and the tick needs no world
+        let rooms = Visibility::default();
+        let mut ticking = Ticking::default();
+        for _ in 0..30 {
+            tick(&scripts, &rooms, [0.0, 0.0, 0.0], 0.0, 1.0, &mut ticking).unwrap();
+        }
+        let held = scripts.lua.app_data_ref::<Boot>().unwrap().credits.as_ref().unwrap().y;
+        assert_eq!(held, 1.0, "the roll waits for its speed");
+
+        scripts.lua.load("mdkCreditsSetSpeed(0.04)").exec().unwrap();
+        let lines = scripts.lua.app_data_ref::<Boot>().unwrap().credits.as_ref().unwrap().lines.len();
+        // three lines of text and one blank, so it clears in under a second
+        let want = ((lines as f64 / 24.0 - 1.0).max(0.0) + 1.0) / 0.04;
+        assert!(ask() == 0.0, "not done before it has moved");
+        for _ in 0..(want.ceil() as usize) {
+            tick(&scripts, &rooms, [0.0, 0.0, 0.0], 0.0, 1.0, &mut ticking).unwrap();
+        }
+        assert_eq!(ask(), 1.0, "and done once the last line is past the top");
     }
 
     /// **An animation is a loop**, so its keys come round again. Before the

@@ -2289,6 +2289,27 @@ const NEEDLE: [f32; 4] = [0.0, 64.0 / 256.0, 32.0 / 256.0, 64.0 / 256.0];
 const CHECK_ON: [f32; 4] = [127.0 / 256.0, 64.0 / 256.0, 64.0 / 256.0, 64.0 / 256.0];
 const CHECK_OFF: [f32; 4] = [191.0 / 256.0, 64.0 / 256.0, 64.0 / 256.0, 64.0 / 256.0];
 
+/// The end credits, rolling.
+///
+/// Every number is 0x407c80's own — see [`goodomen::game::api::Credits`] —
+/// and one is not: the original's record has a left edge and a width and no
+/// centre flag, so the lines are drawn from the left edge, and whether the
+/// original centres them has not been read.
+fn draw_credits(
+    overlay: &mut goodomen::render::overlay::Overlay,
+    gui: &Gui,
+    credits: &goodomen::game::api::Credits,
+) {
+    use goodomen::game::api::Credits;
+    for (i, line) in credits.lines.iter().enumerate() {
+        let y = credits.y as f32 + i as f32 * Credits::LINE;
+        if !(-Credits::LINE..1.0).contains(&y) || line.is_empty() {
+            continue;
+        }
+        overlay.text(&gui.font, line, Credits::LEFT, y, Credits::CELL, Credits::LINE, Credits::GREY);
+    }
+}
+
 /// The subtitle a movie is showing, in the frame the game draws it in.
 ///
 /// The colour and the frame's corner are 0x4062c0's own -- warm 1.0, 0.7,
@@ -3564,11 +3585,23 @@ fn play(
                                 .load(format!("mdkDialogPanel({id}, 0, 30, 0)"))
                                 .exec();
                         }
+                        // and `--credits` starts the roll, for the same
+                        // reason: level 13 is nothing but `PlayCreditsMovie`
+                        // and has no checkpoint to start at
+                        if std::env::args().any(|a| a == "--credits") {
+                            let _ = level_scripts
+                                .lua
+                                .load("mdkShowCredits(1) mdkCreditsSetSpeed(0.04)")
+                                .exec();
+                        }
                     }
-                    // the subtitle, then the fade over all of it
+                    // the subtitle and the credits, then the fade over all
                     if let Some(boot) = level_scripts.lua.app_data_ref::<goodomen::game::api::Boot>() {
                         if let Some(d) = &boot.dialog {
                             draw_dialog(&mut overlay, gui, d);
+                        }
+                        if let Some(c) = &boot.credits {
+                            draw_credits(&mut overlay, gui, c);
                         }
                     }
                     let fade = goodomen::game::api::fade_step(&level_scripts.lua, dt);
