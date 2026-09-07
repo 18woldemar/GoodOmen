@@ -3706,7 +3706,7 @@ fn play(
             // the sounds the scripts asked for this tick, at the objects they
             // were hung on. The queue is drained whether or not there is a
             // device, so a silent run does not grow it without bound.
-            let asked: Vec<(String, [f32; 3])> = {
+            let asked: Vec<(String, [f32; 3], bool)> = {
                 let mut out = Vec::new();
                 if let Some(mut boot) =
                     level_scripts.lua.app_data_mut::<goodomen::game::api::Boot>()
@@ -3723,6 +3723,10 @@ fn play(
                             out.push((
                                 s.sound.clone(),
                                 [p[0] as f32, p[1] as f32, p[2] as f32],
+                                // `omGobAddSound`'s third argument, and it
+                                // says whether to place the sound at all --
+                                // see `Ambience::fire`
+                                s.flag != 0.0,
                             ));
                         }
                     }
@@ -3730,9 +3734,9 @@ fn play(
                 out
             };
             if let Some(a) = &mut heard {
-                for (name, place) in asked {
+                for (name, place, positioned) in asked {
                     let mut read = |n: &str| install.read(n).ok();
-                    a.fire(&name, place, &mut read);
+                    a.fire(&name, place, positioned, &mut read);
                 }
                 // **and the gun, which is a held loop and not a sound per
                 // shot.** 0x4167b0 builds Kurt with `omGobAddSound(kurt,
@@ -3746,7 +3750,7 @@ fn play(
                 let mut read = |n: &str| install.read(n).ok();
                 match held {
                     true => {
-                        a.hold("kurt_gun", [at[0] as f32, at[1] as f32, at[2] as f32], &mut read);
+                        a.hold("kurt_gun", [0.0; 3], false, &mut read);
                     }
                     false => a.release("kurt_gun"),
                 }

@@ -874,17 +874,21 @@ impl Ambience {
         &mut self,
         name: &str,
         at: [f32; 3],
+        positioned: bool,
         read: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
     ) -> bool {
         if let Some(&v) = self.held.get(name) {
-            self.audio.place(v, at, SHOT_NEAR, SHOT_FAR);
+            if positioned {
+                self.audio.place(v, at, SHOT_NEAR, SHOT_FAR);
+            }
             return true;
         }
         let Some(sound) = self.decoded(name, read) else { return false };
         let Ok(v) = self.audio.voice_without_a_sound() else { return false };
         self.audio.attach(v, sound);
         self.audio.looping(v, true);
-        self.audio.place(v, at, SHOT_NEAR, SHOT_FAR);
+        self.audio.head_relative(v, !positioned);
+        self.audio.place(v, if positioned { at } else { [0.0; 3] }, SHOT_NEAR, SHOT_FAR);
         self.audio.gain(v, 1.0);
         self.audio.play(v);
         self.held.insert(name.to_string(), v);
@@ -920,12 +924,20 @@ impl Ambience {
 
     /// Fire a sound the scripts hung on an object, at that object's place.
     ///
+    /// **`positioned` is `omGobAddSound`'s third argument**, and it is not a
+    /// guess: 0x46e110 hands it to 0x451700, which calls `SetMode` on the
+    /// object's `IDirectSound3DBuffer` — **`DS3DMODE_DISABLE` (2) for 0 and
+    /// `DS3DMODE_NORMAL` (0) for 1**. So a 0 means "do not place this in the
+    /// world at all", and 59 of the scripts' 62 attachments are 0: they are
+    /// played flat, at the ear. `head_relative` is the same thing here.
+    ///
     /// Returns false when nothing was played — an unreadable name, or every
     /// voice busy.
     pub fn fire(
         &mut self,
         name: &str,
         at: [f32; 3],
+        positioned: bool,
         read: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
     ) -> bool {
         let Some(sound) = self.decoded(name, read) else { return false };
@@ -935,7 +947,11 @@ impl Ambience {
             return false;
         };
         self.audio.attach(free, sound);
-        self.audio.place(free, at, SHOT_NEAR, SHOT_FAR);
+        self.audio.head_relative(free, !positioned);
+        match positioned {
+            true => self.audio.place(free, at, SHOT_NEAR, SHOT_FAR),
+            false => self.audio.place(free, [0.0; 3], SHOT_NEAR, SHOT_FAR),
+        }
         self.audio.gain(free, 1.0);
         self.audio.play(free);
         true
@@ -1072,13 +1088,13 @@ pub fn selfcheck() -> Result<String, String> {
     let riff = riff_of(&tone, RATE);
     let mut read = |name: &str| (name == "click.wav").then(|| riff.clone());
     let mut level = Ambience::open(audio, &[], &mut read)?;
-    if !level.fire("click", [0.0, 0.0, -near], &mut read) {
+    if !level.fire("click", [0.0, 0.0, -near], true, &mut read) {
         return Err("the one-shot pool played nothing".into());
     }
     // one more than the pool holds, all at once: the excess is dropped rather
     // than stealing a voice that is still speaking
     for _ in 0..SHOTS + 4 {
-        level.fire("click", [0.0, 0.0, -near], &mut read);
+        level.fire("click", [0.0, 0.0, -near], true, &mut read);
     }
     if level.dropped < 4 {
         return Err(format!(
@@ -1087,7 +1103,7 @@ pub fn selfcheck() -> Result<String, String> {
             level.dropped
         ));
     }
-    if !level.fire("nothing_of_the_kind", [0.0; 3], &mut read) {
+    if !level.fire("nothing_of_the_kind", [0.0; 3], true, &mut read) {
         // a name that reads as nothing must be a quiet no, not an error
     } else {
         return Err("a sound that does not exist was played".into());
@@ -1153,11 +1169,11 @@ mod tests {
         let mut read = |_: &str| Some(wav.clone());
         let Ok(mut room) = Ambience::open(audio, &[], &mut read) else { return };
 
-        assert!(room.hold("kurt_gun", [0.0; 3], &mut read));
+        assert!(room.hold("kurt_gun", [0.0; 3], false, &mut read));
         let voice = room.held["kurt_gun"];
         // held again, and again: still the one voice, and still playing
         for _ in 0..8 {
-            assert!(room.hold("kurt_gun", [1.0, 0.0, 0.0], &mut read));
+            assert!(room.hold("kurt_gun", [1.0, 0.0, 0.0], false, &mut read));
         }
         assert_eq!(room.held.len(), 1);
         assert_eq!(room.held["kurt_gun"], voice);
