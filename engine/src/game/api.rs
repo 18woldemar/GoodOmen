@@ -746,6 +746,11 @@ pub struct Boot {
     /// the record's own playback rate. Filled by the driver, because the
     /// arena has no models — the same reason [`Boot::keys`] is.
     pub spans: BTreeMap<(String, i64), f64>,
+    /// The models themselves, by name, for the one question only a model can
+    /// answer: where a named node of a gob stands. Filled by the driver
+    /// beside [`Boot::spans`], and `Rc` because the map is rebuilt per level
+    /// and a lookup should not copy a megabyte.
+    pub models: BTreeMap<String, std::rc::Rc<crate::formats::model::Model>>,
     /// How many shots a run has fired, since `shots` only holds the live ones.
     pub fired: usize,
     /// How many of them hit something that took damage.
@@ -3393,6 +3398,34 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             Ok(())
         })?,
     )?;
+    // **`mdkGetSlotPositionLua(gob, "SLOT")` — where a named node of a model
+    // stands, in the world.** 15 sites over six scripts, and level 1's
+    // skydive minigame is one: `kurtgame.OnTimer` puts a missile at
+    // `KTGAME_SHOTSLT2` of `ktgame_timer` and then flies it, so a recorder's
+    // `nil` there stops the whole cutscene at its `Level.GetMinigameResult`.
+    //
+    // The answer is the node's own transform under whatever animation the
+    // object is playing, composed with the object's — the same arithmetic
+    // the cutscene camera does, and the reason [`Boot::models`] exists.
+    globals.set(
+        "mdkGetSlotPositionLua",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let Some(name) = args.first().and_then(gob_name) else {
+                return Ok(Variadic::new());
+            };
+            let Some(slot) = args.get(1).and_then(|v| match v {
+                Value::String(s) => Some(s.to_string_lossy().to_string()),
+                _ => None,
+            }) else {
+                return Ok(Variadic::new());
+            };
+            let Some(at) = slot_position(lua, &name, &slot) else {
+                return Ok(Variadic::new());
+            };
+            Ok(Variadic::from_iter(at.map(Value::Number)))
+        })?,
+    )?;
+
     globals.set(
         "mdkGobSetPositionXYZ",
         lua.create_function(|lua, args: Variadic<Value>| {
@@ -4833,6 +4866,40 @@ pub fn play_named(scripts: &Scripts, gob: &str, animation: &str) -> Result<(), E
 }
 
 /// Read a field off the gob a script handed us.
+/// Where a named node of an object stands, in the world.
+///
+/// The node's transform under the animation the object is playing, composed
+/// with the object's own — which is what the original's `mdkGetSlotPosition`
+/// is, and the same arithmetic the cutscene camera uses. A **static** model
+/// is already in world coordinates, so its node is taken as it is stored.
+pub fn slot_position(lua: &Lua, gob: &str, slot: &str) -> Option<[f64; 3]> {
+    use crate::formats::model::rotate;
+    let boot = boot_ref(lua).ok()?;
+    let w = world::world(lua)?;
+    let g = w.find(gob).and_then(|id| w.get(id))?;
+    let model = boot.models.get(&model_of(g.kind, g.resource.as_deref())?)?.clone();
+    let node = model
+        .nodes
+        .iter()
+        .position(|n| n.name.eq_ignore_ascii_case(slot))?;
+    let local = if model.animated() {
+        let chosen = boot.playing.get(gob).copied();
+        let anim = chosen
+            .and_then(|a| model.animations.iter().find(|m| m.id as f64 == a))
+            .or_else(|| model.animations.first())?;
+        let t = boot.since.get(gob).copied().unwrap_or(0.0) * anim.loop_rate() as f64;
+        let t = if anim.repeats() { t.fract() } else { t.min(1.0) };
+        model.node_world(anim, t).get(node)?.1
+    } else {
+        // a static model is in world space already, and its node's own
+        // translation is where the node is
+        let t = model.nodes[node].translation;
+        return Some([t[0] as f64, t[1] as f64, t[2] as f64]);
+    };
+    let turned = rotate(g.rotation, local);
+    Some([0, 1, 2].map(|c| g.position[c] + turned[c]))
+}
+
 fn with_gob<T>(lua: &Lua, v: Option<&Value>, f: impl Fn(&Gob) -> T) -> Option<T> {
     let name = v.and_then(gob_name)?;
     let w = world::world(lua)?;
@@ -5069,8 +5136,22 @@ pub fn stalls(lua: &Lua) -> Vec<(String, String, i64, [f64; 3], bool)> {
     let mut named: Vec<(String, mlua::Function)> = Vec::new();
     if let Ok(pairs) = globals.clone().pairs::<String, Value>().collect::<mlua::Result<Vec<_>>>() {
         for (name, v) in pairs {
-            if let Value::Function(f) = v {
-                named.push((name, f));
+            match v {
+                Value::Function(f) => named.push((name, f)),
+                // **and one level into a table**, because half of what a task
+                // list waits on is `Level.Something` and not a global at all:
+                // `Level.GetMinigameResult`, the task the skydive stops on,
+                // read as "an anonymous function" until this went in.
+                Value::Table(t) if name.chars().next().is_some_and(char::is_uppercase) => {
+                    if let Ok(inner) = t.pairs::<String, Value>().collect::<mlua::Result<Vec<_>>>() {
+                        for (field, v) in inner {
+                            if let Value::Function(f) = v {
+                                named.push((format!("{name}.{field}"), f));
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }

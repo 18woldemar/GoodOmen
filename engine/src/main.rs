@@ -1244,6 +1244,11 @@ fn load_animation_keys(install: &mut Install, scripts: &Scripts) -> usize {
     let mut spans = std::collections::BTreeMap::new();
     // and which of them stop at the end rather than coming round again
     let mut oneshot = std::collections::BTreeSet::new();
+    // and the models themselves, because `mdkGetSlotPositionLua` asks where a
+    // named node of a gob **is** and nothing but the model can answer. The
+    // arena has none, so they ride here with the spans and the keys — the
+    // same pass, one more insert.
+    let mut models = std::collections::BTreeMap::new();
     for name in wanted {
         let Ok(bytes) = install.read(&format!("{name}.mod")) else { continue };
         let Ok(model) = Model::parse(&bytes) else { continue };
@@ -1265,13 +1270,15 @@ fn load_animation_keys(install: &mut Install, scripts: &Scripts) -> usize {
         }
         if !list.is_empty() {
             found += list.len();
-            keys.insert(name, list);
+            keys.insert(name.clone(), list);
         }
+        models.insert(name, std::rc::Rc::new(model));
     }
     if let Some(mut boot) = scripts.lua.app_data_mut::<api::Boot>() {
         boot.keys = keys;
         boot.spans = spans;
         boot.oneshot = oneshot;
+        boot.models = models;
     }
     found
 }
