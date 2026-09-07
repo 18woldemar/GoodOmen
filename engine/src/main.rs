@@ -689,7 +689,7 @@ fn menu_check(root: &std::path::Path) -> Result<String, String> {
     api::install(&scripts.lua, sources.clone()).map_err(|e| e.to_string())?;
     if let (Ok(font), Ok(strings)) = (install.read("font.lua"), install.read("mdk2.str")) {
         let source: String = font.iter().map(|&b| b as char).collect();
-        api::load_text(&scripts.lua, &source, &strings);
+        api::load_text(&scripts.lua, None, &source, &strings);
     }
     let mdk2 = sources.get("mdk2.lua").ok_or("no mdk2.lua")?;
     scripts.run("mdk2.lua", mdk2).map_err(|e| e.to_string())?;
@@ -1295,6 +1295,11 @@ fn run(root: &std::path::Path, number: u32, checkpoint: u32, seconds: f64) -> Re
 
     let scripts = Scripts::new().map_err(|e| e.to_string())?;
     api::install(&scripts.lua, sources.clone()).map_err(|e| e.to_string())?;
+    // **A headless run is an instrument and not a game**, so it is given no
+    // root and therefore writes no `save/auto.sav`: `--run 1 9` reaches
+    // level 1's own `mdkSetAutoSave(1, 9)` on every invocation, and a test
+    // harness that overwrites the player's own autosave is rude. A played
+    // session gets one, which is where the file belongs.
     let mdk2 = sources.get("mdk2.lua").ok_or("no mdk2.lua")?;
     scripts.run("mdk2.lua", mdk2).map_err(|e| e.to_string())?;
     api::level(&scripts, number, checkpoint, "sectionA").map_err(|e| e.to_string())?;
@@ -1899,7 +1904,7 @@ fn title(
     api::install(&scripts.lua, sources.clone()).map_err(|e| e.to_string())?;
     if let (Ok(font), Ok(strings)) = (install.read("font.lua"), install.read("mdk2.str")) {
         let source: String = font.iter().map(|&b| b as char).collect();
-        api::load_text(&scripts.lua, &source, &strings);
+        api::load_text(&scripts.lua, None, &source, &strings);
     }
     let mdk2 = sources.get("mdk2.lua").ok_or("no mdk2.lua")?;
     scripts.run("mdk2.lua", mdk2).map_err(|e| e.to_string())?;
@@ -2504,6 +2509,11 @@ fn play(
             &sources,
             number,
             checkpoint,
+            // **a session told when to stop is a measurement, and a
+            // measurement leaves no trace.** `--for` exists only for the
+            // checks, and the checks play all ten levels: without this every
+            // run of `check.py` would overwrite the player's own autosave.
+            !std::env::args().any(|a| a == "--for"),
         )
         .map_err(|e| e.to_string())?
     };

@@ -69,6 +69,9 @@ pub unsafe fn start(
     sources: &std::collections::BTreeMap<String, String>,
     number: u32,
     checkpoint: u32,
+    // Whether the game may write its own files beside the installation —
+    // `save/auto.sav` is written during this call, by the level script.
+    beside: bool,
 ) -> Result<Started, Error> {
     use crate::game::api;
 
@@ -79,7 +82,11 @@ pub unsafe fn start(
     // `dofile('menuinit')`, which builds the language chooser
     if let (Ok(font), Ok(strings)) = (install.read("font.lua"), install.read("mdk2.str")) {
         let source: String = font.iter().map(|&b| b as char).collect();
-        api::load_text(&scripts.lua, &source, &strings);
+        // **and where the game is, unless the caller says to leave no
+        // trace.** A level's own `mdkSetAutoSave` writes `save/auto.sav`
+        // during this call, so the decision has to be made before it, not
+        // after; `--for` is what a measured session passes.
+        api::load_text(&scripts.lua, beside.then(|| install.root.clone()), &source, &strings);
     }
     let mdk2 = sources
         .get("mdk2.lua")

@@ -526,6 +526,12 @@ pub struct Boot {
     pub dialog: Option<Dialog>,
     /// The end credits, while they roll. See [`Credits`].
     pub credits: Option<Credits>,
+    /// Where the installation is, because two of the game's own files live
+    /// beside it: `save/auto.sav` and `save/movie.sav`. **`None` until
+    /// something says**, and then nothing is written — an engine that does
+    /// not know where the game is must not write beside itself, which is
+    /// exactly what a relative path did the first time.
+    pub root: Option<std::path::PathBuf>,
     /// The screen fade — `omSceneFade`, which the movies open and close
     /// with and which `menu.diff.Go` holds black over a level load. See
     /// [`Fade`].
@@ -537,9 +543,6 @@ pub struct Boot {
     pub next_level: Option<(u32, u32)>,
     /// `mdkExitGame`, which the title screen's fifth button calls.
     pub quit: bool,
-    /// `mdkSetDifficulty` — 0.2, 0.35, 0.5 or 1.0, which is what the four
-    /// items of `menu.diff` pass. Nothing reads it here yet.
-    pub difficulty: f64,
     /// The window's size, which the video options read back and show. One
     /// resolution is offered because one is what the engine has.
     pub video: [i64; 2],
@@ -962,11 +965,13 @@ pub struct Spawner {
 /// surface is installed in places that have none — `--lua` compiles all 31
 /// scripts and never opens a file. A boot without it lays its menus out with
 /// one cell per character, which is the binary's own default.
-pub fn load_text(lua: &Lua, font_lua: &str, string_file: &[u8]) {
+pub fn load_text(lua: &Lua, root: Option<std::path::PathBuf>, font_lua: &str, string_file: &[u8]) {
     let mut boot = match lua.app_data_mut::<Boot>() {
         Some(b) => b,
         None => return,
     };
+    // and where the installation is, which the two save files need
+    boot.root = root;
     if let Ok((a, _rows)) = crate::render::overlay::Font::advances(font_lua) {
         boot.advance = a;
     }
@@ -3488,6 +3493,78 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             Ok(())
         })?,
     )?;
+    // **The two files the game writes beside itself, and both are read.**
+    //
+    // `save/auto.sav` is **twenty bytes** — 0x42d250 writes a zero dword
+    // twice, then its two arguments, then the difficulty global at 0x4bb71c:
+    //
+    // ```text
+    // u32 0   u32 0   u32 level   u32 checkpoint   f32 difficulty
+    // ```
+    //
+    // and the original's own file agrees byte for byte after a new game:
+    // `00 00 00 00  00 00 00 00  01 00 00 00  09 00 00 00  33 33 b3 3e`
+    // is level 1, checkpoint 9, difficulty 0.35 — which is the second of
+    // `menu.diff`'s four and the checkpoint retail starts at.
+    globals.set(
+        "mdkSetAutoSave",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let level = args.first().map(number).unwrap_or(0.0) as u32;
+            let checkpoint = args.get(1).map(number).unwrap_or(0.0) as u32;
+            let boot = boot_ref(lua)?;
+            let mut out = Vec::with_capacity(20);
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&level.to_le_bytes());
+            out.extend_from_slice(&checkpoint.to_le_bytes());
+            // **the difficulty the world is actually fighting at**, which
+            // is where `mdkSetDifficulty` puts it and what every hitpoint is
+            // scaled by -- not a second copy that could disagree
+            let d = world::world(lua)
+                .map(|w| w.difficulty())
+                .unwrap_or(world::DEFAULT_DIFFICULTY);
+            out.extend_from_slice(&d.to_le_bytes());
+            let Some(root) = boot.root.clone() else { return Ok(()) };
+            drop(boot);
+            let _ = std::fs::create_dir_all(root.join("save"));
+            let _ = std::fs::write(root.join("save/auto.sav"), out);
+            Ok(())
+        })?,
+    )?;
+    // `save/movie.sav` is one line of `"%02d%s"` — level and the movie's
+    // letter — and 0x42d150 **keeps the larger**: it reads what is there and
+    // writes only when the new string sorts after it, so the file is a
+    // watermark of the furthest cutscene reached, which is what the movie
+    // player's menu lists. `mdkGetSavedMovie` (0x42d210) reads it back.
+    globals.set(
+        "mdkSaveMovie",
+        lua.create_function(|lua, args: Variadic<Value>| {
+            let level = args.first().map(number).unwrap_or(0.0) as u32;
+            let letter = match args.get(1) {
+                Some(Value::String(v)) => v.to_string_lossy().to_string(),
+                _ => String::new(),
+            };
+            let mark = format!("{level:02}{letter}");
+            let Some(root) = boot_ref(lua)?.root.clone() else { return Ok(()) };
+            let at = root.join("save/movie.sav");
+            let had = std::fs::read_to_string(&at).unwrap_or_default();
+            if had.trim_end() < mark.as_str() {
+                let _ = std::fs::create_dir_all(root.join("save"));
+                let _ = std::fs::write(at, &mark);
+            }
+            Ok(())
+        })?,
+    )?;
+    globals.set(
+        "mdkGetSavedMovie",
+        lua.create_function(|lua, _: Variadic<Value>| {
+            let Some(root) = boot_ref(lua)?.root.clone() else { return Ok(String::new()) };
+            Ok(std::fs::read_to_string(root.join("save/movie.sav"))
+                .map(|s| s.trim_end().to_string())
+                .unwrap_or_default())
+        })?,
+    )?;
+
     // **The end credits.** Six strings of `mdk2.str` concatenated, wrapped at
     // the record's own width and rolled up the screen — see [`Credits`].
     globals.set(
@@ -4590,13 +4667,6 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         "mdkExitGame",
         lua.create_function(|lua, _: Variadic<Value>| {
             boot_mut(lua)?.quit = true;
-            Ok(())
-        })?,
-    )?;
-    globals.set(
-        "mdkSetDifficulty",
-        lua.create_function(|lua, args: Variadic<Value>| {
-            boot_mut(lua)?.difficulty = args.first().map(number).unwrap_or(0.5);
             Ok(())
         })?,
     )?;
@@ -8133,6 +8203,38 @@ mod tests {
             tick(&scripts, &rooms, [0.0, 0.0, 0.0], 0.0, 1.0, &mut ticking).unwrap();
         }
         assert_eq!(ask(), 1.0, "and done once the last line is past the top");
+    }
+
+    /// **`save/auto.sav` is twenty bytes**, and the original's own file is
+    /// what this is held to: after a new game it reads
+    /// `00 00 00 00  00 00 00 00  01 00 00 00  09 00 00 00  33 33 b3 3e`,
+    /// which is two zeros, level 1, checkpoint 9 and the difficulty 0.35 —
+    /// the second of `menu.diff`'s four, and the checkpoint retail starts
+    /// at. 0x42d250 writes exactly those five fields in that order.
+    #[test]
+    fn the_autosave_is_the_five_fields_the_original_writes() {
+        let scripts = Scripts::new().unwrap();
+        install(&scripts.lua, Default::default()).unwrap();
+        let dir = std::env::temp_dir().join(format!("goodomen-save-{}", std::process::id()));
+        {
+            let mut boot = scripts.lua.app_data_mut::<Boot>().unwrap();
+            boot.root = Some(dir.clone());
+        }
+        scripts.lua.load("mdkSetDifficulty(0.35) mdkSetAutoSave(1, 9)").exec().unwrap();
+        let got = std::fs::read(dir.join("save/auto.sav")).unwrap();
+        assert_eq!(
+            got,
+            b"\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x09\x00\x00\x00\x33\x33\xb3\x3e",
+            "the twenty bytes the original wrote"
+        );
+
+        // and `movie.sav` keeps the larger of what is there and what is
+        // asked for, which is what makes it a watermark
+        scripts.lua.load("mdkSaveMovie(1, 'b')").exec().unwrap();
+        scripts.lua.load("mdkSaveMovie(1, 'a')").exec().unwrap();
+        scripts.lua.load("answer = mdkGetSavedMovie()").exec().unwrap();
+        assert_eq!(scripts.lua.globals().get::<String>("answer").unwrap(), "01b");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **An animation is a loop**, so its keys come round again. Before the
