@@ -57,6 +57,30 @@ const ABSENT: u32 = 0xFFFF_FFFF;
 pub const KIND_TRANSLATION: u8 = 1;
 pub const KIND_ROTATION: u8 = 2;
 
+/// **A model can carry the camera a cutscene is filmed from**, and kind 0x68
+/// is the switch that says so: it is the one the applier at 0x478800 turns
+/// into a write of `camera + 100, +0xb4`, the field 0x46a880 tests before it
+/// takes the camera's whole transform from a node of another gob instead of
+/// following the player.
+///
+/// 102 of the 2207 models have one, every one of them a cutscene, a minigame
+/// or an inventory screen, and in every one the node it names draws nothing
+/// ([`NO_RESOURCE`]). The **names cannot be the rule** — `L0A_CAMERA` and
+/// `ML1B_CAMERA` say so but `BOX01`, `SPHERE04` and `TIMMY` are cameras too —
+/// and the binary holds no such string to match against.
+///
+/// The settings sit beside it as kinds 0x5a..=0x60 and 0x66, of which only
+/// [`KIND_FOV`] is read here: 0x5c is **degrees**, 3.25 to 90 over the corpus
+/// and 33, 30 and 25 the three commonest.
+pub const KIND_CAMERA: u8 = 0x68;
+pub const KIND_FOV: u8 = 0x5c;
+
+/// What a camera node with no [`KIND_FOV`] channel would be filmed at. Ours,
+/// and unreachable in the shipped data — **all 102 name one** — so it is a
+/// fallback for a file this engine has not seen, not a reading of anything.
+/// 33 is the value the corpus uses most.
+pub const DEFAULT_FOV_DEGREES: f64 = 33.0;
+
 /// A node draws nothing when its resource byte is this.
 pub const NO_RESOURCE: u8 = 0xFF;
 
@@ -361,6 +385,23 @@ impl Model {
             *slot = f32le(&self.data, base + 4 * c).unwrap_or(0.0) as f64;
         }
         out
+    }
+
+    /// The node a cutscene is filmed from, and its field of view in radians.
+    ///
+    /// See [`KIND_CAMERA`]. The settings live on animation 0 and the motion
+    /// on the `ANIM_ACTION*` the script plays, so both tables are searched:
+    /// `L0a_AnimGOB.mod` names the node and its 21 degrees in animation 0 and
+    /// moves it in animation 77.
+    pub fn camera(&self) -> Option<(usize, f64)> {
+        let channels = || self.animations.iter().flat_map(|a| &a.channels);
+        let node = channels().find(|c| c.kind == KIND_CAMERA)?.node as usize;
+        let fov = channels()
+            .find(|c| c.kind == KIND_FOV && c.node as usize == node)
+            .and_then(|c| c.keys.first())
+            .map(|k| self.value(k.1)[0])
+            .unwrap_or(DEFAULT_FOV_DEGREES);
+        Some((node, fov.to_radians()))
     }
 
     /// Node translations accumulated down the parent chain.

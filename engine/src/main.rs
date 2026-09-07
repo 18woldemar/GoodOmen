@@ -2168,6 +2168,73 @@ fn presses() -> Vec<(f64, i64)> {
 /// The corner size 0x412090 passes to the frame, and the alpha with it.
 const MENU_CORNER: f32 = 0.04;
 
+/// Where a cutscene films from, and how wide: the camera node of the one
+/// object out of stasis whose model carries one.
+///
+/// The rule is [`goodomen::formats::model::KIND_CAMERA`] and it is the
+/// model's, not the script's — nothing in `Level.PlayIntroMovieA` names a
+/// camera at all. The gob gives the place and its model's node the shot, so
+/// the intro movie looks through `l0a_animgob`, the comic page's own child,
+/// whose node 0 is called `L0A_CAMERA` and is animated with the page.
+///
+/// **A camera node faces its own +Y with +Z up**, the frame every model in
+/// this game is authored in. Reading it as −Z, the way a camera in a
+/// modelling package looks, points the intro movie sideways off its own page.
+fn cutscene_camera(
+    scene: &goodomen::render::scene::Scene,
+    world: &goodomen::game::world::World,
+    boot: &goodomen::game::api::Boot,
+    clock: f64,
+) -> Option<(Mat4, f32, String)> {
+    use goodomen::formats::model::rotate;
+    for (id, gob) in world.iter() {
+        if gob.gui || goodomen::game::api::frozen(world, &boot.stasis, id) {
+            continue;
+        }
+        let Some(name) = goodomen::game::api::model_of(gob.kind, gob.resource.as_deref()) else {
+            continue;
+        };
+        let Some(model) = scene.model(&name) else { continue };
+        let Some((node, fov)) = model.camera() else { continue };
+        let chosen = boot.playing.get(&gob.name).copied();
+        let anim = chosen
+            .and_then(|a| model.animations.iter().find(|m| m.id as f64 == a))
+            .or_else(|| model.animations.first())?;
+        // **the shot's own clock, not the frame's.** A cut is under half a
+        // second long, so sampling it at the wall clock's phase -- which is
+        // what the renderer does for every other model -- puts the camera
+        // anywhere in the dive. `Boot::since` is when this object's
+        // animation started, which is what `omAnimPlay` resets.
+        let t = match boot.since.get(&gob.name) {
+            Some(&since) => (since * anim.loop_rate() as f64).min(1.0),
+            None => (clock * anim.loop_rate() as f64).fract(),
+        };
+        let (q, offset) = *model.node_world(anim, t).get(node)?;
+        // the model is node-local, so the node's transform is inside the
+        // object's own -- the same composition `Scene::follow` builds
+        let place = |v: [f64; 3]| rotate(gob.rotation, v);
+        let eye = place(offset);
+        let eye = [
+            (eye[0] + gob.position[0]) as f32,
+            (eye[1] + gob.position[1]) as f32,
+            (eye[2] + gob.position[2]) as f32,
+        ];
+        let ahead = place(rotate(q, [0.0, 1.0, 0.0]));
+        let up = place(rotate(q, [0.0, 0.0, 1.0]));
+        let at = [
+            eye[0] + ahead[0] as f32,
+            eye[1] + ahead[1] as f32,
+            eye[2] + ahead[2] as f32,
+        ];
+        return Some((
+            Mat4::look_at(eye, at, [up[0] as f32, up[1] as f32, up[2] as f32]),
+            fov as f32,
+            gob.name.clone(),
+        ));
+    }
+    None
+}
+
 /// Everything the 2-D layer draws the interface out of: the font and the
 /// three sheets 0x4117a0 loads by name.
 struct Gui {
@@ -2609,6 +2676,9 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
         // same trick starts the music, since -1 is also "stop"
         let mut listening = -1i32;
         let mut playing_track = -1i32;
+        // the cutscene camera the session last looked through, for the
+        // summary -- a still frame cannot say whose shot it is
+        let mut filmed: Option<(String, f32)> = None;
         let mut track: Option<goodomen::audio::Track> = None;
         let started = std::time::Instant::now();
         let mut last = std::time::Instant::now();
@@ -2719,6 +2789,17 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                                 return Err(format!("{got} {what}, expected {}", want.unwrap()));
                             }
                         }
+                        // and which cutscene camera the session looked
+                        // through, which is a name rather than a count
+                        if let Some(want) = std::env::args()
+                            .skip_while(|a| a != "--expect-filming")
+                            .nth(1)
+                        {
+                            let got = filmed.as_ref().map(|(w, _)| w.as_str()).unwrap_or("nothing");
+                            if got != want {
+                                return Err(format!("filmed through {got}, expected {want}"));
+                            }
+                        }
                         return Ok(format!(
                             "{summary}, ran {:.0}s: {} rooms entered, \
                              {survived} of {fired} handler calls ran to the end, \
@@ -2751,7 +2832,11 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                                 1 => ", died once and started over".into(),
                                 n => format!(", died {n} times and started over"),
                             },
-                        ));
+                        ) + &match &filmed {
+                            Some((who, fov)) =>
+                                format!(", filmed through {who} at {fov:.0} degrees"),
+                            None => String::new(),
+                        });
                     }
                     Event::KeyDown { keycode: Some(Keycode::C), .. } => cull = !cull,
                     // **the sniper scope**, which is a play mode and not a
@@ -3084,6 +3169,21 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
                 scene.fog = boot.fog;
             }
 
+            // and while a cutscene has taken the camera, the view is the
+            // movie's own -- posed on the same clock the models are drawn on
+            // the view a cutscene has taken over, and its field of view
+            let filming = match (
+                goodomen::game::world::world(&level_scripts.lua),
+                level_scripts.lua.app_data_ref::<goodomen::game::api::Boot>(),
+            ) {
+                (Some(w), Some(boot)) if boot.movie_camera => {
+                    let c = cutscene_camera(&scene, &w, &boot, started.elapsed().as_secs_f64());
+                    if c.is_none() { eprintln!("DBG movie on, no camera"); }
+                    c
+                }
+                _ => None,
+            };
+
             // the room under the camera decides what is drawn, every frame
             let here = rooms.at(at);
             let visible = here.first().map(|&i| rooms.visible[i].clone());
@@ -3256,10 +3356,20 @@ fn play(root: &std::path::Path, number: u32, checkpoint: u32, show: bool) -> Res
             if let Some(a) = &heard {
                 a.listen(from, yaw, pitch);
             }
-            let view = Mat4::look_at(from, ahead, [0.0, 0.0, 1.0]);
+            if let Some((_, fov, who)) = &filming {
+                filmed = Some((who.clone(), fov.to_degrees()));
+            }
+            let view = match &filming {
+                Some((v, ..)) => *v,
+                None => Mat4::look_at(from, ahead, [0.0, 0.0, 1.0]),
+            };
             let (w, h) = video.window.drawable_size();
             let projection = Mat4::perspective(
-                if sniping { (zoom as f32).to_radians() } else { 1.1 },
+                match (&filming, sniping) {
+                    (Some((_, fov, _)), _) => *fov,
+                    (None, true) => (zoom as f32).to_radians(),
+                    (None, false) => 1.1,
+                },
                 w as f32 / h.max(1) as f32,
                 0.05,
                 4000.0,

@@ -519,6 +519,12 @@ impl Scene {
         true
     }
 
+    /// A loaded model, for a caller that needs more than the draw list — the
+    /// cutscene camera asks its own model where its camera node stands.
+    pub fn model(&self, name: &str) -> Option<&Model> {
+        self.models.get(&name.to_ascii_lowercase())?.posed_here.as_ref()
+    }
+
     /// Is a loaded model animated, and so in node-local space?
     pub fn is_animated(&self, name: &str) -> bool {
         self.models

@@ -458,6 +458,14 @@ pub struct Boot {
     /// nothing else — the run still ends when `--for` says, and the world
     /// stands still.
     pub paused: bool,
+    /// `mdkDisableDefaultCamera`, which every cutscene calls before it plays
+    /// its first shot and `mdkEnableDefaultCamera` undoes. One bit in the
+    /// original: 0x43a0e0 and 0x43a0b0 clear and set `camera + 100, +0x5c`,
+    /// and the scene's own walk (0x45eec0) then skips the camera whose bit is
+    /// clear, so the player-following camera simply stops being updated.
+    /// **What replaces it is the model's own** — see
+    /// [`crate::formats::model::KIND_CAMERA`].
+    pub movie_camera: bool,
     pub rooms: Vec<Room>,
     pub checkpoints: Vec<Checkpoint>,
     pub input: Input,
@@ -490,6 +498,16 @@ pub struct Boot {
     /// Objects frozen until the player arrives — a level holds its encounters
     /// this way, and a boot of all ten puts hundreds there.
     pub stasis: BTreeSet<String>,
+    /// Objects a script has taken *out* of stasis by name, which the
+    /// registration-flag sweep below must not put back.
+    ///
+    /// The original applies the trailing flag in the object's own
+    /// constructor, so a later `omGobExitStasis` simply wins. Here the sweep
+    /// comes after the level script, and without this it undoes the first
+    /// line of `Level.PlayIntroMovieA` — `omGobExitStasis(l0a)` on an object
+    /// `dofile('l0a')` registered a moment earlier with a 1 — so the intro
+    /// movie's own task list never ran.
+    pub thawed: BTreeSet<String>,
     /// When each shooter last fired, in seconds of the run's own clock.
     /// See [`may_fire`].
     pub last_shot: BTreeMap<String, f64>,
@@ -1266,7 +1284,9 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         "omGobEnterStasis",
         lua.create_function(|lua, args: Variadic<Value>| {
             if let Some(name) = args.first().and_then(gob_name) {
-                boot_mut(lua)?.stasis.insert(name);
+                let mut boot = boot_mut(lua)?;
+                boot.thawed.remove(&name);
+                boot.stasis.insert(name);
             }
             Ok(())
         })?,
@@ -1275,7 +1295,9 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         "omGobExitStasis",
         lua.create_function(|lua, args: Variadic<Value>| {
             if let Some(name) = args.first().and_then(gob_name) {
-                boot_mut(lua)?.stasis.remove(&name);
+                let mut boot = boot_mut(lua)?;
+                boot.stasis.remove(&name);
+                boot.thawed.insert(name);
             }
             Ok(())
         })?,
@@ -4581,6 +4603,17 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
         })?,
     )?;
 
+    // the two ends of a cutscene's camera. See `Boot::movie_camera`.
+    for (name, on) in [("mdkDisableDefaultCamera", true), ("mdkEnableDefaultCamera", false)] {
+        globals.set(
+            name,
+            lua.create_function(move |lua, _: Variadic<Value>| {
+                boot_mut(lua)?.movie_camera = on;
+                Ok(())
+            })?,
+        )?;
+    }
+
     globals.set(
         "mdkMenuSelect",
         lua.create_function(|lua, _: Variadic<Value>| {
@@ -6044,9 +6077,11 @@ pub fn create(scripts: &Scripts) -> Result<(), Error> {
     // `level1.lua:1811`, 2700 failures in a ninety-second run at every one
     // of the level's checkpoints.
     let frozen_by_flag: Vec<String> = {
+        let thawed = boot_ref(&scripts.lua)?.thawed.clone();
         let w = world::world(&scripts.lua).ok_or_else(|| Error::Pragma("no world".into()))?;
         w.iter()
             .filter(|(_, g)| g.flag == 1.0 && !g.name.is_empty() && !g.created)
+            .filter(|(_, g)| !thawed.contains(&g.name))
             .map(|(_, g)| g.name.clone())
             .collect()
     };
@@ -6158,7 +6193,7 @@ impl Ticking {
 /// destroys a room *and everything parented to it*, because a room's
 /// contents are its children; the update sweep walks the same tree, and
 /// 0x46d505 skips a frozen object's **whole** update.
-fn frozen(w: &crate::game::world::World,
+pub fn frozen(w: &crate::game::world::World,
           stasis: &std::collections::BTreeSet<String>, id: crate::game::world::Id) -> bool {
     let mut at = Some(id);
     // a graph that pointed at itself would otherwise hang the tick, and the

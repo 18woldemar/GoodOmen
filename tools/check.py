@@ -128,7 +128,12 @@ CORPUS = [
      # rolls, and level 1's generator doganboys walk somewhere else.
      # 24 -> 25 with `OnAnimLoop` fired: the scripts get a hook they never
      # had, so what they do next changes and the random stream with it.
-     ["sweep.py", "extracted", "--run", "$MDK2_GOG", "--expect-lost", "25"],
+     # 25 -> 31 when a script's own `omGobExitStasis` stopped being overruled
+     # by the registration flag: six of the seven new names are level 10's
+     # `l10_kinviso*` and level 7's `l7r4_grnt*`, enemies that had been asleep
+     # for the whole run and now walk, which is what a sleeping encounter
+     # waking up looks like.
+     ["sweep.py", "extracted", "--run", "$MDK2_GOG", "--expect-lost", "31"],
      None),
     # **Every level opens a window and plays.** The two pinned window checks
     # are two checkpoints of two levels, which is enough to catch a change and
@@ -181,6 +186,18 @@ ENGINE = [
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG", "--title",
       "--for", "8", "--press", "5:62,5.5:62", "--expect-level", "1,9"], None),
+    # **A new game opens on a cutscene, and the cutscene films itself.** Level
+    # 1's ninth checkpoint is "Intro Movie A" -- the comic book -- and nothing
+    # in `Level.PlayIntroMovieA` names a camera: the shot is a node of
+    # `l0a_animgob`'s own model, marked by an animation channel of kind 0x68,
+    # and its 21 degrees are the kind-0x5c channel beside it. This fails if
+    # the movie's task list stops running, if the camera rule changes, or if
+    # the field of view stops coming out of the model.
+    ("a cutscene is filmed through the camera its model carries",
+     ["cargo", "run", "--quiet", "--release",
+      "--manifest-path", "engine/Cargo.toml", "--", "$MDK2_GOG",
+      "--play", "1", "9", "--window", "--for", "4",
+      "--expect-filming", "l0a_animgob"], None),
     ("the menu the scripts build answers its own keys",
      ["cargo", "run", "--quiet", "--release",
       "--manifest-path", "engine/Cargo.toml", "--", "--menu", "$MDK2_GOG"], None),
@@ -414,8 +431,13 @@ ENGINE = [
       # `ziz_tur01.mod`'s `ANIM_SHOOT` has `ends` 3, so 0x4611b0 clamps it at
       # the last frame instead of wrapping, and a turret fires once per time
       # the script asks rather than once per loop for ever.
+      #
+      # and **2751 -> 17151 handler calls when a script's own thaw stopped
+      # being overruled**: `Level.Init` takes forty of level 10's enemies out
+      # of stasis for `cp < 7` and the registration-flag sweep put every one
+      # of them back, so the whole Kurt-side encounter slept through the run.
       "--run", "10", "1", "30", "--expect-shots", "39",
-      "--expect-events", "2751", "--expect-survived", "2751"], None),
+      "--expect-events", "17151", "--expect-survived", "17151"], None),
     # and a shot reaches the player. `--hunt` steers the driver at the
     # nearest thing with hitpoints instead of holding forwards, which is what
     # it takes to get inside a turret's range at all: level 10's zizzy
