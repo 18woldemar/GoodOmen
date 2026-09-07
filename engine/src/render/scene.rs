@@ -923,11 +923,21 @@ impl Scene {
                 continue;
             }
             // the authored cull list: a room draws the rooms it names, and
-            // an object in no room is always drawn
-            if let (Some(visible), Some(room)) = (visible, self.rooms[i]) {
-                if !visible.contains(&room) {
-                    continue;
+            // an object in no room is always drawn. **The GUI pass has no
+            // rooms**, so the same argument means the draws themselves there
+            // -- which play mode's inventory is being worn.
+            match (visible, self.rooms[i]) {
+                (Some(only), None) if gui => {
+                    if !only.contains(&i) {
+                        continue;
+                    }
                 }
+                (Some(visible), Some(room)) => {
+                    if !visible.contains(&room) {
+                        continue;
+                    }
+                }
+                _ => {}
             }
             gl.uniform_1_f32(opacity_at.as_ref(), self.opacity[i]);
             let Some(model) = self.models.get(name) else { continue };

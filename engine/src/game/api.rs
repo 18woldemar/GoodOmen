@@ -597,6 +597,9 @@ pub struct Boot {
     /// The one `mdkSetCurrentMenu` last named, which is the one that draws
     /// and the one the menu keys move.
     pub menu: Option<usize>,
+    /// `mdkDisableGui`, which is bit 3 of the GUI root's flags at
+    /// `omgob + 0xa6` and stops the whole HUD being drawn.
+    pub gui_off: bool,
     /// The picture `mdkShowLoadingScreen` asked for, which is
     /// `Level.loadscreen` -- `loadscreen1` through `loadscreen10`, one per
     /// level, and every level names one.
@@ -3660,6 +3663,26 @@ pub fn install(lua: &Lua, sources: BTreeMap<String, String>) -> Result<(), Error
             Ok(())
         })?,
     )?;
+    // **`mdkAdvanceCheckpoint(level, checkpoint)` and `mdkSaveGame(n)` both
+    // end in 0x452830, which is `xor eax, eax; ret`.** They answer 0 and do
+    // nothing, so they answer 0 here.
+    for name in ["mdkAdvanceCheckpoint", "mdkSaveGame"] {
+        globals.set(name, lua.create_function(|_, _: Variadic<Value>| Ok(0i64))?)?;
+    }
+    // **`mdkDisableGui` and `mdkEnableGui`** set and clear **bit 3** of the
+    // GUI root's flags at `omgob + 0xa6` -- 0x46e310 and 0x46e340 -- and
+    // 0x45efe0 masks that byte with `0x18` before it draws anything. So it
+    // is a whole-object hide of the HUD, which is what a cutscene wants.
+    for (name, off) in [("mdkDisableGui", true), ("mdkEnableGui", false)] {
+        globals.set(
+            name,
+            lua.create_function(move |lua, _: Variadic<Value>| {
+                boot_mut(lua)?.gui_off = off;
+                Ok(())
+            })?,
+        )?;
+    }
+
     // --- three names that are `return;` in this build ----------------------
     //
     // **`chSndLoadBank(name, section)` and `chSndLoadBankPre(name, 0)` load

@@ -2427,10 +2427,24 @@ fn hud_shot(
     boot: &goodomen::game::api::Boot,
     clock: f64,
 ) -> Option<(Shot, std::collections::BTreeSet<usize>)> {
+    if boot.gui_off {
+        return None;
+    }
     let root = boot.gui_gobs.get(&boot.mode)?;
     let shot = cutscene_camera_of(scene, world, boot, clock, true, Some(root))?;
     // the tree under it, because an inventory's slots and health are gobs of
     // their own parented to it
+    // `--gui-only NAME` draws one GUI object and nothing else. It is how
+    // the HUD was told apart: the gold crescent turned out to be
+    // `kurtinv_active` and `kurthealth` to draw nothing at all.
+    let only = std::env::args()
+        .position(|a| a == "--gui-only")
+        .and_then(|i| std::env::args().nth(i + 1));
+    if let Some(only) = only {
+        let who: std::collections::BTreeSet<_> =
+            world.iter().filter(|(_, g)| g.name == only).map(|(id, _)| id).collect();
+        return Some((shot, scene.drawn_by(&who)));
+    }
     let mut who: std::collections::BTreeSet<_> =
         world.iter().filter(|(_, g)| &g.name == root).map(|(id, _)| id).collect();
     loop {
@@ -3093,8 +3107,6 @@ fn play(
                 .unwrap_or(100.0)
         };
         let mut cull = true;
-        // `--hud` draws the GUI scene; see the note beside the draw
-        let hud = std::env::args().any(|a| a == "--hud");
         // **The sniper's field of view, in degrees.** 0x41ad00 is the whole
         // zoom: `fov += (fov * 0.4 + 1) * dt * step` with the step **-5 on
         // COM_SMZOOMIN and +5 on COM_SMZOOMOUT** (0x41a302 and 0x41a343), and
@@ -3894,7 +3906,7 @@ fn play(
                     let worn = hud_shot(&scene, &arena, &boot, started.elapsed().as_secs_f64());
                     drop(boot);
                     drop(arena);
-                    if let Some((shot, mine)) = worn.filter(|_| hud) {
+                    if let Some((shot, mine)) = worn {
                         let (lens, port) = shot.lens(w, h);
                         video.gl.viewport(port[0], port[1], port[2], port[3]);
                         video.gl.clear(glow::DEPTH_BUFFER_BIT);
